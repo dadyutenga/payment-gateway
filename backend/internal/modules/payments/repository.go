@@ -723,8 +723,11 @@ func (r *PostgresRepository) ReplayFailedWebhookDeliveriesForEvent(ctx context.C
 	return tag.RowsAffected(), nil
 }
 
-func (r *PostgresRepository) ClaimDueWebhookDeliveries(ctx context.Context, limit int) ([]PaymentWebhookDeliveryJob, error) {
-	if limit <= 0 {
+// ClaimDueWebhookDeliveries atomically claims due deliveries and reclaims
+// stale 'processing' rows whose lease expired (crashed worker, shutdown, or
+// cancelled context between claim and result-recording). Claimed rows get a
+// fresh 5-minute lease; RecordWebhookDeliveryAttempt clears it on completion.
+func (r *PostgresRepository) ClaimDueWebhookDeliveries(ctx context.Context, limit int) ([]PaymentWebhookDeliveryJob, error) {	if limit <= 0 {
 		limit = 25
 	}
 
@@ -732,8 +735,10 @@ func (r *PostgresRepository) ClaimDueWebhookDeliveries(ctx context.Context, limi
 		WITH due AS (
 			SELECT id
 			FROM app.payment_webhook_deliveries
-			WHERE status IN ('pending', 'retrying')
-			  AND next_attempt_at <= NOW()
+			WHERE (
+				(status IN ('pending', 'retrying') AND next_attempt_at <= NOW())
+				OR (status = 'processing' AND lease_expires_at IS NOT NULL AND lease_expires_at <= NOW())
+			)
 			ORDER BY next_attempt_at ASC, created_at ASC
 			LIMIT $1
 			FOR UPDATE SKIP LOCKED
@@ -742,7 +747,9 @@ func (r *PostgresRepository) ClaimDueWebhookDeliveries(ctx context.Context, limi
 			UPDATE app.payment_webhook_deliveries d
 			SET status = 'processing',
 			    attempt_count = d.attempt_count + 1,
-			    last_attempt_at = NOW()
+			    last_attempt_at = NOW(),
+			    claimed_at = NOW(),
+			    lease_expires_at = NOW() + INTERVAL '5 minutes'
 			FROM due
 			WHERE d.id = due.id
 			RETURNING d.id, d.event_id, d.endpoint_id, d.attempt_count
@@ -824,7 +831,8 @@ func (r *PostgresRepository) RecordWebhookDeliveryAttempt(ctx context.Context, i
 		    next_attempt_at = COALESCE($3, next_attempt_at),
 		    last_response_status = $4,
 		    last_error = $5,
-		    delivered_at = COALESCE($6, delivered_at)
+		    delivered_at = COALESCE($6, delivered_at),
+		    lease_expires_at = NULL
 		WHERE id = $1::uuid
 	`
 	if _, err := r.db.ExecEx(ctx, query, nil, input.DeliveryID, status, nextAttemptAt, input.ResponseStatus, valueOrNil(input.Error), deliveredAt); err != nil {

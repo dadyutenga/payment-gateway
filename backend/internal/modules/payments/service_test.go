@@ -138,6 +138,7 @@ type fakePaymentRepository struct {
 	replayedEventCount  int64
 	deliveryJobs        []PaymentWebhookDeliveryJob
 	recordedAttempts    []RecordWebhookDeliveryAttemptInput
+	recordCtxWasCancelled []bool
 	providerAccount     PaymentProviderAccount
 	providerAccountErr  error
 
@@ -331,8 +332,9 @@ func (r *fakePaymentRepository) ClaimDueWebhookDeliveries(_ context.Context, _ i
 	return r.deliveryJobs, nil
 }
 
-func (r *fakePaymentRepository) RecordWebhookDeliveryAttempt(_ context.Context, input RecordWebhookDeliveryAttemptInput) error {
+func (r *fakePaymentRepository) RecordWebhookDeliveryAttempt(ctx context.Context, input RecordWebhookDeliveryAttemptInput) error {
 	r.recordedAttempts = append(r.recordedAttempts, input)
+	r.recordCtxWasCancelled = append(r.recordCtxWasCancelled, ctx.Err() != nil)
 	return nil
 }
 
@@ -1329,5 +1331,58 @@ func TestProcessDueDeliveriesSignsAndPostsWebhook(t *testing.T) {
 	}
 	if receivedPayload.PaymentID != "pay_test" || receivedPayload.Status != provider.StatusPaid {
 		t.Fatalf("unexpected delivery payload: %+v", receivedPayload)
+	}
+}
+
+func TestProcessDueDeliveriesRecordsWithCancelledContext(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	repo := &fakePaymentRepository{
+		deliveryJobs: []PaymentWebhookDeliveryJob{
+			{
+				ID:           "del_cancelled",
+				EventID:      "evt_cancelled",
+				EndpointID:   "endpoint_cancelled",
+				EndpointURL:  server.URL,
+				AppID:        "app_test",
+				AttemptCount: 1,
+				EventType:    "payment.updated",
+				Provider:     "sonicpesa",
+				ReceivedAt:   time.Now().UTC(),
+				PaymentOrder: PaymentOrder{
+					ID:              "pay_cancelled",
+					Provider:        "sonicpesa",
+					ProviderOrderID: "sp_cancelled",
+					Status:          provider.StatusPaid,
+					Amount:          "5000.00",
+					Currency:        "TZS",
+				},
+			},
+		},
+	}
+	client := server.Client()
+	opts := testServiceOptions()
+	opts.HTTPClient = client
+	service := NewService(repo, nil, testCipher, opts, nil)
+
+	// Cancel the parent context before processing — as happens when the
+	// inline 25s attempt times out or the process shuts down mid-flight.
+	// The delivery attempt itself may fail, but recording its result must
+	// still be attempted with a live context so the row never gets stuck
+	// in 'processing'.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := service.ProcessDueDeliveries(ctx, 10); err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if len(repo.recordedAttempts) != 1 {
+		t.Fatalf("expected delivery result to be recorded despite cancelled context, got %+v", repo.recordedAttempts)
+	}
+	if len(repo.recordCtxWasCancelled) != 1 || repo.recordCtxWasCancelled[0] {
+		t.Fatal("expected recording context to be non-cancelled so the row leaves 'processing'")
 	}
 }

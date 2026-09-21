@@ -1022,6 +1022,7 @@ func (s *Service) ProcessDueDeliveries(ctx context.Context, limit int) (ProcessD
 	}
 
 	result := ProcessDeliveriesResult{Claimed: len(jobs)}
+	var recordErr error
 	for _, job := range jobs {
 		responseStatus, deliveryErr := s.deliverWebhook(ctx, job)
 		success := deliveryErr == nil && responseStatus >= 200 && responseStatus < 300
@@ -1045,8 +1046,16 @@ func (s *Service) ProcessDueDeliveries(ctx context.Context, limit int) (ProcessD
 			record.Error = deliveryErrorMessage(deliveryErr, responseStatus)
 		}
 
-		if err := s.repo.RecordWebhookDeliveryAttempt(ctx, record); err != nil {
-			return result, err
+		// Record with a non-cancelled context: if the caller's context was
+		// cancelled (inline 25s attempt timed out, or the process is shutting
+		// down), the delivery result must still be persisted — otherwise the
+		// claimed row would rely solely on lease expiry for recovery and, on
+		// older schemas without the lease, stay stuck in 'processing'
+		// forever. Keep going on record failure so one bad row never strands
+		// the remaining claimed jobs; the lease is the backstop for those.
+		if err := s.repo.RecordWebhookDeliveryAttempt(context.WithoutCancel(ctx), record); err != nil {
+			recordErr = err
+			s.log.Error("record payment webhook delivery attempt failed", "delivery_id", job.ID, "error", err)
 		}
 	}
 
@@ -1060,7 +1069,7 @@ func (s *Service) ProcessDueDeliveries(ctx context.Context, limit int) (ProcessD
 		)
 	}
 
-	return result, nil
+	return result, recordErr
 }
 
 func (s *Service) HandleProviderWebhook(ctx context.Context, providerName string, headers http.Header, rawBody []byte) (WebhookResult, error) {
