@@ -27,8 +27,12 @@ that's all you need.
 ## Optional: separate worker process
 
 `cmd/worker` runs the same background jobs standalone. It's safe to run
-alongside `cmd/api` (both use `FOR UPDATE SKIP LOCKED` claim-based
-locking, so they never double-process the same job) — useful if you want
+alongside `cmd/api` — webhook deliveries use `FOR UPDATE SKIP LOCKED`
+claim-based locking so they never double-process the same job, while payment
+and payout reconciliation are safe via per-order `SELECT ... FOR UPDATE`
+row locking in `ApplyWebhookEvent` plus partial unique indexes
+(`000029_ledger_idempotency`) that allow at most one `payment_credit` /
+`refund_debit` per order — useful if you want
 to scale the API and the background work independently, or deploy them
 on different schedules/instances.
 

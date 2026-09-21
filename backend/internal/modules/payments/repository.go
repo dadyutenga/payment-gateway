@@ -457,6 +457,16 @@ func (r *PostgresRepository) GetPaymentOrderByProviderOrderID(ctx context.Contex
 // paid via refresh/reconciliation (e.g. because the provider's webhook
 // never arrived) silently never credited the app's balance, which is why
 // apps could show 0.00 despite having real paid orders.
+//
+// Concurrency: the order row is locked with SELECT ... FOR UPDATE first and
+// the decision to post ledger entries is re-derived from the freshly locked
+// status — never from the caller's stale read. A webhook racing GetOrder's
+// auto-refresh, or racing reconciliation (including across cmd/api +
+// cmd/worker processes), serializes on the row lock; the loser sees the
+// already-applied status and skips the ledger insert. Partial unique indexes
+// on (payment_order_id) WHERE entry_type IN (...) are the second line of
+// defence: even if two transactions ever both attempt the insert, the second
+// gets ON CONFLICT DO NOTHING instead of a double credit.
 func (r *PostgresRepository) ApplyWebhookEvent(ctx context.Context, input ApplyWebhookEventInput) (PaymentOrder, error) {
 	tx, err := r.db.BeginEx(ctx, nil)
 	if err != nil {
@@ -467,6 +477,24 @@ func (r *PostgresRepository) ApplyWebhookEvent(ctx context.Context, input ApplyW
 			_ = tx.RollbackEx(ctx)
 		}
 	}()
+
+	// Lock the order first so concurrent webhook / refresh / reconciliation
+	// workers serialize here instead of both reading a stale status.
+	locked, err := scanPaymentOrder(tx.QueryRowEx(ctx, paymentOrderSelect+` WHERE id = $1::uuid FOR UPDATE`, nil, input.PaymentOrderID))
+	if err != nil {
+		return PaymentOrder{}, fmt.Errorf("lock payment order: %w", err)
+	}
+
+	// Re-check against the freshly locked status. input.FromStatus /
+	// input.PostLedger were computed from a read that may now be stale.
+	actualFrom := locked.Status
+	shouldPostLedger := input.PostLedger &&
+		actualFrom != provider.StatusPaid &&
+		input.ToStatus == provider.StatusPaid
+	shouldPostRefund := input.PostRefund &&
+		actualFrom == provider.StatusPaid &&
+		input.ToStatus == provider.StatusReversed
+	statusChanged := actualFrom != input.ToStatus
 
 	const updateOrder = `
 		UPDATE app.payment_orders
@@ -498,7 +526,7 @@ func (r *PostgresRepository) ApplyWebhookEvent(ctx context.Context, input ApplyW
 		return PaymentOrder{}, fmt.Errorf("update payment order from webhook: %w", err)
 	}
 
-	if input.FromStatus != input.ToStatus {
+	if statusChanged {
 		const insertHistory = `
 			INSERT INTO app.payment_status_history (
 				payment_order_id,
@@ -510,7 +538,7 @@ func (r *PostgresRepository) ApplyWebhookEvent(ctx context.Context, input ApplyW
 			)
 			VALUES ($1::uuid,$2,$3,$4,$5,$6::uuid)
 		`
-		if _, err = tx.ExecEx(ctx, insertHistory, nil, input.PaymentOrderID, valueOrNil(string(input.FromStatus)), string(input.ToStatus), valueOrNil(input.ProviderStatus), input.Source, valueOrNil(input.EventID)); err != nil {
+		if _, err = tx.ExecEx(ctx, insertHistory, nil, input.PaymentOrderID, valueOrNil(string(actualFrom)), string(input.ToStatus), valueOrNil(input.ProviderStatus), input.Source, valueOrNil(input.EventID)); err != nil {
 			return PaymentOrder{}, fmt.Errorf("insert payment status history: %w", err)
 		}
 	}
@@ -531,14 +559,17 @@ func (r *PostgresRepository) ApplyWebhookEvent(ctx context.Context, input ApplyW
 	// Post the settlement ledger entries in the same transaction as the
 	// status change, so an order can never be marked "paid" without the
 	// app's balance updating, or vice versa. Only fires once per order —
-	// the service layer only sets PostLedger on the first genuine
-	// transition into "paid" — so a duplicate/replayed webhook, or a
-	// refresh/reconciliation re-confirming an already-paid order, never
-	// double-credits.
-	if input.PostLedger {
+	// shouldPostLedger is re-derived from the locked row above, so a
+	// duplicate/replayed webhook, or a refresh/reconciliation re-confirming
+	// an already-paid order, never double-credits. The partial unique
+	// indexes from migration 000029 make the inserts idempotent even if two
+	// transactions ever both reach this point: the loser hits ON CONFLICT
+	// DO NOTHING instead of posting a second credit.
+	if shouldPostLedger {
 		const insertCredit = `
 			INSERT INTO app.payment_ledger_entries (app_id, payment_order_id, entry_type, direction, amount, currency, description)
 			VALUES ($1::uuid, $2::uuid, 'payment_credit', 'credit', $3::numeric, $4, $5)
+			ON CONFLICT DO NOTHING
 		`
 		if _, err = tx.ExecEx(ctx, insertCredit, nil, input.AppID, input.PaymentOrderID, input.GrossAmount, input.Currency, "Payment received"); err != nil {
 			return PaymentOrder{}, fmt.Errorf("insert payment credit ledger entry: %w", err)
@@ -548,6 +579,7 @@ func (r *PostgresRepository) ApplyWebhookEvent(ctx context.Context, input ApplyW
 			const insertFee = `
 				INSERT INTO app.payment_ledger_entries (app_id, payment_order_id, entry_type, direction, amount, currency, description)
 				VALUES ($1::uuid, $2::uuid, 'platform_fee_debit', 'debit', $3::numeric, $4, $5)
+				ON CONFLICT DO NOTHING
 			`
 			if _, err = tx.ExecEx(ctx, insertFee, nil, input.AppID, input.PaymentOrderID, input.PlatformFeeAmount, input.Currency, "Platform fee"); err != nil {
 				return PaymentOrder{}, fmt.Errorf("insert platform fee ledger entry: %w", err)
@@ -555,7 +587,7 @@ func (r *PostgresRepository) ApplyWebhookEvent(ctx context.Context, input ApplyW
 		}
 	}
 
-	if input.PostRefund {
+	if shouldPostRefund {
 		if err = postRefundEntries(ctx, tx, input.AppID, input.PaymentOrderID); err != nil {
 			return PaymentOrder{}, fmt.Errorf("post refund ledger entries: %w", err)
 		}
@@ -2285,6 +2317,7 @@ func postRefundEntries(ctx context.Context, tx executor, appID, orderID string) 
 	if _, err := tx.ExecEx(ctx, `
 		INSERT INTO app.payment_ledger_entries (app_id, payment_order_id, entry_type, direction, amount, currency, description)
 		VALUES ($1::uuid, $2::uuid, 'refund_debit', 'debit', $3::numeric, $4, 'Payment refunded/reversed')
+		ON CONFLICT DO NOTHING
 	`, nil, appID, orderID, creditAmount, currency); err != nil {
 		return fmt.Errorf("insert refund debit ledger entry: %w", err)
 	}
@@ -2302,6 +2335,7 @@ func postRefundEntries(ctx context.Context, tx executor, appID, orderID string) 
 		if _, err := tx.ExecEx(ctx, `
 			INSERT INTO app.payment_ledger_entries (app_id, payment_order_id, entry_type, direction, amount, currency, description)
 			VALUES ($1::uuid, $2::uuid, 'refund_fee_reversal_credit', 'credit', $3::numeric, $4, 'Platform fee reversed on refund')
+			ON CONFLICT DO NOTHING
 		`, nil, appID, orderID, feeAmount, currency); err != nil {
 			return fmt.Errorf("insert refund fee reversal ledger entry: %w", err)
 		}
