@@ -1,0 +1,166 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Manrope:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@500;600;700;800&family=Roboto:wght@300;400;500;700&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 220 20% 10%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 220 20% 10%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 220 20% 10%;
+
+    --primary: 1 76% 55%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 217 81% 31%;
+    --secondary-foreground: 0 0% 100%;
+
+    --muted: 220 14% 96%;
+    --muted-foreground: 220 10% 46%;
+
+    --accent: 45 100% 51%;
+    --accent-foreground: 220 20% 10%;
+
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 220 13% 91%;
+    --input: 220 13% 91%;
+    --ring: 1 76% 55%;
+
+    --radius: 0.5rem;
+
+    --sidebar-background: 0 0% 98%;
+    --sidebar-foreground: 240 5.3% 26.1%;
+    --sidebar-primary: 240 5.9% 10%;
+    --sidebar-primary-foreground: 0 0% 98%;
+    --sidebar-accent: 240 4.8% 95.9%;
+    --sidebar-accent-foreground: 240 5.9% 10%;
+    --sidebar-border: 220 13% 91%;
+    --sidebar-ring: 217.2 91.2% 59.8%;
+
+    /* Custom tokens */
+    --footer-bg: 217 81% 12%;
+    --footer-foreground: 220 14% 85%;
+    --section-alt: 220 14% 97%;
+  }
+
+  * {
+    scroll-behavior: smooth;
+  }
+
+  .dark {
+    --background: 220 20% 10%;
+    --foreground: 0 0% 98%;
+    --card: 220 20% 13%;
+    --card-foreground: 0 0% 98%;
+    --popover: 220 20% 13%;
+    --popover-foreground: 0 0% 98%;
+    --primary: 1 76% 55%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 217 81% 31%;
+    --secondary-foreground: 0 0% 100%;
+    --muted: 220 14% 18%;
+    --muted-foreground: 220 10% 60%;
+    --accent: 45 100% 51%;
+    --accent-foreground: 220 20% 10%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 220 14% 20%;
+    --input: 220 14% 20%;
+    --ring: 1 76% 55%;
+    --sidebar-background: 220 20% 10%;
+    --sidebar-foreground: 220 14% 85%;
+    --sidebar-primary: 1 76% 55%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 220 14% 18%;
+    --sidebar-accent-foreground: 220 14% 85%;
+    --sidebar-border: 220 14% 20%;
+    --sidebar-ring: 1 76% 55%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground font-body antialiased;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    @apply font-heading font-bold tracking-tight;
+  }
+}
+
+@layer components {
+  .section-container {
+    @apply max-w-7xl mx-auto px-4 sm:px-6 lg:px-8;
+  }
+
+  .section-padding {
+    @apply py-16 md:py-24;
+  }
+
+  .section-alt {
+    background-color: hsl(var(--section-alt));
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+  
+  .animate-magic-flip {
+    animation: magic-flip 6s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+    transform-origin: center center;
+    display: inline-block;
+    transform-style: preserve-3d;
+  }
+
+  /* Scrollable panels (e.g. the apps launcher grid) that should scroll
+     without showing a visible scrollbar track/thumb. */
+  .custom-scrollbar {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+  .custom-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+@keyframes magic-flip {
+  0%, 20% { 
+    transform: perspective(600px) rotateX(0deg) rotateY(0deg) rotateZ(0deg); 
+    color: #1967d2; 
+  }
+  30%, 45% { 
+    transform: perspective(600px) rotateX(360deg) rotateY(180deg) rotateZ(0deg); 
+    color: #ea4335; 
+  }
+  55%, 70% { 
+    transform: perspective(600px) rotateX(360deg) rotateY(360deg) rotateZ(180deg); 
+    color: #fbbc05; 
+  }
+  80%, 95% { 
+    transform: perspective(600px) rotateX(720deg) rotateY(360deg) rotateZ(360deg); 
+    color: #34a853; 
+  }
+  100% { 
+    transform: perspective(600px) rotateX(720deg) rotateY(360deg) rotateZ(360deg); 
+    color: #1967d2; 
+  }
+}

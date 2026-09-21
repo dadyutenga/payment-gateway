@@ -1,0 +1,19 @@
+# env files (never commit real secrets)
+.env
+.env.local
+*.env
+!*.env.example
+
+# backend
+backend/azsubay-payments-gateway
+backend/*.exe
+backend/bin/
+
+# frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# OS / editor
+.DS_Store
+*.swp
