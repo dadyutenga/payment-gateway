@@ -24,6 +24,7 @@ import {
   markWithdrawalPaid,
   rejectWithdrawal,
   retryWithdrawalPayout,
+  AdminApiError,
   type PaymentWithdrawal,
   type WithdrawalStatus,
 } from "@/lib/adminApi";
@@ -95,6 +96,14 @@ const AdminPaymentWithdrawals = () => {
   const [destination, setDestination] = useState<DestinationForm>(emptyDestination);
   const [creating, setCreating] = useState(false);
   const [actingId, setActingId] = useState<string | null>(null);
+
+  // Dispatch-payout confirm modal. Automated payouts stay off until the
+  // provider's disbursement contract is verified, so the backend answers
+  // retry-payout with payouts_disabled — the modal then switches to the
+  // manual-payout guidance instead of a bare error toast.
+  const [payoutTarget, setPayoutTarget] = useState<PaymentWithdrawal | null>(null);
+  const [payoutBusy, setPayoutBusy] = useState(false);
+  const [payoutDisabled, setPayoutDisabled] = useState(false);
 
   const appsQuery = useQuery({
     queryKey: ["admin", "payments-apps"],
@@ -168,6 +177,54 @@ const AdminPaymentWithdrawals = () => {
       toast.error(err instanceof Error ? err.message : "Unable to update withdrawal.");
     } finally {
       setActingId(null);
+    }
+  };
+
+  const openPayoutModal = (withdrawal: PaymentWithdrawal) => {
+    setPayoutTarget(withdrawal);
+    setPayoutDisabled(false);
+  };
+
+  const closePayoutModal = () => {
+    if (payoutBusy) return;
+    setPayoutTarget(null);
+    setPayoutDisabled(false);
+  };
+
+  const confirmPayoutDispatch = async () => {
+    if (!payoutTarget) return;
+    setPayoutBusy(true);
+    try {
+      await retryWithdrawalPayout(payoutTarget.id);
+      toast.success("Payout dispatched.");
+      setPayoutTarget(null);
+      setPayoutDisabled(false);
+      reload();
+    } catch (err) {
+      if (err instanceof AdminApiError && err.code === "payouts_disabled") {
+        // Stay open and show the manual-payout steps below.
+        setPayoutDisabled(true);
+      } else {
+        toast.error(err instanceof Error ? err.message : "Unable to dispatch payout.");
+      }
+    } finally {
+      setPayoutBusy(false);
+    }
+  };
+
+  const markPayoutTargetPaid = async () => {
+    if (!payoutTarget) return;
+    setPayoutBusy(true);
+    try {
+      await markWithdrawalPaid(payoutTarget.id);
+      toast.success("Marked as paid.");
+      setPayoutTarget(null);
+      setPayoutDisabled(false);
+      reload();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Unable to mark as paid.");
+    } finally {
+      setPayoutBusy(false);
     }
   };
 
@@ -336,7 +393,7 @@ const AdminPaymentWithdrawals = () => {
                             size="sm"
                             variant="outline"
                             disabled={busy}
-                            onClick={() => runAction(withdrawal.id, () => retryWithdrawalPayout(withdrawal.id), "Payout dispatched.")}
+                            onClick={() => openPayoutModal(withdrawal)}
                           >
                             <RefreshCw className="h-3.5 w-3.5 mr-1" /> {withdrawal.failure_reason ? "Retry payout" : "Dispatch payout"}
                           </Button>
@@ -364,6 +421,60 @@ const AdminPaymentWithdrawals = () => {
             );
           })}
       </div>
+
+      <Dialog open={!!payoutTarget} onOpenChange={(open) => { if (!open) closePayoutModal(); }}>
+        <DialogContent className="max-h-[85vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>
+              {payoutTarget?.failure_reason ? "Retry payout" : "Dispatch payout"}
+            </DialogTitle>
+          </DialogHeader>
+          {payoutTarget && (
+            <div className="space-y-4">
+              <div className="rounded-md bg-slate-50 p-3 text-sm">
+                <p className="font-semibold text-slate-900">{appName(payoutTarget.app_id)}</p>
+                <p className="mt-1 text-lg font-extrabold text-slate-900">
+                  {formatMoney(payoutTarget.amount, payoutTarget.currency)}
+                </p>
+                <p className="mt-1 text-xs text-slate-500">{destinationSummary(payoutTarget)}</p>
+              </div>
+              {!payoutDisabled ? (
+                <p className="text-sm text-slate-600">
+                  This sends the money through the configured payout provider. Automated
+                  payouts require a verified provider disbursement contract — if it
+                  isn&apos;t enabled, you&apos;ll get manual-payout steps instead.
+                </p>
+              ) : (
+                <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                  <p className="font-semibold">Automated payouts are disabled.</p>
+                  <ol className="mt-2 list-decimal space-y-1 pl-5">
+                    <li>Send {formatMoney(payoutTarget.amount, payoutTarget.currency)} to {destinationSummary(payoutTarget)} yourself (provider dashboard / bank).</li>
+                    <li>Come back here and use <span className="font-semibold">Mark paid</span> to record it.</li>
+                  </ol>
+                  <p className="mt-2 text-xs">The withdrawal stays approved until then — nothing was sent automatically.</p>
+                </div>
+              )}
+              <DialogFooter>
+                {payoutDisabled ? (
+                  <>
+                    <Button variant="outline" onClick={closePayoutModal} disabled={payoutBusy}>Close</Button>
+                    <Button onClick={markPayoutTargetPaid} disabled={payoutBusy}>
+                      <Send className="h-3.5 w-3.5 mr-1" /> {payoutBusy ? "Marking..." : "Mark paid"}
+                    </Button>
+                  </>
+                ) : (
+                  <>
+                    <Button variant="outline" onClick={closePayoutModal} disabled={payoutBusy}>Cancel</Button>
+                    <Button onClick={confirmPayoutDispatch} disabled={payoutBusy}>
+                      <RefreshCw className="h-3.5 w-3.5 mr-1" /> {payoutBusy ? "Dispatching..." : "Confirm dispatch"}
+                    </Button>
+                  </>
+                )}
+              </DialogFooter>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 };

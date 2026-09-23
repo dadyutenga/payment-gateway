@@ -195,7 +195,14 @@ const AdminPaymentAppDetail = () => {
                   <TableCell>{order.provider}</TableCell>
                   <TableCell>{order.amount} {order.currency}</TableCell>
                   <TableCell>{order.buyer_name || order.buyer_phone || "—"}</TableCell>
-                  <TableCell className="font-mono text-xs">{order.external_reference || order.provider_order_id || "—"}</TableCell>
+                  <TableCell className="font-mono text-xs">
+                    {order.external_reference || order.provider_order_id || "—"}
+                    {!order.provider_order_id && (order.status === "pending" || order.status === "processing") && (
+                      <span className="mt-1 block font-sans text-[11px] text-amber-600">
+                        Awaiting provider registration — created locally, not yet confirmed by the provider.
+                      </span>
+                    )}
+                  </TableCell>
                   <TableCell><Badge variant="secondary">{order.status}</Badge></TableCell>
                   <TableCell>{formatDate(order.created_at)}</TableCell>
                 </TableRow>
