@@ -94,9 +94,10 @@ func (v *Verifier) VerifyBearerToken(_ context.Context, token string) (Claims, e
 }
 
 type Service struct {
-	db              *pgx.ConnPool
-	verifier        *Verifier
-	bootstrapAdmins map[string]bool
+	db                  *pgx.ConnPool
+	verifier            *Verifier
+	bootstrapAdmins     map[string]bool
+	allowPublicRegister bool
 }
 
 func NewService(db *pgx.ConnPool, verifier *Verifier, adminEmails []string) *Service {
@@ -107,10 +108,25 @@ func NewService(db *pgx.ConnPool, verifier *Verifier, adminEmails []string) *Ser
 	return &Service{db: db, verifier: verifier, bootstrapAdmins: admins}
 }
 
+// SetAllowPublicRegister opens POST /api/v1/auth/register to anyone.
+// Default closed: registration is allowed only for the very first account
+// (empty users table) so a fresh deployment can bootstrap its admin, then
+// closed. Additional accounts must be created by an operator while closed.
+func (s *Service) SetAllowPublicRegister(allow bool) {
+	s.allowPublicRegister = allow
+}
+
+// ErrPublicRegistrationDisabled is returned when self-registration is
+// attempted after the bootstrap account already exists.
+var ErrPublicRegistrationDisabled = errors.New("public registration is disabled")
+
 func (s *Service) Register(ctx context.Context, email, password string) (User, string, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 	if !strings.Contains(email, "@") || len(password) < 12 {
 		return User{}, "", errors.New("use a valid email and a password with at least 12 characters")
+	}
+	if !s.allowPublicRegister && !s.isFirstUser(ctx) {
+		return User{}, "", ErrPublicRegistrationDisabled
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
@@ -139,6 +155,33 @@ func (s *Service) Login(ctx context.Context, email, password string) (User, stri
 	return u, token, err
 }
 
+// isFirstUser reports whether no accounts exist yet (fresh deployment).
+// Registration failures here fail closed (treated as "not first").
+func (s *Service) isFirstUser(ctx context.Context) bool {
+	var count int64
+	if err := s.db.QueryRowEx(ctx, `SELECT COUNT(*) FROM app.users`, nil).Scan(&count); err != nil {
+		return false
+	}
+	return count == 0
+}
+
+// IsAdmin reads the current admin flag from the database. Admin-gated
+// requests must call this per request instead of trusting the is_admin
+// claim baked into the token — otherwise revoking admin has no effect
+// until the token (up to AUTH_TOKEN_TTL) expires. Unknown/deleted users
+// are not admins.
+func (s *Service) IsAdmin(ctx context.Context, userID string) (bool, error) {
+	var isAdmin bool
+	err := s.db.QueryRowEx(ctx, `SELECT is_admin FROM app.users WHERE id = $1::uuid`, nil, userID).Scan(&isAdmin)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return isAdmin, nil
+}
+
 func (s *Service) HandleRegister(w http.ResponseWriter, r *http.Request) {
 	s.handleCredentials(w, r, s.Register)
 }
@@ -157,6 +200,10 @@ func (s *Service) handleCredentials(w http.ResponseWriter, r *http.Request, acti
 	}
 	u, token, err := action(r.Context(), in.Email, in.Password)
 	if err != nil {
+		if errors.Is(err, ErrPublicRegistrationDisabled) {
+			httputil.Error(w, http.StatusForbidden, "registration_disabled", "Public registration is disabled. Ask an administrator for access.", nil)
+			return
+		}
 		// Only pass through known-safe validation messages — database and
 		// crypto errors must never reach clients.
 		switch err.Error() {

@@ -55,6 +55,13 @@ type DatabaseConfig struct {
 type AuthConfig struct {
 	JWTSecret string
 	TokenTTL  time.Duration
+	// AllowPublicRegister keeps POST /api/v1/auth/register open to anyone.
+	// Default false: only the very first account (empty users table) may
+	// self-register as a bootstrap; afterwards registration is closed and
+	// additional accounts must be created by an operator. Leaving this open
+	// with ADMIN_EMAILS copied from an example lets anyone claim admin by
+	// registering a listed address.
+	AllowPublicRegister bool
 }
 
 // AdminConfig is deliberately simple: a fixed allowlist of emails, set via
@@ -130,7 +137,7 @@ func Load() (Config, error) {
 			MaxConnIdleTime: mustDuration("DATABASE_MAX_CONN_IDLE_TIME", "5m"),
 			HealthTimeout:   mustDuration("DATABASE_HEALTH_TIMEOUT", "3s"),
 		},
-		Auth: AuthConfig{JWTSecret: strings.TrimSpace(os.Getenv("AUTH_JWT_SECRET")), TokenTTL: mustDuration("AUTH_TOKEN_TTL", "24h")},
+		Auth: AuthConfig{JWTSecret: strings.TrimSpace(os.Getenv("AUTH_JWT_SECRET")), TokenTTL: mustDuration("AUTH_TOKEN_TTL", "24h"), AllowPublicRegister: mustBool("AUTH_ALLOW_PUBLIC_REGISTER", false)},
 		Admin: AdminConfig{
 			Emails: splitCSVLower(os.Getenv("ADMIN_EMAILS")),
 		},

@@ -60,13 +60,24 @@ required ones to get running at all:
 | `DATABASE_URL` | Postgres connection string |
 | `AUTH_JWT_SECRET` | signs and verifies local user sessions |
 | `APP_ENCRYPTION_KEY` | encrypts provider credentials at rest (`openssl rand -base64 32`) |
-| `ADMIN_EMAILS` | comma-separated allowlist for the admin panel |
+| `ADMIN_EMAILS` | comma-separated bootstrap admin allowlist (replace example addresses!) |
+| `AUTH_ALLOW_PUBLIC_REGISTER` | `false` (default): only the first account may self-register, then signup closes |
 
 ## Admin access
 
 User accounts, password hashes, and roles live in `app.users`. Email
-addresses in `ADMIN_EMAILS` receive the admin role on registration. Add
-your first administrator there before creating the account.
+addresses in `ADMIN_EMAILS` receive the admin role on registration — put
+your first administrator there before creating the account, and never
+deploy with the example addresses still listed (anyone registering a
+listed address would become admin).
+
+Self-registration is closed by default: only the very first account (empty
+users table) may self-register to bootstrap the deployment; afterwards
+`POST /api/v1/auth/register` returns `403 registration_disabled` unless
+`AUTH_ALLOW_PUBLIC_REGISTER=true`. Admin rights are re-read from
+`app.users` on every request, so revoking `is_admin` takes effect
+immediately instead of lingering in the token until `AUTH_TOKEN_TTL`
+expires.
 
 ## Adding a payment provider
 

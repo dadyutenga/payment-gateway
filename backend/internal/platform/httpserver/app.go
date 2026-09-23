@@ -50,6 +50,7 @@ func New(ctx context.Context) (*App, error) {
 
 	authVerifier := auth.NewVerifier(cfg.Auth, logger)
 	authService := auth.NewService(db, authVerifier, cfg.Admin.Emails)
+	authService.SetAllowPublicRegister(cfg.Auth.AllowPublicRegister)
 
 	cipher, err := azcrypto.New(cfg.Security.EncryptionKey)
 	if err != nil {
@@ -84,10 +85,12 @@ func New(ctx context.Context) (*App, error) {
 	paymentHandler := payments.NewHandler(paymentService, cfg.Payments.WebhookMaxBodyBytes)
 	paymentHandler.SetLogger(logger)
 
-	// Admin privileges are stored in app.users. ADMIN_EMAILS only bootstraps
-	// the first administrators as they register.
-	adminCheck := func(_ context.Context, claims auth.Claims) (bool, error) {
-		return claims.IsAdmin, nil
+	// Admin privileges are stored in app.users and read from the database on
+	// every request — never trusted from the token claim. ADMIN_EMAILS only
+	// bootstraps the first administrators as they register, and revoking
+	// is_admin takes effect immediately (no waiting for token expiry).
+	adminCheck := func(ctx context.Context, claims auth.Claims) (bool, error) {
+		return authService.IsAdmin(ctx, claims.Subject)
 	}
 
 	mux := http.NewServeMux()
