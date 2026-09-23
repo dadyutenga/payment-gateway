@@ -88,6 +88,17 @@ func Timeout(timeout time.Duration) func(http.Handler) http.Handler {
 	}
 }
 
+// MaxBytes caps request body size globally (HTTP_MAX_BODY_BYTES).
+// Per-handler MaxBytesReader limits (e.g. webhooks) still apply inside.
+func MaxBytes(n int64) func(http.Handler) http.Handler {
+	if n <= 0 {
+		return func(next http.Handler) http.Handler { return next }
+	}
+	return func(next http.Handler) http.Handler {
+		return http.MaxBytesHandler(next, n)
+	}
+}
+
 func SecurityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")

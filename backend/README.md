@@ -77,9 +77,10 @@ is a complete reference implementation to copy from.
 
 ## API surface
 
-- `POST /api/v1/orders` — create a payment order (public, app-API-key auth)
-- `GET /api/v1/orders/{id}` — order status (public)
-- `POST /api/v1/webhooks/{provider}` — inbound provider webhooks (public)
+- `POST /api/v1/payments/orders` — create a payment order (public, app-API-key auth)
+- `GET /api/v1/payments/orders/{paymentID}` — order status (public, auto-refreshes stale orders)
+- `POST /api/v1/payments/orders/{paymentID}/refresh` — force a live provider status check (public, app-API-key auth)
+- `POST /api/v1/payments/webhooks/{provider}` — inbound provider webhooks (public)
 - `/api/v1/admin/payments/...` — apps, providers, orders, events,
   deliveries, withdrawals, metrics (admin-auth)
 - `/api/v1/merchant/apps/...` — merchant-facing views for app members

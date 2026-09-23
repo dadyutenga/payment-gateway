@@ -28,6 +28,7 @@ type Repository interface {
 	RevokePaymentAPIKeys(ctx context.Context, appID string) error
 	ListPaymentApps(ctx context.Context, limit, offset int) (PaymentAppListResult, error)
 	CreatePaymentOrder(ctx context.Context, input CreatePaymentOrderRepositoryInput) (PaymentOrder, error)
+	UpdatePaymentOrderProviderDetails(ctx context.Context, id, providerOrderID, providerTransactionID string, status provider.Status, providerStatus string, metadata map[string]any) (PaymentOrder, error)
 	GetPaymentOrderByIDForApp(ctx context.Context, appID, paymentOrderID string) (PaymentOrder, error)
 	GetPaymentOrderByAppReference(ctx context.Context, appID, externalReference string) (PaymentOrder, error)
 	CreatePaymentEvent(ctx context.Context, input PaymentEventInput) (StoredPaymentEvent, error)
@@ -65,6 +66,7 @@ type Repository interface {
 	MarkWithdrawalPaid(ctx context.Context, id string) (PaymentWithdrawal, error)
 	MarkWithdrawalFailed(ctx context.Context, id, notes string) (PaymentWithdrawal, error)
 	DispatchWithdrawal(ctx context.Context, id, provider, providerPayoutID, status, providerStatus string) (PaymentWithdrawal, error)
+	ClaimWithdrawalForPayout(ctx context.Context, id, provider string) (PaymentWithdrawal, error)
 	RecordPayoutFailure(ctx context.Context, id, provider, reason string) (PaymentWithdrawal, error)
 	GetWithdrawalByProviderPayoutID(ctx context.Context, provider, providerPayoutID string) (PaymentWithdrawal, error)
 	ListPayoutReconciliationCandidates(ctx context.Context, staleBefore time.Time, limit int) ([]PaymentWithdrawal, error)
@@ -330,6 +332,55 @@ func (r *PostgresRepository) CreatePaymentOrder(ctx context.Context, input Creat
 	return order, nil
 }
 
+// UpdatePaymentOrderProviderDetails attaches the provider-side order ids
+// (and fresh status) to a pending local row created before the provider
+// call. Only pending rows without a provider order id can be adopted, so a
+// retry racing the first attempt never overwrites an answered row.
+func (r *PostgresRepository) UpdatePaymentOrderProviderDetails(ctx context.Context, id, providerOrderID, providerTransactionID string, status provider.Status, providerStatus string, metadata map[string]any) (PaymentOrder, error) {
+	metadataJSON, err := marshalMetadata(metadata)
+	if err != nil {
+		return PaymentOrder{}, err
+	}
+
+	const query = `
+		UPDATE app.payment_orders
+		SET provider_order_id = $2,
+		    provider_transaction_id = COALESCE(NULLIF($3, ''), provider_transaction_id),
+		    status = $4,
+		    provider_status = $5,
+		    metadata = $6::jsonb,
+		    updated_at = NOW()
+		WHERE id = $1::uuid
+		  AND status = 'pending'
+		  AND (provider_order_id IS NULL OR provider_order_id = '')
+		RETURNING
+			id::text,
+			COALESCE(app_id::text, ''),
+			provider,
+			COALESCE(provider_order_id, ''),
+			COALESCE(provider_transaction_id, ''),
+			COALESCE(external_reference, ''),
+			amount::text,
+			currency,
+			COALESCE(buyer_name, ''),
+			COALESCE(buyer_email, ''),
+			COALESCE(buyer_phone, ''),
+			status,
+			COALESCE(provider_status, ''),
+			metadata::text,
+			created_at,
+			updated_at
+	`
+	order, err := scanPaymentOrder(r.db.QueryRowEx(ctx, query, nil, id, valueOrNil(providerOrderID), providerTransactionID, string(status), valueOrNil(providerStatus), string(metadataJSON)))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PaymentOrder{}, ErrPaymentOrderNotFound
+	}
+	if err != nil {
+		return PaymentOrder{}, fmt.Errorf("update payment order provider details: %w", err)
+	}
+	return order, nil
+}
+
 // GetPaymentOrderByID is the admin-facing counterpart to
 // GetPaymentOrderByIDForApp — no app_id filter, used by admin-only flows
 // (e.g. RefundOrder) that aren't scoped to a single calling app.
@@ -575,7 +626,7 @@ func (r *PostgresRepository) ApplyWebhookEvent(ctx context.Context, input ApplyW
 			return PaymentOrder{}, fmt.Errorf("insert payment credit ledger entry: %w", err)
 		}
 
-		if input.PlatformFeeAmount != "" && input.PlatformFeeAmount != "0" {
+		if !isZeroDecimal(input.PlatformFeeAmount) {
 			const insertFee = `
 				INSERT INTO app.payment_ledger_entries (app_id, payment_order_id, entry_type, direction, amount, currency, description)
 				VALUES ($1::uuid, $2::uuid, 'platform_fee_debit', 'debit', $3::numeric, $4, $5)
@@ -727,7 +778,8 @@ func (r *PostgresRepository) ReplayFailedWebhookDeliveriesForEvent(ctx context.C
 // stale 'processing' rows whose lease expired (crashed worker, shutdown, or
 // cancelled context between claim and result-recording). Claimed rows get a
 // fresh 5-minute lease; RecordWebhookDeliveryAttempt clears it on completion.
-func (r *PostgresRepository) ClaimDueWebhookDeliveries(ctx context.Context, limit int) ([]PaymentWebhookDeliveryJob, error) {	if limit <= 0 {
+func (r *PostgresRepository) ClaimDueWebhookDeliveries(ctx context.Context, limit int) ([]PaymentWebhookDeliveryJob, error) {
+	if limit <= 0 {
 		limit = 25
 	}
 
@@ -1217,6 +1269,25 @@ func valueOrNil(value string) any {
 		return nil
 	}
 	return value
+}
+
+// isUniqueViolation reports Postgres unique-constraint violations (23505).
+func isUniqueViolation(err error) bool {
+	var pgErr pgx.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == "23505"
+	}
+	return false
+}
+
+// isZeroDecimal reports whether a numeric string is zero in any
+// formatting ("", "0", "0.00", "0.000"). Used to skip no-op ledger entries.
+func isZeroDecimal(value string) bool {
+	if strings.TrimSpace(value) == "" {
+		return true
+	}
+	rat, ok := new(big.Rat).SetString(strings.TrimSpace(value))
+	return ok && rat.Sign() == 0
 }
 
 const paymentOrderSelect = `
@@ -1730,6 +1801,17 @@ func (r *PostgresRepository) DeletePaymentApp(ctx context.Context, appID string)
 // GetAppBalance derives every figure from the ledger (never a stored
 // column) plus a separate read-only total of still-unsettled orders.
 func (r *PostgresRepository) GetAppBalance(ctx context.Context, appID string) (AppBalance, error) {
+	// Balances are single-currency: every sum below is scoped to the app's
+	// latest ledger currency. Summing across currencies (e.g. TZS + USD
+	// amounts added together) produced a meaningless number, so resolve the
+	// currency first and filter everything — including pending orders — by it.
+	var currency string
+	if err := r.db.QueryRowEx(ctx, `
+		SELECT COALESCE((SELECT currency FROM app.payment_ledger_entries WHERE app_id = $1::uuid ORDER BY created_at DESC LIMIT 1), 'TZS')
+	`, nil, appID).Scan(&currency); err != nil {
+		return AppBalance{}, fmt.Errorf("resolve app balance currency: %w", err)
+	}
+
 	const ledgerQuery = `
 		SELECT
 			COALESCE(SUM(CASE WHEN direction = 'credit' THEN amount ELSE -amount END), 0)::text,
@@ -1737,17 +1819,17 @@ func (r *PostgresRepository) GetAppBalance(ctx context.Context, appID string) (A
 			COALESCE(SUM(CASE WHEN entry_type = 'platform_fee_debit' THEN amount ELSE 0 END), 0)::text,
 			COALESCE(SUM(CASE WHEN entry_type = 'withdrawal_debit' THEN amount
 			              WHEN entry_type = 'withdrawal_reversal_credit' THEN -amount ELSE 0 END), 0)::text,
-			COALESCE((SELECT currency FROM app.payment_ledger_entries WHERE app_id = $1::uuid ORDER BY created_at DESC LIMIT 1), 'TZS'),
-			COALESCE(SUM(CASE WHEN created_at <= $2 THEN (CASE WHEN direction = 'credit' THEN amount ELSE -amount END) ELSE 0 END), 0)::text
+			COALESCE(SUM(CASE WHEN created_at <= $3 THEN (CASE WHEN direction = 'credit' THEN amount ELSE -amount END) ELSE 0 END), 0)::text
 		FROM app.payment_ledger_entries
-		WHERE app_id = $1::uuid
+		WHERE app_id = $1::uuid AND currency = $2
 	`
 
 	var balance AppBalance
 	balance.AppID = appID
+	balance.Currency = currency
 	sevenDaysAgo := time.Now().UTC().AddDate(0, 0, -7)
-	if err := r.db.QueryRowEx(ctx, ledgerQuery, nil, appID, sevenDaysAgo).Scan(
-		&balance.AvailableBalance, &balance.TotalRevenue, &balance.TotalPlatformFees, &balance.TotalWithdrawn, &balance.Currency,
+	if err := r.db.QueryRowEx(ctx, ledgerQuery, nil, appID, currency, sevenDaysAgo).Scan(
+		&balance.AvailableBalance, &balance.TotalRevenue, &balance.TotalPlatformFees, &balance.TotalWithdrawn,
 		&balance.AvailableBalanceSevenDaysAgo,
 	); err != nil {
 		return AppBalance{}, fmt.Errorf("compute app balance: %w", err)
@@ -1756,9 +1838,9 @@ func (r *PostgresRepository) GetAppBalance(ctx context.Context, appID string) (A
 	const pendingQuery = `
 		SELECT COALESCE(SUM(amount), 0)::text
 		FROM app.payment_orders
-		WHERE app_id = $1::uuid AND status IN ('pending', 'processing')
+		WHERE app_id = $1::uuid AND currency = $2 AND status IN ('pending', 'processing')
 	`
-	if err := r.db.QueryRowEx(ctx, pendingQuery, nil, appID).Scan(&balance.PendingOrderTotal); err != nil {
+	if err := r.db.QueryRowEx(ctx, pendingQuery, nil, appID, currency).Scan(&balance.PendingOrderTotal); err != nil {
 		return AppBalance{}, fmt.Errorf("compute pending order total: %w", err)
 	}
 
@@ -1938,8 +2020,8 @@ func (r *PostgresRepository) ApproveWithdrawal(ctx context.Context, id, approved
 	var available string
 	if err = tx.QueryRowEx(ctx, `
 		SELECT COALESCE(SUM(CASE WHEN direction = 'credit' THEN amount ELSE -amount END), 0)::text
-		FROM app.payment_ledger_entries WHERE app_id = $1::uuid
-	`, nil, withdrawal.AppID).Scan(&available); err != nil {
+		FROM app.payment_ledger_entries WHERE app_id = $1::uuid AND currency = $2
+	`, nil, withdrawal.AppID, withdrawal.Currency).Scan(&available); err != nil {
 		return PaymentWithdrawal{}, fmt.Errorf("compute balance for withdrawal approval: %w", err)
 	}
 
@@ -2065,6 +2147,31 @@ func (r *PostgresRepository) MarkWithdrawalFailed(ctx context.Context, id, notes
 	return withdrawal, nil
 }
 
+// ClaimWithdrawalForPayout atomically transitions a withdrawal from
+// approved to processing BEFORE any provider call. Concurrent attempts
+// (auto-dispatch plus an admin retry) serialize on this row update — the
+// loser gets ErrInvalidWithdrawalTransition without ever reaching the
+// provider, so money can never be sent twice.
+func (r *PostgresRepository) ClaimWithdrawalForPayout(ctx context.Context, id, provider string) (PaymentWithdrawal, error) {
+	q := fmt.Sprintf(`
+		UPDATE app.payment_withdrawals
+		SET provider = $2, status = 'processing', dispatched_at = NOW(), updated_at = NOW()
+		WHERE id::text = $1 AND status = 'approved' AND provider_payout_id IS NULL
+		RETURNING %s
+	`, withdrawalColumns)
+	w, err := scanWithdrawal(r.db.QueryRowEx(ctx, q, nil, id, provider))
+	if errors.Is(err, pgx.ErrNoRows) {
+		if _, getErr := r.GetWithdrawalByID(ctx, id); getErr == nil {
+			return PaymentWithdrawal{}, ErrInvalidWithdrawalTransition
+		}
+		return PaymentWithdrawal{}, ErrWithdrawalNotFound
+	}
+	if err != nil {
+		return PaymentWithdrawal{}, fmt.Errorf("claim withdrawal for payout: %w", err)
+	}
+	return w, nil
+}
+
 // DispatchWithdrawal records that a withdrawal has been sent to a payout
 // provider. The "AND provider_payout_id IS NULL" guard (alongside the
 // unique index on (provider, provider_payout_id) from migration 000027) is
@@ -2075,7 +2182,7 @@ func (r *PostgresRepository) DispatchWithdrawal(ctx context.Context, id, provide
 	q := fmt.Sprintf(`
 		UPDATE app.payment_withdrawals
 		SET provider = $2, provider_payout_id = $3, status = $4, provider_status = $5, dispatched_at = NOW(), updated_at = NOW()
-		WHERE id::text = $1 AND status = 'approved' AND provider_payout_id IS NULL
+		WHERE id::text = $1 AND status IN ('approved', 'processing') AND provider_payout_id IS NULL
 		RETURNING %s
 	`, withdrawalColumns)
 	w, err := scanWithdrawal(r.db.QueryRowEx(ctx, q, nil, id, provider, providerPayoutID, status, providerStatus))
@@ -2093,14 +2200,15 @@ func (r *PostgresRepository) DispatchWithdrawal(ctx context.Context, id, provide
 
 // RecordPayoutFailure records that a Disburse call itself failed (network
 // error, provider rejected the request before ever creating a payout) —
-// no provider_payout_id exists to dispatch, so status stays 'approved' and
-// only failure_reason is set. This is what lets AdminPaymentWithdrawals
-// show a "Retry payout" action instead of silently losing the error.
+// no provider_payout_id exists to dispatch, so the claim is released back
+// to 'approved' and only failure_reason is set. This is what lets
+// AdminPaymentWithdrawals show a "Retry payout" action instead of silently
+// losing the error.
 func (r *PostgresRepository) RecordPayoutFailure(ctx context.Context, id, provider, reason string) (PaymentWithdrawal, error) {
 	q := fmt.Sprintf(`
 		UPDATE app.payment_withdrawals
-		SET provider = $2, failure_reason = $3, updated_at = NOW()
-		WHERE id::text = $1 AND status = 'approved'
+		SET provider = $2, failure_reason = $3, status = 'approved', updated_at = NOW()
+		WHERE id::text = $1 AND status IN ('approved', 'processing')
 		RETURNING %s
 	`, withdrawalColumns)
 	w, err := scanWithdrawal(r.db.QueryRowEx(ctx, q, nil, id, provider, reason))
@@ -2339,7 +2447,7 @@ func postRefundEntries(ctx context.Context, tx executor, appID, orderID string) 
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("load original platform fee: %w", err)
 	}
-	if err == nil && feeAmount != "" && feeAmount != "0.00" {
+	if err == nil && !isZeroDecimal(feeAmount) {
 		if _, err := tx.ExecEx(ctx, `
 			INSERT INTO app.payment_ledger_entries (app_id, payment_order_id, entry_type, direction, amount, currency, description)
 			VALUES ($1::uuid, $2::uuid, 'refund_fee_reversal_credit', 'credit', $3::numeric, $4, 'Platform fee reversed on refund')

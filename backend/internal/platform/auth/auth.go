@@ -157,7 +157,16 @@ func (s *Service) handleCredentials(w http.ResponseWriter, r *http.Request, acti
 	}
 	u, token, err := action(r.Context(), in.Email, in.Password)
 	if err != nil {
-		httputil.Error(w, http.StatusUnauthorized, "invalid_credentials", err.Error(), nil)
+		// Only pass through known-safe validation messages — database and
+		// crypto errors must never reach clients.
+		switch err.Error() {
+		case "use a valid email and a password with at least 12 characters",
+			"an account already exists for this email",
+			"invalid email or password":
+			httputil.Error(w, http.StatusUnauthorized, "invalid_credentials", err.Error(), nil)
+		default:
+			httputil.Error(w, http.StatusUnauthorized, "invalid_credentials", "Authentication failed. Please try again.", nil)
+		}
 		return
 	}
 	httputil.JSON(w, http.StatusOK, map[string]any{"data": map[string]any{"access_token": token, "user": map[string]any{"id": u.ID, "email": u.Email, "is_admin": u.IsAdmin}}})

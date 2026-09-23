@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -34,6 +35,7 @@ var (
 	ErrWebhookVerificationFailed     = errors.New("payment webhook verification failed")
 	ErrWebhookParseFailed            = errors.New("payment webhook parse failed")
 	ErrPaymentEventPersistenceFailed = errors.New("payment event persistence failed")
+	ErrAutomatedPayoutsDisabled      = errors.New("automated payouts are disabled until the payout provider contract is verified")
 )
 
 type Service struct {
@@ -47,12 +49,18 @@ type Service struct {
 	automatedPayoutsEnabled        bool
 	payoutProvider                 string
 	payoutReconciliationStaleAfter time.Duration
-	http                           *http.Client
-	log                            *slog.Logger
-	notifier                       notify.Writer
-	gate                           notify.NotificationGate
-	audit                          audit.Writer
-	sms                            SMSSender
+	// providerTimeout bounds a single provider API call and must stay
+	// shorter than the HTTP request timeout: if the provider is slow, we
+	// stop waiting (leaving the pending local row for idempotent retry)
+	// instead of being killed mid-flight and orphaning a provider order
+	// the buyer may still pay.
+	providerTimeout time.Duration
+	http            *http.Client
+	log             *slog.Logger
+	notifier        notify.Writer
+	gate            notify.NotificationGate
+	audit           audit.Writer
+	sms             SMSSender
 }
 
 // SMSSender is satisfied by sms.Service. Declared narrowly here (rather than
@@ -119,7 +127,11 @@ type ServiceOptions struct {
 	// payout-capable provider doesn't require a code change to switch to.
 	PayoutProvider                 string
 	PayoutReconciliationStaleAfter time.Duration
-	HTTPClient                     *http.Client
+	// ProviderTimeout bounds one provider API call. Defaults to 10s and is
+	// clamped below in NewService — callers should pass
+	// HTTP_REQUEST_TIMEOUT minus a margin (see httpserver.New).
+	ProviderTimeout time.Duration
+	HTTPClient      *http.Client
 }
 
 func NewService(repo Repository, registry map[string]provider.Constructor, cipher *azcrypto.Cipher, opts ServiceOptions, logger *slog.Logger) *Service {
@@ -147,6 +159,12 @@ func NewService(repo Repository, registry map[string]provider.Constructor, ciphe
 	if opts.PayoutProvider == "" {
 		opts.PayoutProvider = "sonicpesa"
 	}
+	if opts.ProviderTimeout <= 0 {
+		opts.ProviderTimeout = 10 * time.Second
+	}
+	if opts.AutomatedPayoutsEnabled {
+		logger.Warn("automated payouts are enabled with an unverified payout provider contract — verify SonicPesa disbursement endpoints against your own account first")
+	}
 	if opts.HTTPClient == nil {
 		opts.HTTPClient = &http.Client{Timeout: opts.DeliveryTimeout}
 	}
@@ -162,6 +180,7 @@ func NewService(repo Repository, registry map[string]provider.Constructor, ciphe
 		automatedPayoutsEnabled:        opts.AutomatedPayoutsEnabled,
 		payoutProvider:                 opts.PayoutProvider,
 		payoutReconciliationStaleAfter: opts.PayoutReconciliationStaleAfter,
+		providerTimeout:                opts.ProviderTimeout,
 		http:                           opts.HTTPClient,
 		log:                            logger,
 	}
@@ -434,6 +453,12 @@ func (s *Service) CreateWithdrawal(ctx context.Context, requestedBy string, inpu
 	if err != nil {
 		return PaymentWithdrawal{}, nil, fmt.Errorf("load app balance: %w", err)
 	}
+	// GetAppBalance is scoped to the ledger's latest currency — a withdrawal
+	// in any other currency has no balance behind it. (The authoritative
+	// check is ApproveWithdrawal's locked, currency-filtered re-sum.)
+	if !strings.EqualFold(balance.Currency, input.Currency) {
+		return PaymentWithdrawal{}, nil, ErrInsufficientBalance
+	}
 	availableRat, _ := new(big.Rat).SetString(balance.AvailableBalance)
 	amountRat, _ := new(big.Rat).SetString(input.Amount)
 	if availableRat == nil || amountRat == nil || amountRat.Cmp(availableRat) > 0 {
@@ -489,25 +514,34 @@ func (s *Service) MarkWithdrawalFailed(ctx context.Context, id, notes string) (P
 }
 
 // AttemptPayout resolves the withdrawal's payout provider (SonicPesa today)
-// and requests a disbursement. Safe to call repeatedly: DispatchWithdrawal
-// only ever succeeds once per withdrawal (guarded by provider_payout_id IS
-// NULL plus the unique index from migration 000027), so retrying after a
-// successful dispatch just returns ErrWithdrawalAlreadyDispatched rather
-// than risking a second payout.
+// and requests a disbursement.
+//
+// Automated payouts stay OFF unless explicitly enabled — the payout
+// provider's disbursement contract is unverified (see SonicPesa Disburse),
+// so this refuses with ErrAutomatedPayoutsDisabled by default; use the
+// manual mark-paid/mark-failed attestation instead.
+//
+// Safe to call repeatedly: the withdrawal is claimed (approved →
+// processing) BEFORE touching the provider, so two concurrent attempts
+// (auto-dispatch plus an admin retry) serialize on the claim — the loser
+// never reaches the provider and no money moves twice. DispatchWithdrawal
+// then records the provider payout id exactly once (guarded by
+// provider_payout_id IS NULL plus the unique index from migration 000027).
 //
 // A Disburse call error deliberately never marks the withdrawal failed
 // automatically — that would reverse a ledger debit for money that may
 // already be in flight at the provider. It's recorded via
-// RecordPayoutFailure instead, leaving the withdrawal "approved" with
-// FailureReason set so an admin can retry or fall back to a manual
-// mark-paid/mark-failed attestation.
+// RecordPayoutFailure instead (claim released back to approved), leaving
+// the withdrawal retryable with FailureReason set so an admin can retry
+// or fall back to a manual mark-paid/mark-failed attestation.
 func (s *Service) AttemptPayout(ctx context.Context, id string) (PaymentWithdrawal, error) {
-	withdrawal, err := s.repo.GetWithdrawalByID(ctx, id)
+	if !s.automatedPayoutsEnabled {
+		return PaymentWithdrawal{}, ErrAutomatedPayoutsDisabled
+	}
+
+	withdrawal, err := s.repo.ClaimWithdrawalForPayout(ctx, id, s.payoutProvider)
 	if err != nil {
 		return PaymentWithdrawal{}, err
-	}
-	if withdrawal.Status != WithdrawalStatusApproved {
-		return PaymentWithdrawal{}, ErrInvalidWithdrawalTransition
 	}
 
 	p, err := s.resolveProvider(ctx, s.payoutProvider)
@@ -706,7 +740,41 @@ func (s *Service) CreateOrder(ctx context.Context, app PaymentApp, input CreateP
 		}
 	}
 
-	providerOrder, err := p.CreateOrder(ctx, provider.CreateOrderRequest{
+	// Insert the pending local row BEFORE calling the provider. Two
+	// concurrent creates with the same external_reference then serialize on
+	// the unique index — the loser reads back the winner's row instead of
+	// creating a second provider-side order. If the provider call times out
+	// or fails, the pending row remains and a retry with the same reference
+	// resumes it instead of orphaning a provider order the buyer may pay
+	// without any local record to credit.
+	pending, err := s.repo.CreatePaymentOrder(ctx, CreatePaymentOrderRepositoryInput{
+		AppID:             app.ID,
+		Provider:          input.Provider,
+		ExternalReference: input.ExternalReference,
+		Amount:            input.Amount,
+		Currency:          input.Currency,
+		BuyerName:         input.BuyerName,
+		BuyerEmail:        input.BuyerEmail,
+		BuyerPhone:        input.BuyerPhone,
+		Status:            provider.StatusPending,
+		Metadata:          copyMetadata(input.Metadata),
+	})
+	if err != nil {
+		if isUniqueViolation(err) && input.ExternalReference != "" {
+			existing, lookupErr := s.repo.GetPaymentOrderByAppReference(ctx, app.ID, input.ExternalReference)
+			if lookupErr == nil {
+				return existing, nil, nil
+			}
+		}
+		return PaymentOrder{}, nil, err
+	}
+
+	// Bound the provider call below the request timeout so a slow provider
+	// surfaces as a retryable error here — never as a request killed
+	// mid-flight after the provider already created the order.
+	providerCtx, cancel := context.WithTimeout(ctx, s.providerTimeout)
+	defer cancel()
+	providerOrder, err := p.CreateOrder(providerCtx, provider.CreateOrderRequest{
 		Amount:            input.Amount,
 		Currency:          input.Currency,
 		BuyerName:         input.BuyerName,
@@ -716,7 +784,7 @@ func (s *Service) CreateOrder(ctx context.Context, app PaymentApp, input CreateP
 		Metadata:          input.Metadata,
 	})
 	if err != nil {
-		return PaymentOrder{}, nil, fmt.Errorf("create provider payment order: %w", err)
+		return pending, nil, fmt.Errorf("create provider payment order: %w", err)
 	}
 
 	status := providerOrder.Status
@@ -732,23 +800,9 @@ func (s *Service) CreateOrder(ctx context.Context, app PaymentApp, input CreateP
 		metadata["provider_response"] = providerOrder.Raw
 	}
 
-	order, err := s.repo.CreatePaymentOrder(ctx, CreatePaymentOrderRepositoryInput{
-		AppID:                 app.ID,
-		Provider:              input.Provider,
-		ProviderOrderID:       providerOrder.OrderID,
-		ProviderTransactionID: providerOrder.TransactionID,
-		ExternalReference:     input.ExternalReference,
-		Amount:                input.Amount,
-		Currency:              input.Currency,
-		BuyerName:             input.BuyerName,
-		BuyerEmail:            input.BuyerEmail,
-		BuyerPhone:            input.BuyerPhone,
-		Status:                status,
-		ProviderStatus:        providerOrder.ProviderStatus,
-		Metadata:              metadata,
-	})
+	order, err := s.repo.UpdatePaymentOrderProviderDetails(ctx, pending.ID, providerOrder.OrderID, providerOrder.TransactionID, status, providerOrder.ProviderStatus, metadata)
 	if err != nil {
-		return PaymentOrder{}, nil, err
+		return pending, nil, err
 	}
 
 	return order, nil, nil
@@ -1627,7 +1681,60 @@ func validateWebhookURL(rawURL string) error {
 	if parsed.Host == "" || parsed.User != nil {
 		return errors.New("invalid webhook host")
 	}
+	host := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
+	if host == "" {
+		return errors.New("invalid webhook host")
+	}
+	// SSRF guard: never let an admin-configured webhook point delivery
+	// workers at internal infrastructure. Literal private IPs and
+	// localhost are rejected outright; other names are resolved and
+	// rejected if they point at non-public addresses. Resolution failures
+	// fail open (offline/air-gapped setups) — the literal-IP check above
+	// still holds in that case.
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return errors.New("webhook host must not be internal")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if !isPublicIP(ip) {
+			return errors.New("webhook host must not be internal")
+		}
+		return nil
+	}
+	if addrs, err := net.LookupIP(host); err == nil && len(addrs) > 0 {
+		allPrivate := true
+		for _, addr := range addrs {
+			if isPublicIP(addr) {
+				allPrivate = false
+				break
+			}
+		}
+		if allPrivate {
+			return errors.New("webhook host must not be internal")
+		}
+	}
 	return nil
+}
+
+// isPublicIP reports whether ip is a globally routable unicast address.
+func isPublicIP(ip net.IP) bool {
+	return !ip.IsLoopback() && !ip.IsLinkLocalUnicast() && !ip.IsLinkLocalMulticast() &&
+		!ip.IsMulticast() && !ip.IsUnspecified() && !isPrivateUnicast(ip)
+}
+
+func isPrivateUnicast(ip net.IP) bool {
+	if ip4 := ip.To4(); ip4 != nil {
+		// 10/8, 172.16/12, 192.168/16, 169.254/16 (link-local, belt and
+		// braces), 100.64/10 (CGNAT).
+		return ip4[0] == 10 ||
+			(ip4[0] == 172 && ip4[1] >= 16 && ip4[1] <= 31) ||
+			(ip4[0] == 192 && ip4[1] == 168) ||
+			(ip4[0] == 169 && ip4[1] == 254) ||
+			(ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127)
+	}
+	// IPv6 unique-local (fc00::/7). Global unicast 2000::/3 is public;
+	// anything else non-special (e.g. documentation ranges) is treated as
+	// non-public by falling through to false only for 2000::/3.
+	return len(ip) == net.IPv6len && (ip[0]&0xfe) == 0xfc
 }
 
 func defaultString(value, fallback string) string {

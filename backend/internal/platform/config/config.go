@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -172,6 +173,11 @@ func Load() (Config, error) {
 	}
 	if strings.EqualFold(cfg.App.Env, "production") && cfg.Payments.DeliverySigningSecret == "development-payment-delivery-secret" {
 		validationErrs = append(validationErrs, "PAYMENTS_DELIVERY_SIGNING_SECRET is required in production")
+	}
+	if cfg.Payments.PublicBaseURL != "" {
+		if parsed, err := url.ParseRequestURI(cfg.Payments.PublicBaseURL); err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			validationErrs = append(validationErrs, "PAYMENTS_PUBLIC_BASE_URL must be a valid http(s) URL")
+		}
 	}
 	if len(validationErrs) > 0 {
 		return Config{}, errors.New(strings.Join(validationErrs, "; "))

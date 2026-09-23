@@ -13,6 +13,8 @@ import (
 
 	"azsubay-payments-gateway/internal/modules/payments/provider"
 	azcrypto "azsubay-payments-gateway/internal/platform/crypto"
+
+	"github.com/jackc/pgx"
 )
 
 // testCipher and testEncryptedCredentials back fakePaymentRepository's
@@ -106,44 +108,52 @@ func (f *fakePaymentProvider) CheckOrderStatus(_ context.Context, _ string) (pro
 }
 
 type fakePaymentRepository struct {
-	duplicate           bool
-	order               PaymentOrder
-	orderErr            error
-	referenceOrder      PaymentOrder
-	referenceErr        error
-	appListResult       PaymentAppListResult
-	createdOrder        PaymentOrder
-	createOrderInput    CreatePaymentOrderRepositoryInput
-	getOrder            PaymentOrder
-	getOrderErr         error
-	reconcileCandidates []PaymentOrder
-	searchFilter        PaymentOrderSearchFilter
-	searchResult        PaymentOrderSearchResult
-	eventFilter         PaymentEventListFilter
-	eventResult         PaymentEventListResult
-	deliveryFilter      PaymentWebhookDeliveryListFilter
-	deliveryResult      PaymentWebhookDeliveryListResult
-	replayedDeliveryID  string
-	metricsStaleBefore  time.Time
-	metrics             PaymentMetrics
-	updatedOrder        PaymentOrder
-	events              []PaymentEventInput
-	marked              []string
-	applied             []ApplyWebhookEventInput
-	orderLookups        int
-	endpointInput       CreatePaymentWebhookEndpointRepositoryInput
-	endpoint            PaymentWebhookEndpoint
-	createdDeliveries   int64
-	replayedEventID     string
-	replayedEventCount  int64
-	deliveryJobs        []PaymentWebhookDeliveryJob
-	recordedAttempts    []RecordWebhookDeliveryAttemptInput
+	duplicate             bool
+	order                 PaymentOrder
+	orderErr              error
+	referenceOrder        PaymentOrder
+	referenceErr          error
+	appListResult         PaymentAppListResult
+	createdOrder          PaymentOrder
+	createOrderInput      CreatePaymentOrderRepositoryInput
+	createOrderInputs     []CreatePaymentOrderRepositoryInput
+	createOrderErr        error
+	failCreateOnce        bool
+	updatedProviderOrder  PaymentOrder
+	updateProviderErr     error
+	updateProviderCalls   []updateProviderDetailsCall
+	getOrder              PaymentOrder
+	getOrderErr           error
+	reconcileCandidates   []PaymentOrder
+	searchFilter          PaymentOrderSearchFilter
+	searchResult          PaymentOrderSearchResult
+	eventFilter           PaymentEventListFilter
+	eventResult           PaymentEventListResult
+	deliveryFilter        PaymentWebhookDeliveryListFilter
+	deliveryResult        PaymentWebhookDeliveryListResult
+	replayedDeliveryID    string
+	metricsStaleBefore    time.Time
+	metrics               PaymentMetrics
+	updatedOrder          PaymentOrder
+	events                []PaymentEventInput
+	marked                []string
+	applied               []ApplyWebhookEventInput
+	orderLookups          int
+	endpointInput         CreatePaymentWebhookEndpointRepositoryInput
+	endpoint              PaymentWebhookEndpoint
+	createdDeliveries     int64
+	replayedEventID       string
+	replayedEventCount    int64
+	deliveryJobs          []PaymentWebhookDeliveryJob
+	recordedAttempts      []RecordWebhookDeliveryAttemptInput
 	recordCtxWasCancelled []bool
-	providerAccount     PaymentProviderAccount
-	providerAccountErr  error
+	providerAccount       PaymentProviderAccount
+	providerAccountErr    error
 
 	withdrawal                     PaymentWithdrawal
 	withdrawalErr                  error
+	payoutClaimCalls               []payoutClaimCall
+	payoutClaimErr                 error
 	dispatchCalls                  []dispatchWithdrawalCall
 	dispatchErr                    error
 	recordPayoutFailureCalls       []recordPayoutFailureCall
@@ -195,6 +205,17 @@ func (r *fakePaymentRepository) ListPaymentApps(_ context.Context, limit, offset
 
 func (r *fakePaymentRepository) CreatePaymentOrder(_ context.Context, input CreatePaymentOrderRepositoryInput) (PaymentOrder, error) {
 	r.createOrderInput = input
+	r.createOrderInputs = append(r.createOrderInputs, input)
+	if r.failCreateOnce {
+		// Simulate losing the pending-insert race: the winner's row is now
+		// visible to the conflicting lookup.
+		r.failCreateOnce = false
+		r.referenceErr = nil
+		return PaymentOrder{}, pgx.PgError{Code: "23505"}
+	}
+	if r.createOrderErr != nil {
+		return PaymentOrder{}, r.createOrderErr
+	}
 	if r.createdOrder.ID != "" {
 		return r.createdOrder, nil
 	}
@@ -214,6 +235,57 @@ func (r *fakePaymentRepository) CreatePaymentOrder(_ context.Context, input Crea
 		ProviderStatus:        input.ProviderStatus,
 		Metadata:              input.Metadata,
 	}, nil
+}
+
+type updateProviderDetailsCall struct {
+	id                    string
+	providerOrderID       string
+	providerTransactionID string
+	status                provider.Status
+	providerStatus        string
+}
+
+func (r *fakePaymentRepository) UpdatePaymentOrderProviderDetails(_ context.Context, id, providerOrderID, providerTransactionID string, status provider.Status, providerStatus string, metadata map[string]any) (PaymentOrder, error) {
+	r.updateProviderCalls = append(r.updateProviderCalls, updateProviderDetailsCall{id, providerOrderID, providerTransactionID, status, providerStatus})
+	if r.updateProviderErr != nil {
+		return PaymentOrder{}, r.updateProviderErr
+	}
+	if r.updatedProviderOrder.ID != "" {
+		return r.updatedProviderOrder, nil
+	}
+	order := r.createdOrder
+	if order.ID == "" {
+		order.ID = "pay_test"
+	}
+	order.ProviderOrderID = providerOrderID
+	order.ProviderTransactionID = providerTransactionID
+	order.Status = status
+	order.ProviderStatus = providerStatus
+	if metadata != nil {
+		order.Metadata = metadata
+	}
+	return order, nil
+}
+
+func (r *fakePaymentRepository) ClaimWithdrawalForPayout(_ context.Context, id, providerName string) (PaymentWithdrawal, error) {
+	r.payoutClaimCalls = append(r.payoutClaimCalls, payoutClaimCall{id, providerName})
+	if r.payoutClaimErr != nil {
+		return PaymentWithdrawal{}, r.payoutClaimErr
+	}
+	if r.withdrawal.ID == "" {
+		return PaymentWithdrawal{}, ErrWithdrawalNotFound
+	}
+	if r.withdrawal.Status != WithdrawalStatusApproved {
+		return PaymentWithdrawal{}, ErrInvalidWithdrawalTransition
+	}
+	r.withdrawal.Status = WithdrawalStatusProcessing
+	r.withdrawal.Provider = providerName
+	return r.withdrawal, nil
+}
+
+type payoutClaimCall struct {
+	id       string
+	provider string
 }
 
 func (r *fakePaymentRepository) GetPaymentOrderByIDForApp(_ context.Context, _, _ string) (PaymentOrder, error) {
@@ -644,11 +716,23 @@ func TestCreateOrderCallsProviderAndPersistsMapping(t *testing.T) {
 	if p.createCalled != 1 {
 		t.Fatalf("expected provider create called once, got %d", p.createCalled)
 	}
-	if repo.createOrderInput.ProviderOrderID != "sp_123" {
-		t.Fatalf("expected provider order id persisted, got %q", repo.createOrderInput.ProviderOrderID)
+	// Pending local row first: no provider order id yet, so a concurrent
+	// create with the same reference serializes instead of double-creating
+	// at the provider.
+	if repo.createOrderInput.ProviderOrderID != "" {
+		t.Fatalf("expected pending insert without provider order id, got %q", repo.createOrderInput.ProviderOrderID)
+	}
+	if repo.createOrderInput.Status != provider.StatusPending {
+		t.Fatalf("expected pending insert status, got %q", repo.createOrderInput.Status)
 	}
 	if repo.createOrderInput.Amount != "10000.00" {
 		t.Fatalf("expected normalized amount 10000.00, got %q", repo.createOrderInput.Amount)
+	}
+	if p.createReq.ExternalReference != "app-order-1" {
+		t.Fatalf("expected external reference forwarded to provider, got %q", p.createReq.ExternalReference)
+	}
+	if len(repo.updateProviderCalls) != 1 || repo.updateProviderCalls[0].providerOrderID != "sp_123" {
+		t.Fatalf("expected provider details adopted after provider call, got %+v", repo.updateProviderCalls)
 	}
 	if order.ProviderOrderID != "sp_123" {
 		t.Fatalf("expected returned order provider id sp_123, got %q", order.ProviderOrderID)
@@ -813,7 +897,9 @@ func TestAttemptPayoutDispatchesAndMarksPaidOnSyncSuccess(t *testing.T) {
 			ProviderStatus:   "SUCCESS",
 		},
 	}
-	service := NewService(repo, registryFor(p), testCipher, testServiceOptions(), nil)
+	opts := testServiceOptions()
+	opts.AutomatedPayoutsEnabled = true
+	service := NewService(repo, registryFor(p), testCipher, opts, nil)
 
 	withdrawal, err := service.AttemptPayout(context.Background(), "wd_test")
 	if err != nil {
@@ -848,6 +934,7 @@ func TestAttemptPayoutUsesConfiguredPayoutProviderNotAHardcodedLiteral(t *testin
 	}
 	opts := testServiceOptions()
 	opts.PayoutProvider = "otherpay"
+	opts.AutomatedPayoutsEnabled = true
 	service := NewService(repo, registryFor(p), testCipher, opts, nil)
 
 	if _, err := service.AttemptPayout(context.Background(), "wd_test"); err != nil {
@@ -873,7 +960,9 @@ func TestAttemptPayoutMarksFailedAndReversesLedgerOnSyncFailure(t *testing.T) {
 			ProviderStatus:   "REJECTED",
 		},
 	}
-	service := NewService(repo, registryFor(p), testCipher, testServiceOptions(), nil)
+	opts := testServiceOptions()
+	opts.AutomatedPayoutsEnabled = true
+	service := NewService(repo, registryFor(p), testCipher, opts, nil)
 
 	withdrawal, err := service.AttemptPayout(context.Background(), "wd_test")
 	if err != nil {
@@ -896,7 +985,9 @@ func TestAttemptPayoutRecordsFailureReasonOnDisburseError(t *testing.T) {
 		withdrawal: PaymentWithdrawal{ID: "wd_test", Amount: "5000.00", Currency: "TZS", DestinationType: "bank", Status: WithdrawalStatusApproved},
 	}
 	p := &fakePaymentProvider{name: "sonicpesa", disburseErr: errors.New("sonicpesa unreachable")}
-	service := NewService(repo, registryFor(p), testCipher, testServiceOptions(), nil)
+	opts := testServiceOptions()
+	opts.AutomatedPayoutsEnabled = true
+	service := NewService(repo, registryFor(p), testCipher, opts, nil)
 
 	withdrawal, err := service.AttemptPayout(context.Background(), "wd_test")
 	if err == nil {
@@ -923,7 +1014,9 @@ func TestAttemptPayoutIsNotRetriedOnceDispatched(t *testing.T) {
 		name:         "sonicpesa",
 		disburseResp: provider.DisburseResult{ProviderPayoutID: "payout_789", Status: provider.StatusProcessing, ProviderStatus: "PENDING"},
 	}
-	service := NewService(repo, registryFor(p), testCipher, testServiceOptions(), nil)
+	opts := testServiceOptions()
+	opts.AutomatedPayoutsEnabled = true
+	service := NewService(repo, registryFor(p), testCipher, opts, nil)
 
 	if _, err := service.AttemptPayout(context.Background(), "wd_test"); err != nil {
 		t.Fatalf("expected first attempt to succeed, got %v", err)
@@ -932,9 +1025,8 @@ func TestAttemptPayoutIsNotRetriedOnceDispatched(t *testing.T) {
 		t.Fatalf("expected exactly one Disburse call after the first attempt, got %d", p.disburseCalled)
 	}
 
-	// The withdrawal is now 'processing' in the fake (mirroring DispatchWithdrawal's
-	// real "AND status = 'approved'" guard), so a second attempt must not
-	// dispatch again.
+	// The withdrawal is now 'processing' in the fake (mirroring the real
+	// claim-first guard), so a second attempt must not dispatch again.
 	if _, err := service.AttemptPayout(context.Background(), "wd_test"); !errors.Is(err, ErrInvalidWithdrawalTransition) {
 		t.Fatalf("expected retrying an already-dispatched withdrawal to fail with ErrInvalidWithdrawalTransition, got %v", err)
 	}
@@ -1384,5 +1476,116 @@ func TestProcessDueDeliveriesRecordsWithCancelledContext(t *testing.T) {
 	}
 	if len(repo.recordCtxWasCancelled) != 1 || repo.recordCtxWasCancelled[0] {
 		t.Fatal("expected recording context to be non-cancelled so the row leaves 'processing'")
+	}
+}
+
+func TestCreateOrderReturnsExistingOnPendingInsertConflict(t *testing.T) {
+	repo := &fakePaymentRepository{
+		referenceErr:   ErrPaymentOrderNotFound,
+		referenceOrder: PaymentOrder{ID: "pay_winner", ExternalReference: "app-order-1"},
+		failCreateOnce: true,
+	}
+	p := &fakePaymentProvider{name: "sonicpesa"}
+	service := NewService(repo, registryFor(p), testCipher, testServiceOptions(), nil)
+
+	order, errs, err := service.CreateOrder(context.Background(), PaymentApp{ID: "app_test"}, CreatePaymentOrderInput{
+		Provider:          "sonicpesa",
+		Amount:            "10000",
+		Currency:          "TZS",
+		BuyerName:         "Customer",
+		BuyerEmail:        "customer@example.com",
+		BuyerPhone:        "255700000000",
+		ExternalReference: "app-order-1",
+	})
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if errs.Any() {
+		t.Fatalf("expected no validation errors, got %v", errs)
+	}
+	if order.ID != "pay_winner" {
+		t.Fatalf("expected winner's row on insert conflict, got %q", order.ID)
+	}
+	// The loser must never reach the provider — otherwise two provider-side
+	// orders exist and the buyer's payment on the orphan is never credited.
+	if p.createCalled != 0 {
+		t.Fatalf("expected provider create not called after losing the race, got %d", p.createCalled)
+	}
+}
+
+func TestAttemptPayoutRefusedWhenAutomatedPayoutsDisabled(t *testing.T) {
+	repo := &fakePaymentRepository{
+		withdrawal: PaymentWithdrawal{ID: "wd_test", Amount: "5000.00", Currency: "TZS", DestinationType: "mobile_money", Status: WithdrawalStatusApproved},
+	}
+	p := &fakePaymentProvider{name: "sonicpesa"}
+	service := NewService(repo, registryFor(p), testCipher, testServiceOptions(), nil)
+
+	if _, err := service.AttemptPayout(context.Background(), "wd_test"); !errors.Is(err, ErrAutomatedPayoutsDisabled) {
+		t.Fatalf("expected ErrAutomatedPayoutsDisabled, got %v", err)
+	}
+	if p.disburseCalled != 0 {
+		t.Fatalf("expected no provider call while disabled, got %d", p.disburseCalled)
+	}
+	if len(repo.payoutClaimCalls) != 0 {
+		t.Fatalf("expected no claim while disabled, got %+v", repo.payoutClaimCalls)
+	}
+}
+
+func TestAttemptPayoutClaimsBeforeCallingProvider(t *testing.T) {
+	repo := &fakePaymentRepository{
+		withdrawal: PaymentWithdrawal{ID: "wd_test", Amount: "5000.00", Currency: "TZS", DestinationType: "mobile_money", Status: WithdrawalStatusApproved},
+	}
+	p := &fakePaymentProvider{
+		name:         "sonicpesa",
+		disburseResp: provider.DisburseResult{ProviderPayoutID: "payout_123", Status: provider.StatusPaid, ProviderStatus: "SUCCESS"},
+	}
+	opts := testServiceOptions()
+	opts.AutomatedPayoutsEnabled = true
+	service := NewService(repo, registryFor(p), testCipher, opts, nil)
+
+	if _, err := service.AttemptPayout(context.Background(), "wd_test"); err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	// The claim (approved → processing) must happen before Disburse so a
+	// concurrent attempt fails the claim instead of sending money twice.
+	if len(repo.payoutClaimCalls) != 1 || repo.payoutClaimCalls[0].id != "wd_test" || repo.payoutClaimCalls[0].provider != "sonicpesa" {
+		t.Fatalf("expected single payout claim before disburse, got %+v", repo.payoutClaimCalls)
+	}
+	if p.disburseCalled != 1 {
+		t.Fatalf("expected exactly one Disburse call, got %d", p.disburseCalled)
+	}
+}
+
+func TestValidateWebhookURLRejectsInternalHosts(t *testing.T) {
+	for _, raw := range []string{
+		"http://10.0.0.5/hook",
+		"http://192.168.1.10/hook",
+		"http://172.16.0.9/hook",
+		"http://127.0.0.1/hook",
+		"http://[::1]/hook",
+		"http://localhost/hook",
+		"http://user:pass@example.com/hook",
+		"ftp://example.com/hook",
+		"not-a-url",
+	} {
+		if err := validateWebhookURL(raw); err == nil {
+			t.Fatalf("expected %q to be rejected", raw)
+		}
+	}
+	if err := validateWebhookURL("https://payments.example.com/webhooks/orders"); err != nil {
+		t.Fatalf("expected public URL to be accepted, got %v", err)
+	}
+}
+
+func TestIsZeroDecimal(t *testing.T) {
+	for _, value := range []string{"", "0", "0.00", "0.000", " 0.00 "} {
+		if !isZeroDecimal(value) {
+			t.Fatalf("expected %q to count as zero", value)
+		}
+	}
+	for _, value := range []string{"0.01", "5", "100.00"} {
+		if isZeroDecimal(value) {
+			t.Fatalf("expected %q to count as non-zero", value)
+		}
 	}
 }

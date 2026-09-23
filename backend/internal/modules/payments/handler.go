@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -16,6 +17,7 @@ import (
 type Handler struct {
 	service      *Service
 	maxBodyBytes int64
+	logger       *slog.Logger
 }
 
 func NewHandler(service *Service, maxBodyBytes int64) *Handler {
@@ -23,6 +25,30 @@ func NewHandler(service *Service, maxBodyBytes int64) *Handler {
 		service:      service,
 		maxBodyBytes: maxBodyBytes,
 	}
+}
+
+// SetLogger wires structured logging for server-side errors. Optional —
+// falls back to slog.Default() so raw error text is logged, never
+// returned to clients (see fail).
+func (h *Handler) SetLogger(logger *slog.Logger) {
+	h.logger = logger
+}
+
+func (h *Handler) log() *slog.Logger {
+	if h.logger != nil {
+		return h.logger
+	}
+	return slog.Default()
+}
+
+// fail logs the internal error server-side and returns a generic message
+// to the client — raw err.Error() text (SQL, provider responses, paths)
+// must never leave the process.
+func (h *Handler) fail(w http.ResponseWriter, status int, code, message string, err error) {
+	if err != nil {
+		h.log().Error("request failed", "code", code, "status", status, "error", err)
+	}
+	httputil.Error(w, status, code, message, nil)
 }
 
 type createOrderHTTPInput struct {
@@ -68,7 +94,7 @@ func (h *Handler) CreateOrder(w http.ResponseWriter, r *http.Request) {
 		Metadata:          in.Metadata,
 	})
 	if err != nil {
-		httputil.Error(w, http.StatusBadGateway, "payment_provider_error", "Unable to create payment order.", map[string]string{"error": err.Error()})
+		h.fail(w, http.StatusBadGateway, "payment_provider_error", "Unable to create payment order.", err)
 		return
 	}
 	if vErrs.Any() {
@@ -114,7 +140,7 @@ func (h *Handler) RefreshOrder(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, ErrUnknownProvider):
 			httputil.Error(w, http.StatusUnprocessableEntity, "provider_not_supported", "Payment provider is not supported.", nil)
 		default:
-			httputil.Error(w, http.StatusBadGateway, "payment_provider_error", "Unable to refresh payment order.", map[string]string{"error": err.Error()})
+			h.fail(w, http.StatusBadGateway, "payment_provider_error", "Unable to refresh payment order.", err)
 		}
 		return
 	}
@@ -132,7 +158,7 @@ func (h *Handler) CreateApp(w http.ResponseWriter, r *http.Request) {
 
 	result, vErrs, err := h.service.CreateApp(r.Context(), input)
 	if err != nil {
-		httputil.Error(w, http.StatusInternalServerError, "create_failed", "Unable to create payment app.", map[string]string{"error": err.Error()})
+		h.fail(w, http.StatusInternalServerError, "create_failed", "Unable to create payment app.", err)
 		return
 	}
 	if vErrs.Any() {
@@ -163,7 +189,7 @@ func (h *Handler) ListApps(w http.ResponseWriter, r *http.Request) {
 
 	result, err := h.service.ListApps(r.Context(), limit, offset)
 	if err != nil {
-		httputil.Error(w, http.StatusInternalServerError, "list_failed", "Unable to list payment apps.", map[string]string{"error": err.Error()})
+		h.fail(w, http.StatusInternalServerError, "list_failed", "Unable to list payment apps.", err)
 		return
 	}
 
@@ -220,7 +246,7 @@ func (h *Handler) UpdateAppFees(w http.ResponseWriter, r *http.Request) {
 			httputil.Error(w, http.StatusNotFound, "not_found", "Payment app not found.", nil)
 			return
 		}
-		httputil.Error(w, http.StatusInternalServerError, "update_failed", "Unable to update app fees.", map[string]string{"error": err.Error()})
+		h.fail(w, http.StatusInternalServerError, "update_failed", "Unable to update app fees.", err)
 		return
 	}
 	if vErrs.Any() {
@@ -244,7 +270,7 @@ func (h *Handler) DeletePaymentApp(w http.ResponseWriter, r *http.Request) {
 			httputil.Error(w, http.StatusNotFound, "not_found", "Payment app not found.", nil)
 			return
 		}
-		httputil.Error(w, http.StatusInternalServerError, "delete_failed", "Unable to delete app.", map[string]string{"error": err.Error()})
+		h.fail(w, http.StatusInternalServerError, "delete_failed", "Unable to delete app.", err)
 		return
 	}
 
@@ -307,7 +333,7 @@ func (h *Handler) CreateWithdrawal(w http.ResponseWriter, r *http.Request) {
 			httputil.Error(w, http.StatusUnprocessableEntity, "insufficient_balance", "This app's available balance doesn't cover that amount.", nil)
 			return
 		}
-		httputil.Error(w, http.StatusInternalServerError, "create_failed", "Unable to create withdrawal.", map[string]string{"error": err.Error()})
+		h.fail(w, http.StatusInternalServerError, "create_failed", "Unable to create withdrawal.", err)
 		return
 	}
 	if vErrs.Any() {
@@ -327,7 +353,7 @@ func (h *Handler) withdrawalTransitionError(w http.ResponseWriter, err error, ac
 	case errors.Is(err, ErrInsufficientBalance):
 		httputil.Error(w, http.StatusUnprocessableEntity, "insufficient_balance", "This app's available balance no longer covers this withdrawal.", nil)
 	default:
-		httputil.Error(w, http.StatusInternalServerError, "update_failed", "Unable to update withdrawal.", map[string]string{"error": err.Error()})
+		h.fail(w, http.StatusInternalServerError, "update_failed", "Unable to update withdrawal.", err)
 	}
 }
 
@@ -381,9 +407,9 @@ func (h *Handler) MarkWithdrawalFailed(w http.ResponseWriter, r *http.Request) {
 }
 
 // RetryWithdrawalPayout re-attempts an automated payout dispatch for a
-// withdrawal that's still "approved" (either automation is off and an
-// admin wants to try it, or a prior attempt recorded a failure_reason
-// without ever reaching the provider). Safe to call repeatedly — see
+// withdrawal that's still "approved". Requires automated payouts to be
+// enabled (unverified provider contract otherwise) — when off, pay out
+// manually and use mark-paid/mark-failed. Safe to call repeatedly — see
 // Service.AttemptPayout's idempotency note.
 func (h *Handler) RetryWithdrawalPayout(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
@@ -392,6 +418,9 @@ func (h *Handler) RetryWithdrawalPayout(w http.ResponseWriter, r *http.Request) 
 		switch {
 		case errors.Is(err, ErrWithdrawalNotFound):
 			httputil.Error(w, http.StatusNotFound, "not_found", "Withdrawal not found.", nil)
+			return
+		case errors.Is(err, ErrAutomatedPayoutsDisabled):
+			httputil.Error(w, http.StatusForbidden, "payouts_disabled", "Automated payouts are disabled until the payout provider contract is verified. Pay out manually, then mark paid.", nil)
 			return
 		case errors.Is(err, ErrInvalidWithdrawalTransition):
 			httputil.Error(w, http.StatusConflict, "invalid_transition", "This withdrawal isn't in a state that can be dispatched for payout.", nil)
@@ -451,7 +480,7 @@ func (h *Handler) AddAppMember(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, ErrAlreadyMember):
 			httputil.Error(w, http.StatusConflict, "already_member", "This person already has access to this app.", nil)
 		default:
-			httputil.Error(w, http.StatusInternalServerError, "create_failed", "Unable to add app member.", map[string]string{"error": err.Error()})
+			h.fail(w, http.StatusInternalServerError, "create_failed", "Unable to add app member.", err)
 		}
 		return
 	}
@@ -499,7 +528,7 @@ func (h *Handler) CreateProviderAccount(w http.ResponseWriter, r *http.Request) 
 
 	account, vErrs, err := h.service.CreateProviderAccount(r.Context(), claims.Subject, claims.Email, in)
 	if err != nil {
-		httputil.Error(w, http.StatusInternalServerError, "create_failed", "Unable to create payment provider.", map[string]string{"error": err.Error()})
+		h.fail(w, http.StatusInternalServerError, "create_failed", "Unable to create payment provider.", err)
 		return
 	}
 	if vErrs.Any() {
@@ -529,7 +558,7 @@ func (h *Handler) UpdateProviderAccount(w http.ResponseWriter, r *http.Request) 
 			httputil.Error(w, http.StatusNotFound, "not_found", "Payment provider not found.", nil)
 			return
 		}
-		httputil.Error(w, http.StatusUnprocessableEntity, "update_failed", "Unable to update payment provider.", map[string]string{"error": err.Error()})
+		h.fail(w, http.StatusUnprocessableEntity, "update_failed", "Unable to update payment provider.", err)
 		return
 	}
 	if vErrs.Any() {
@@ -586,7 +615,7 @@ func (h *Handler) CreateWebhookEndpoint(w http.ResponseWriter, r *http.Request) 
 
 	result, vErrs, err := h.service.CreateWebhookEndpoint(r.Context(), input)
 	if err != nil {
-		httputil.Error(w, http.StatusInternalServerError, "create_failed", "Unable to create payment webhook endpoint.", map[string]string{"error": err.Error()})
+		h.fail(w, http.StatusInternalServerError, "create_failed", "Unable to create payment webhook endpoint.", err)
 		return
 	}
 	if vErrs.Any() {
@@ -600,7 +629,7 @@ func (h *Handler) CreateWebhookEndpoint(w http.ResponseWriter, r *http.Request) 
 func (h *Handler) ListWebhookEndpoints(w http.ResponseWriter, r *http.Request) {
 	endpoints, err := h.service.ListWebhookEndpoints(r.Context(), r.URL.Query().Get("app_id"))
 	if err != nil {
-		httputil.Error(w, http.StatusInternalServerError, "list_failed", "Unable to list webhook endpoints.", map[string]string{"error": err.Error()})
+		h.fail(w, http.StatusInternalServerError, "list_failed", "Unable to list webhook endpoints.", err)
 		return
 	}
 
@@ -610,7 +639,7 @@ func (h *Handler) ListWebhookEndpoints(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) ReplayEvent(w http.ResponseWriter, r *http.Request) {
 	result, err := h.service.ReplayEvent(r.Context(), r.PathValue("eventID"))
 	if err != nil {
-		httputil.Error(w, http.StatusInternalServerError, "replay_failed", "Unable to replay payment event.", map[string]string{"error": err.Error()})
+		h.fail(w, http.StatusInternalServerError, "replay_failed", "Unable to replay payment event.", err)
 		return
 	}
 
@@ -628,7 +657,7 @@ func (h *Handler) RefundOrder(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, ErrAlreadyRefunded):
 			httputil.Error(w, http.StatusConflict, "already_refunded", "This order has already been refunded.", nil)
 		default:
-			httputil.Error(w, http.StatusInternalServerError, "refund_failed", "Unable to refund order.", map[string]string{"error": err.Error()})
+			h.fail(w, http.StatusInternalServerError, "refund_failed", "Unable to refund order.", err)
 		}
 		return
 	}
@@ -654,7 +683,7 @@ func (h *Handler) SearchPaymentOrders(w http.ResponseWriter, r *http.Request) {
 		Offset:            offset,
 	})
 	if err != nil {
-		httputil.Error(w, http.StatusInternalServerError, "search_failed", "Unable to search payment orders.", map[string]string{"error": err.Error()})
+		h.fail(w, http.StatusInternalServerError, "search_failed", "Unable to search payment orders.", err)
 		return
 	}
 
@@ -692,7 +721,7 @@ func (h *Handler) ListPaymentEvents(w http.ResponseWriter, r *http.Request) {
 		Offset:          offset,
 	})
 	if err != nil {
-		httputil.Error(w, http.StatusInternalServerError, "list_failed", "Unable to list payment events.", map[string]string{"error": err.Error()})
+		h.fail(w, http.StatusInternalServerError, "list_failed", "Unable to list payment events.", err)
 		return
 	}
 
@@ -714,7 +743,7 @@ func (h *Handler) ListWebhookDeliveries(w http.ResponseWriter, r *http.Request) 
 		Offset:         offset,
 	})
 	if err != nil {
-		httputil.Error(w, http.StatusInternalServerError, "list_failed", "Unable to list payment webhook deliveries.", map[string]string{"error": err.Error()})
+		h.fail(w, http.StatusInternalServerError, "list_failed", "Unable to list payment webhook deliveries.", err)
 		return
 	}
 
@@ -727,7 +756,7 @@ func (h *Handler) ReplayFailedDelivery(w http.ResponseWriter, r *http.Request) {
 			httputil.Error(w, http.StatusNotFound, "not_found", "Failed payment webhook delivery not found.", nil)
 			return
 		}
-		httputil.Error(w, http.StatusInternalServerError, "replay_failed", "Unable to replay payment webhook delivery.", map[string]string{"error": err.Error()})
+		h.fail(w, http.StatusInternalServerError, "replay_failed", "Unable to replay payment webhook delivery.", err)
 		return
 	}
 
@@ -741,7 +770,7 @@ func (h *Handler) ReplayFailedDelivery(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) PaymentMetrics(w http.ResponseWriter, r *http.Request) {
 	metrics, err := h.service.PaymentMetrics(r.Context())
 	if err != nil {
-		httputil.Error(w, http.StatusInternalServerError, "metrics_failed", "Unable to load payment metrics.", map[string]string{"error": err.Error()})
+		h.fail(w, http.StatusInternalServerError, "metrics_failed", "Unable to load payment metrics.", err)
 		return
 	}
 
@@ -764,7 +793,7 @@ func (h *Handler) ProcessDeliveries(w http.ResponseWriter, r *http.Request) {
 
 	result, err := h.service.ProcessDueDeliveries(r.Context(), limit)
 	if err != nil {
-		httputil.Error(w, http.StatusInternalServerError, "process_failed", "Unable to process payment webhook deliveries.", map[string]string{"error": err.Error()})
+		h.fail(w, http.StatusInternalServerError, "process_failed", "Unable to process payment webhook deliveries.", err)
 		return
 	}
 
@@ -787,7 +816,7 @@ func (h *Handler) ReconcilePayments(w http.ResponseWriter, r *http.Request) {
 
 	result, err := h.service.ReconcilePayments(r.Context(), limit)
 	if err != nil {
-		httputil.Error(w, http.StatusInternalServerError, "reconcile_failed", "Unable to reconcile payments.", map[string]string{"error": err.Error()})
+		h.fail(w, http.StatusInternalServerError, "reconcile_failed", "Unable to reconcile payments.", err)
 		return
 	}
 
@@ -1058,7 +1087,7 @@ func (h *Handler) MerchantCreateWithdrawal(w http.ResponseWriter, r *http.Reques
 			httputil.Error(w, http.StatusUnprocessableEntity, "insufficient_balance", "This app's available balance doesn't cover that amount.", nil)
 			return
 		}
-		httputil.Error(w, http.StatusInternalServerError, "create_failed", "Unable to create withdrawal.", map[string]string{"error": err.Error()})
+		h.fail(w, http.StatusInternalServerError, "create_failed", "Unable to create withdrawal.", err)
 		return
 	}
 	if vErrs.Any() {

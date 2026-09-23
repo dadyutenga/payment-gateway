@@ -58,6 +58,13 @@ func New(ctx context.Context) (*App, error) {
 	}
 
 	paymentRepo := payments.NewPostgresRepository(db)
+	// The provider call timeout stays below the request timeout so a slow
+	// provider surfaces as a retryable error instead of a request killed
+	// mid-flight (which orphans provider-side orders).
+	providerTimeout := cfg.HTTP.RequestTimeout - 5*time.Second
+	if providerTimeout < 5*time.Second {
+		providerTimeout = 5 * time.Second
+	}
 	paymentService := payments.NewService(paymentRepo, providers.Registry, cipher, payments.ServiceOptions{
 		DeliverySigningSecret:          cfg.Payments.DeliverySigningSecret,
 		DeliveryTimeout:                cfg.Payments.DeliveryTimeout,
@@ -67,6 +74,7 @@ func New(ctx context.Context) (*App, error) {
 		AutomatedPayoutsEnabled:        cfg.Payments.AutomatedPayoutsEnabled,
 		PayoutProvider:                 cfg.Payments.PayoutProvider,
 		PayoutReconciliationStaleAfter: cfg.Payments.PayoutReconciliationStaleAfter,
+		ProviderTimeout:                providerTimeout,
 	}, logger)
 	// SMS success notifications, admin alerts, and an audit trail are all
 	// optional integrations in the full AZSUBAY backend (SetSMSSender,
@@ -74,6 +82,7 @@ func New(ctx context.Context) (*App, error) {
 	// simply no-op. Wire your own if you want them; the Service methods are
 	// narrow interfaces, not concrete AZSUBAY types.
 	paymentHandler := payments.NewHandler(paymentService, cfg.Payments.WebhookMaxBodyBytes)
+	paymentHandler.SetLogger(logger)
 
 	// Admin privileges are stored in app.users. ADMIN_EMAILS only bootstraps
 	// the first administrators as they register.
@@ -93,10 +102,11 @@ func New(ctx context.Context) (*App, error) {
 			dbStatus = "down"
 		}
 		httputil.JSON(w, http.StatusOK, map[string]any{
-			"service": "azsubay-payments-gateway",
-			"status":  "ok",
-			"env":     cfg.App.Env,
-			"time":    time.Now().UTC(),
+			"service":         "azsubay-payments-gateway",
+			"status":          "ok",
+			"env":             cfg.App.Env,
+			"time":            time.Now().UTC(),
+			"public_base_url": cfg.Payments.PublicBaseURL,
 			"dependencies": map[string]any{
 				"database": map[string]string{"status": dbStatus},
 			},
@@ -212,6 +222,7 @@ func New(ctx context.Context) (*App, error) {
 		middleware.RequestID,
 		middleware.Logging(logger),
 		middleware.Recovery(logger),
+		middleware.MaxBytes(cfg.HTTP.MaxBodyBytes),
 		middleware.Timeout(cfg.HTTP.RequestTimeout),
 	)
 
@@ -237,48 +248,78 @@ func New(ctx context.Context) (*App, error) {
 	}, nil
 }
 
-// backgroundJobsPollInterval covers webhook delivery retries and stale-order
-// reconciliation — the same two jobs cmd/worker runs, run here too so a
-// single deployed process (just the API server) is enough to get a fully
-// working gateway. Run cmd/worker as a separate process too if you want to
-// scale delivery/reconciliation independently of the API — both are safe
-// to run at once (see internal/modules/payments for the claim-based
-// locking that makes this non-duplicating).
-const backgroundJobsPollInterval = 30 * time.Second
-
+// runBackgroundJobs runs the same delivery/reconciliation jobs cmd/worker
+// runs, so a single deployed process (just the API server) is enough to get
+// a fully working gateway. Intervals and batch sizes come from the same env
+// vars as the worker (PAYMENTS_DELIVERY_POLL_INTERVAL,
+// PAYMENTS_RECONCILIATION_INTERVAL, ...). Run cmd/worker as a separate
+// process too if you want to scale delivery/reconciliation independently of
+// the API — both are safe to run at once (deliveries use claim-based locking;
+// payment updates serialize on per-order row locks with idempotent ledger
+// inserts).
 func (a *App) runBackgroundJobs() {
-	ticker := time.NewTicker(backgroundJobsPollInterval)
-	defer ticker.Stop()
+	deliveryTicker := time.NewTicker(positiveDuration(a.cfg.Payments.DeliveryPollInterval, 30*time.Second))
+	defer deliveryTicker.Stop()
+	reconciliationTicker := time.NewTicker(positiveDuration(a.cfg.Payments.ReconciliationInterval, 5*time.Minute))
+	defer reconciliationTicker.Stop()
+	payoutTicker := time.NewTicker(positiveDuration(a.cfg.Payments.PayoutReconciliationInterval, 5*time.Minute))
+	defer payoutTicker.Stop()
 
-	run := func() {
-		if result, err := a.paymentService.ProcessDueDeliveries(a.ctx, 25); err != nil {
+	processDeliveries := func() {
+		if result, err := a.paymentService.ProcessDueDeliveries(a.ctx, positiveInt(a.cfg.Payments.DeliveryBatchSize, 25)); err != nil {
 			a.logger.Error("payment delivery processing failed", "error", err)
 		} else if result.Claimed > 0 {
 			a.logger.Info("payment deliveries processed", "claimed", result.Claimed, "delivered", result.Delivered, "retrying", result.Retrying, "failed", result.Failed)
 		}
-		if result, err := a.paymentService.ReconcilePayments(a.ctx, 50); err != nil {
+	}
+	reconcilePayments := func() {
+		if result, err := a.paymentService.ReconcilePayments(a.ctx, positiveInt(a.cfg.Payments.ReconciliationBatchSize, 50)); err != nil {
 			a.logger.Error("payment reconciliation failed", "error", err)
 		} else if result.Scanned > 0 {
 			a.logger.Info("payment reconciliation completed", "scanned", result.Scanned, "updated", result.Updated)
 		}
-		if a.cfg.Payments.AutomatedPayoutsEnabled {
-			if result, err := a.paymentService.ReconcilePayouts(a.ctx, 50); err != nil {
-				a.logger.Error("payout reconciliation failed", "error", err)
-			} else if result.Scanned > 0 {
-				a.logger.Info("payout reconciliation completed", "scanned", result.Scanned, "updated", result.Updated)
-			}
+	}
+	reconcilePayouts := func() {
+		if !a.cfg.Payments.AutomatedPayoutsEnabled {
+			return
+		}
+		if result, err := a.paymentService.ReconcilePayouts(a.ctx, positiveInt(a.cfg.Payments.ReconciliationBatchSize, 50)); err != nil {
+			a.logger.Error("payout reconciliation failed", "error", err)
+		} else if result.Scanned > 0 {
+			a.logger.Info("payout reconciliation completed", "scanned", result.Scanned, "updated", result.Updated)
 		}
 	}
 
-	run()
+	processDeliveries()
+	reconcilePayments()
+	reconcilePayouts()
+
 	for {
 		select {
 		case <-a.ctx.Done():
 			return
-		case <-ticker.C:
-			run()
+		case <-deliveryTicker.C:
+			processDeliveries()
+		case <-reconciliationTicker.C:
+			reconcilePayments()
+		case <-payoutTicker.C:
+			reconcilePayouts()
 		}
 	}
+}
+
+func positiveDuration(value, fallback time.Duration) time.Duration {
+	if value <= 0 {
+		return fallback
+	}
+	return value
+}
+
+func positiveInt(value, fallback int) int {
+	if value <= 0 {
+		return fallback
+	}
+	return value
 }
 
 func (a *App) Start() error {

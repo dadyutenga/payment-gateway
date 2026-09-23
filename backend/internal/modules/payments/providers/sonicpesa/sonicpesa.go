@@ -37,12 +37,12 @@ type Provider struct {
 }
 
 func New(cfg Config) *Provider {
-	return NewWithHTTPClient(cfg, &http.Client{Timeout: 15 * time.Second})
+	return NewWithHTTPClient(cfg, &http.Client{Timeout: 10 * time.Second})
 }
 
 func NewWithHTTPClient(cfg Config, client *http.Client) *Provider {
 	if client == nil {
-		client = &http.Client{Timeout: 15 * time.Second}
+		client = &http.Client{Timeout: 10 * time.Second}
 	}
 	return &Provider{
 		cfg:  cfg,
@@ -146,6 +146,10 @@ func (p *Provider) CreateOrder(ctx context.Context, req provider.CreateOrderRequ
 		"buyer_phone": req.BuyerPhone,
 		"amount":      json.Number(req.Amount),
 		"currency":    req.Currency,
+		// Our idempotency key: lets SonicPesa dedupe retries on their side
+		// and lets orphan provider orders (created after our timeout) be
+		// matched back to the local pending row during reconciliation.
+		"reference": req.ExternalReference,
 	}
 
 	parsed, err := p.post(ctx, "/payment/create_order", payload)
