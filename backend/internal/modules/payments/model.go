@@ -13,6 +13,7 @@ type PaymentApp struct {
 	Name        string    `json:"name"`
 	Description string    `json:"description,omitempty"`
 	Status      string    `json:"status"`
+	OrgID       string    `json:"org_id,omitempty"`
 	FeeType     string    `json:"fee_type"`
 	FeePercent  string    `json:"fee_percent"`
 	FeeFixed    string    `json:"fee_fixed"`

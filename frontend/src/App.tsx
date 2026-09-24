@@ -12,6 +12,9 @@ import AdminPaymentWithdrawals from "@/pages/AdminPaymentWithdrawals";
 import AdminPaymentProviders from "@/pages/AdminPaymentProviders";
 import MerchantApps from "@/pages/MerchantApps";
 import MerchantAppDetail from "@/pages/MerchantAppDetail";
+import CreateOrg from "@/pages/CreateOrg";
+import OrgMembers from "@/pages/OrgMembers";
+import OrgSettings from "@/pages/OrgSettings";
 
 const queryClient = new QueryClient();
 
@@ -46,6 +49,27 @@ const App = () => (
           >
             <Route path="apps" element={<MerchantApps />} />
             <Route path="apps/:id" element={<MerchantAppDetail />} />
+          </Route>
+          <Route
+            path="/onboarding/create-org"
+            element={
+              <MerchantRoute>
+                <AdminLayout />
+              </MerchantRoute>
+            }
+          >
+            <Route index element={<CreateOrg />} />
+          </Route>
+          <Route
+            path="/org/:orgId"
+            element={
+              <MerchantRoute>
+                <AdminLayout />
+              </MerchantRoute>
+            }
+          >
+            <Route path="members" element={<OrgMembers />} />
+            <Route path="settings" element={<OrgSettings />} />
           </Route>
           <Route path="/" element={<Navigate to="/admin/payments" replace />} />
           <Route path="*" element={<Navigate to="/admin/payments" replace />} />

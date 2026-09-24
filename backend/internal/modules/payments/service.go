@@ -720,37 +720,10 @@ func (s *Service) ReconcilePayouts(ctx context.Context, limit int) (ReconcilePay
 }
 
 // ---------- Merchant identity & access ----------
-
-func (s *Service) AddAppMemberByEmail(ctx context.Context, appID, email, addedBy string) (AppMember, validation.Errors, error) {
-	email = strings.TrimSpace(email)
-
-	errs := validation.Errors{}
-	validation.Required(email, "Email is required.", errs, "email")
-	validation.ValidEmail(email, "Enter a valid email address.", errs, "email")
-	if errs.Any() {
-		return AppMember{}, errs, nil
-	}
-
-	userID, err := s.repo.FindUserIDByEmail(ctx, email)
-	if err != nil {
-		return AppMember{}, nil, err
-	}
-
-	member, err := s.repo.AddAppMember(ctx, appID, userID, addedBy)
-	return member, nil, err
-}
-
-func (s *Service) ListAppMembers(ctx context.Context, appID string) ([]AppMember, error) {
-	return s.repo.ListAppMembers(ctx, appID)
-}
-
-func (s *Service) RemoveAppMember(ctx context.Context, appID, userID string) error {
-	return s.repo.RemoveAppMember(ctx, appID, userID)
-}
-
-func (s *Service) IsAppMember(ctx context.Context, userID, appID string) (bool, error) {
-	return s.repo.IsAppMember(ctx, userID, appID)
-}
+// Membership lives in app.org_members (Block 1 cutover): role checks run
+// through the orgs service in the handler layer, and app listing resolves
+// through the app's org below. The legacy payment_app_members table is no
+// longer read or written.
 
 func (s *Service) ListAppsForUser(ctx context.Context, userID string) ([]PaymentApp, error) {
 	return s.repo.ListAppsForUser(ctx, userID)

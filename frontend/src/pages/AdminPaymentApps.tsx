@@ -88,6 +88,7 @@ const AdminPaymentApps = () => {
 
   const [membersApp, setMembersApp] = useState<PaymentApp | null>(null);
   const [newMemberEmail, setNewMemberEmail] = useState("");
+  const [newMemberRole, setNewMemberRole] = useState("developer");
   const [addingMember, setAddingMember] = useState(false);
   const [removingMemberId, setRemovingMemberId] = useState<string | null>(null);
 
@@ -194,7 +195,7 @@ const AdminPaymentApps = () => {
     if (!membersApp) return;
     setAddingMember(true);
     try {
-      await addAppMember(membersApp.id, newMemberEmail.trim());
+      await addAppMember(membersApp.id, newMemberEmail.trim(), newMemberRole);
       toast.success("Member added.");
       setNewMemberEmail("");
       queryClient.invalidateQueries({ queryKey: ["admin", "payment-app-members", membersApp.id] });
@@ -608,19 +609,23 @@ const AdminPaymentApps = () => {
               <p className="rounded-lg bg-slate-50 px-3 py-4 text-center text-sm text-slate-500">No members yet.</p>
             )}
             {members.map((member) => (
-              <div key={member.id} className="flex items-center justify-between gap-2 rounded-lg border border-slate-200 px-3 py-2.5">
+              <div key={member.user_id} className="flex items-center justify-between gap-2 rounded-lg border border-slate-200 px-3 py-2.5">
                 <div className="min-w-0">
                   <p className="truncate text-sm font-medium text-slate-900">{member.full_name || member.email}</p>
                   <p className="truncate text-xs text-slate-500">{member.email}</p>
                 </div>
-                <Button
-                  size="icon"
-                  variant="outline"
-                  disabled={removingMemberId === member.user_id}
-                  onClick={() => handleRemoveMember(member.user_id)}
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                </Button>
+                <div className="flex shrink-0 items-center gap-2">
+                  <Badge variant="secondary">{member.role}</Badge>
+                  {member.status === "invited" && <Badge variant="outline">invited</Badge>}
+                  <Button
+                    size="icon"
+                    variant="outline"
+                    disabled={removingMemberId === member.user_id}
+                    onClick={() => handleRemoveMember(member.user_id)}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
               </div>
             ))}
           </div>
@@ -636,6 +641,19 @@ const AdminPaymentApps = () => {
                 placeholder="owner@example.com"
                 className="mt-1"
               />
+            </div>
+            <div>
+              <label className="text-sm font-medium text-slate-700">Role</label>
+              <select
+                className="mt-1 h-10 rounded-md border border-slate-300 px-2 text-sm"
+                value={newMemberRole}
+                onChange={(e) => setNewMemberRole(e.target.value)}
+              >
+                <option value="developer">developer</option>
+                <option value="finance">finance</option>
+                <option value="viewer">viewer</option>
+                <option value="owner">owner</option>
+              </select>
             </div>
             <Button type="submit" disabled={addingMember}>{addingMember ? "Adding..." : "Add"}</Button>
           </form>
@@ -654,8 +672,8 @@ const AdminPaymentApps = () => {
             <p className="text-sm text-slate-600">
               This key authenticates <strong>{apiKeyApp?.name}</strong> against the AZSUBAY Payments Gateway
               (order creation, status checks — sent as the <code className="text-xs">X-Api-Key</code> header). See
-              README_PAYMENTS.md for the full integration guide. Generating a new key immediately revokes any
-              previous key for this app.
+              README_PAYMENTS.md for the full integration guide. Generating a new key moves usable keys
+              into a 24h grace period instead of revoking them instantly.
             </p>
             {revealedApiKey ? (
               <div className="space-y-3">

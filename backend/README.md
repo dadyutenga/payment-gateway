@@ -79,6 +79,33 @@ users table) may self-register to bootstrap the deployment; afterwards
 immediately instead of lingering in the token until `AUTH_TOKEN_TTL`
 expires.
 
+## Organizations & roles
+
+Apps belong to organizations (`payment_apps.org_id`, NOT NULL).
+Membership lives in `app.org_members` (replacing `payment_app_members`,
+which is left untouched as a legacy record). Roles and their powers live
+in exactly one place — `internal/modules/orgs/model.go` (`Can`):
+
+| role | reads | withdrawals | webhooks/keys/apps | members | org settings/delete |
+|---|---|---|---|---|---|
+| owner | ✓ | ✓ | ✓ | ✓ | ✓ |
+| finance | ✓ | ✓ | — | — | — |
+| developer | ✓ | — | ✓ | — | — |
+| viewer | ✓ | — | — | — | — |
+
+Every merchant route resolves the caller's active role server-side from
+the session and never trusts a client-supplied app/org id. Permission
+failures return `403 forbidden` JSON (never raw errors). Revoking the
+last owner is refused (`409 last_owner`).
+
+Org endpoints (all session-authenticated): `POST/GET /api/v1/orgs`,
+`GET/PATCH/DELETE /api/v1/orgs/{orgID}`, `GET .../members`,
+`POST .../invites` (owner, existing accounts only),
+`POST .../accept`, `PATCH/DELETE .../members/{userID}` (owner),
+`POST .../leave`. Deleting an org with apps is refused (`409`).
+Finance/owner members additionally get
+`POST /api/v1/merchant/apps/{id}/withdrawals/{withdrawalID}/approve|reject`.
+
 ## Adding a payment provider
 
 Providers implement the interface in

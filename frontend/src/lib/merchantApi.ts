@@ -99,6 +99,7 @@ export type MerchantApp = {
   name: string;
   description?: string;
   status: string;
+  org_id?: string;
 };
 
 export type MerchantWebhookEndpoint = {

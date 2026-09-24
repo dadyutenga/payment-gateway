@@ -82,11 +82,7 @@ type Repository interface {
 	GetWithdrawalByProviderPayoutID(ctx context.Context, provider, providerPayoutID string) (PaymentWithdrawal, error)
 	ListPayoutReconciliationCandidates(ctx context.Context, staleBefore time.Time, limit int) ([]PaymentWithdrawal, error)
 
-	FindUserIDByEmail(ctx context.Context, email string) (string, error)
-	AddAppMember(ctx context.Context, appID, userID, addedBy string) (AppMember, error)
 	ListAppMembers(ctx context.Context, appID string) ([]AppMember, error)
-	RemoveAppMember(ctx context.Context, appID, userID string) error
-	IsAppMember(ctx context.Context, userID, appID string) (bool, error)
 	ListAppsForUser(ctx context.Context, userID string) ([]PaymentApp, error)
 
 	GetPaymentOrderByID(ctx context.Context, paymentOrderID string) (PaymentOrder, error)
@@ -2576,46 +2572,21 @@ func (r *PostgresRepository) ListPayoutReconciliationCandidates(ctx context.Cont
 	return withdrawals, nil
 }
 
-// ---------- Merchant identity & access (Phase 2) ----------
-
-func (r *PostgresRepository) FindUserIDByEmail(ctx context.Context, email string) (string, error) {
-	const query = `SELECT id::text FROM app.users WHERE lower(email) = lower($1) LIMIT 1`
-	var id string
-	err := r.db.QueryRowEx(ctx, query, nil, email).Scan(&id)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return "", ErrUserNotFound
-	}
-	if err != nil {
-		return "", fmt.Errorf("find user by email: %w", err)
-	}
-	return id, nil
-}
-
-func (r *PostgresRepository) AddAppMember(ctx context.Context, appID, userID, addedBy string) (AppMember, error) {
-	const query = `
-		INSERT INTO app.payment_app_members (app_id, user_id, added_by)
-		VALUES ($1::uuid, $2::uuid, $3)
-		RETURNING id::text, app_id::text, user_id::text, added_by, created_at
-	`
-	var m AppMember
-	err := r.db.QueryRowEx(ctx, query, nil, appID, userID, addedBy).Scan(&m.ID, &m.AppID, &m.UserID, &m.AddedBy, &m.CreatedAt)
-	if err != nil {
-		if pgErr, ok := err.(pgx.PgError); ok && pgErr.Code == "23505" {
-			return AppMember{}, ErrAlreadyMember
-		}
-		return AppMember{}, fmt.Errorf("add app member: %w", err)
-	}
-	return m, nil
-}
+// ---------- Merchant identity & access ----------
+// Membership now lives in app.org_members (Block 1 cutover). These helpers
+// resolve through the app's org; the legacy payment_app_members table is
+// no longer read or written.
 
 // ListAppMembers joins the service-owned user table for display fields.
+// Used for payment-success SMS phone lookup.
 func (r *PostgresRepository) ListAppMembers(ctx context.Context, appID string) ([]AppMember, error) {
 	const query = `
-		SELECT m.id::text, m.app_id::text, m.user_id::text,
-		       u.email, u.full_name, m.added_by, m.created_at, u.phone
-		FROM app.payment_app_members m
-		JOIN app.users u ON u.id = m.user_id
-		WHERE m.app_id = $1::uuid
+		SELECT m.user_id::text, a.id::text, m.user_id::text,
+		       u.email, u.full_name, m.user_id::text, NOW(), u.phone
+		FROM app.payment_apps a
+		JOIN app.org_members m ON m.org_id = a.org_id AND m.status = 'active'
+		LEFT JOIN app.users u ON u.id = m.user_id
+		WHERE a.id = $1::uuid
 		ORDER BY m.created_at ASC
 	`
 	rows, err := r.db.QueryEx(ctx, query, nil, appID)
@@ -2638,38 +2609,15 @@ func (r *PostgresRepository) ListAppMembers(ctx context.Context, appID string) (
 	return members, nil
 }
 
-func (r *PostgresRepository) RemoveAppMember(ctx context.Context, appID, userID string) error {
-	tag, err := r.db.ExecEx(ctx, `DELETE FROM app.payment_app_members WHERE app_id = $1::uuid AND user_id = $2::uuid`, nil, appID, userID)
-	if err != nil {
-		return fmt.Errorf("remove app member: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrAppMemberNotFound
-	}
-	return nil
-}
-
-// IsAppMember is the access-check primitive Phase 3's merchant-facing routes
-// will call directly (no generic middleware, since the app id comes from
-// the path and varies per route — each handler checks membership itself,
-// the same way admin handlers already read r.PathValue("id") themselves).
-func (r *PostgresRepository) IsAppMember(ctx context.Context, userID, appID string) (bool, error) {
-	const query = `SELECT EXISTS (SELECT 1 FROM app.payment_app_members WHERE user_id = $1::uuid AND app_id = $2::uuid)`
-	var exists bool
-	if err := r.db.QueryRowEx(ctx, query, nil, userID, appID).Scan(&exists); err != nil {
-		return false, fmt.Errorf("check app membership: %w", err)
-	}
-	return exists, nil
-}
-
 // ListAppsForUser is the merchant-facing counterpart to ListPaymentApps —
-// only the apps the given user is a member of, via payment_app_members.
+// only apps in organizations the user actively belongs to.
 func (r *PostgresRepository) ListAppsForUser(ctx context.Context, userID string) ([]PaymentApp, error) {
 	const query = `
 		SELECT a.id::text, a.name, COALESCE(a.description, ''), a.status,
-		       a.fee_type, a.fee_percent::text, a.fee_fixed::text, a.created_at, a.updated_at
+		       a.fee_type, a.fee_percent::text, a.fee_fixed::text, a.created_at, a.updated_at,
+		       a.org_id::text
 		FROM app.payment_apps a
-		JOIN app.payment_app_members m ON m.app_id = a.id
+		JOIN app.org_members m ON m.org_id = a.org_id AND m.status = 'active'
 		WHERE m.user_id = $1::uuid AND a.status != 'deleted'
 		ORDER BY a.name ASC
 	`
@@ -2682,7 +2630,7 @@ func (r *PostgresRepository) ListAppsForUser(ctx context.Context, userID string)
 	apps := []PaymentApp{}
 	for rows.Next() {
 		var app PaymentApp
-		if err := rows.Scan(&app.ID, &app.Name, &app.Description, &app.Status, &app.FeeType, &app.FeePercent, &app.FeeFixed, &app.CreatedAt, &app.UpdatedAt); err != nil {
+		if err := rows.Scan(&app.ID, &app.Name, &app.Description, &app.Status, &app.FeeType, &app.FeePercent, &app.FeeFixed, &app.CreatedAt, &app.UpdatedAt, &app.OrgID); err != nil {
 			return nil, fmt.Errorf("scan app for user: %w", err)
 		}
 		apps = append(apps, app)

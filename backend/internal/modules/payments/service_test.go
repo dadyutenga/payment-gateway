@@ -701,30 +701,11 @@ func (r *fakePaymentRepository) MarkWithdrawalFailed(_ context.Context, id, note
 	return PaymentWithdrawal{ID: id, Status: WithdrawalStatusFailed, Notes: notes}, nil
 }
 
-func (r *fakePaymentRepository) FindUserIDByEmail(_ context.Context, email string) (string, error) {
-	if email == "" {
-		return "", ErrUserNotFound
-	}
-	return "user_test", nil
-}
-
-func (r *fakePaymentRepository) AddAppMember(_ context.Context, appID, userID, addedBy string) (AppMember, error) {
-	return AppMember{ID: "member_test", AppID: appID, UserID: userID, AddedBy: addedBy}, nil
-}
-
 func (r *fakePaymentRepository) ListAppMembers(_ context.Context, appID string) ([]AppMember, error) {
 	if r.appMembers != nil {
 		return r.appMembers, nil
 	}
 	return []AppMember{}, nil
-}
-
-func (r *fakePaymentRepository) RemoveAppMember(_ context.Context, _, _ string) error {
-	return nil
-}
-
-func (r *fakePaymentRepository) IsAppMember(_ context.Context, _, _ string) (bool, error) {
-	return true, nil
 }
 
 func (r *fakePaymentRepository) ListAppsForUser(_ context.Context, _ string) ([]PaymentApp, error) {

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"azsubay-payments-gateway/internal/modules/orgs"
 	"azsubay-payments-gateway/internal/modules/payments"
 	"azsubay-payments-gateway/internal/modules/payments/providers"
 	"azsubay-payments-gateway/internal/platform/auth"
@@ -85,6 +86,11 @@ func New(ctx context.Context) (*App, error) {
 	// narrow interfaces, not concrete AZSUBAY types.
 	paymentHandler := payments.NewHandler(paymentService, cfg.Payments.WebhookMaxBodyBytes)
 	paymentHandler.SetLogger(logger)
+
+	orgRepo := orgs.NewPostgresRepository(db)
+	orgService := orgs.NewService(orgRepo, logger)
+	orgHandler := orgs.NewHandler(orgService, logger)
+	paymentHandler.SetOrgService(orgService)
 
 	// Admin privileges are stored in app.users and read from the database on
 	// every request — never trusted from the token claim. ADMIN_EMAILS only
@@ -173,6 +179,8 @@ func New(ctx context.Context) (*App, error) {
 	mux.Handle("GET /api/v1/merchant/apps/{id}/orders", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantSearchOrders), middleware.RequireAuth(authVerifier)))
 	mux.Handle("GET /api/v1/merchant/apps/{id}/withdrawals", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantListWithdrawals), middleware.RequireAuth(authVerifier)))
 	mux.Handle("POST /api/v1/merchant/apps/{id}/withdrawals", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantCreateWithdrawal), middleware.RequireAuth(authVerifier)))
+	mux.Handle("POST /api/v1/merchant/apps/{id}/withdrawals/{withdrawalID}/approve", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantApproveWithdrawal), middleware.RequireAuth(authVerifier)))
+	mux.Handle("POST /api/v1/merchant/apps/{id}/withdrawals/{withdrawalID}/reject", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantRejectWithdrawal), middleware.RequireAuth(authVerifier)))
 
 	// ---- Merchant self-service: webhook endpoints, API keys, deliveries ----
 	// All scoped to the path app id via membership on the caller's session —
@@ -204,6 +212,28 @@ func New(ctx context.Context) (*App, error) {
 	mux.Handle("POST /api/v1/merchant/apps/{id}/api-keys/{keyID}/revoke", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantRevokeAPIKey), middleware.RequireAuth(authVerifier)))
 	mux.Handle("GET /api/v1/merchant/apps/{id}/deliveries", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantListDeliveries), middleware.RequireAuth(authVerifier)))
 	mux.Handle("POST /api/v1/merchant/apps/{id}/deliveries/{deliveryID}/replay", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantReplayDelivery), middleware.RequireAuth(authVerifier)))
+
+	// ---- Organizations & roles (session-authenticated; role checks run
+	// inside the handlers/services against the member's own row) ----
+	mux.Handle("/api/v1/orgs", middleware.Chain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			orgHandler.ListMyOrganizations(w, r)
+		case http.MethodPost:
+			orgHandler.CreateOrganization(w, r)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}), middleware.RequireAuth(authVerifier)))
+	mux.Handle("GET /api/v1/orgs/{orgID}", middleware.Chain(http.HandlerFunc(orgHandler.GetOrganization), middleware.RequireAuth(authVerifier)))
+	mux.Handle("PATCH /api/v1/orgs/{orgID}", middleware.Chain(http.HandlerFunc(orgHandler.UpdateOrganization), middleware.RequireAuth(authVerifier)))
+	mux.Handle("DELETE /api/v1/orgs/{orgID}", middleware.Chain(http.HandlerFunc(orgHandler.DeleteOrganization), middleware.RequireAuth(authVerifier)))
+	mux.Handle("GET /api/v1/orgs/{orgID}/members", middleware.Chain(http.HandlerFunc(orgHandler.ListMembers), middleware.RequireAuth(authVerifier)))
+	mux.Handle("POST /api/v1/orgs/{orgID}/invites", middleware.Chain(http.HandlerFunc(orgHandler.InviteMember), middleware.RequireAuth(authVerifier)))
+	mux.Handle("POST /api/v1/orgs/{orgID}/accept", middleware.Chain(http.HandlerFunc(orgHandler.AcceptInvite), middleware.RequireAuth(authVerifier)))
+	mux.Handle("PATCH /api/v1/orgs/{orgID}/members/{userID}", middleware.Chain(http.HandlerFunc(orgHandler.ChangeMemberRole), middleware.RequireAuth(authVerifier)))
+	mux.Handle("DELETE /api/v1/orgs/{orgID}/members/{userID}", middleware.Chain(http.HandlerFunc(orgHandler.RemoveMember), middleware.RequireAuth(authVerifier)))
+	mux.Handle("POST /api/v1/orgs/{orgID}/leave", middleware.Chain(http.HandlerFunc(orgHandler.LeaveOrganization), middleware.RequireAuth(authVerifier)))
 
 	// ---- Admin: withdrawals ----
 	mux.Handle("/api/v1/admin/payments/withdrawals", middleware.Chain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

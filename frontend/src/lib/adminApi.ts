@@ -113,6 +113,7 @@ export type PaymentApp = {
   name: string;
   description?: string;
   status: string;
+  org_id?: string;
   fee_type: "fixed" | "percentage" | "hybrid";
   fee_percent: string;
   fee_fixed: string;
@@ -409,12 +410,14 @@ export type CreateWithdrawalInput = {
 };
 
 export type AppMember = {
-  id: string;
-  app_id: string;
+  org_id: string;
   user_id: string;
   email: string;
   full_name?: string;
-  added_by: string;
+  phone?: string;
+  role: "owner" | "finance" | "developer" | "viewer";
+  invited_by?: string;
+  status: "invited" | "active";
   created_at: string;
 };
 
@@ -422,8 +425,8 @@ export async function listAppMembers(appId: string) {
   return (await request<AppMember[]>(`/api/v1/admin/payments/apps/${appId}/members`)).data;
 }
 
-export function addAppMember(appId: string, email: string) {
-  return request<AppMember>(`/api/v1/admin/payments/apps/${appId}/members`, { method: "POST", body: { email } }).then((r) => r.data);
+export function addAppMember(appId: string, email: string, role?: string) {
+  return request<AppMember>(`/api/v1/admin/payments/apps/${appId}/members`, { method: "POST", body: { email, role } }).then((r) => r.data);
 }
 
 export function removeAppMember(appId: string, userId: string) {

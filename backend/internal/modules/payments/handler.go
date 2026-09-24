@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"azsubay-payments-gateway/internal/modules/orgs"
 	"azsubay-payments-gateway/internal/modules/payments/provider"
 	"azsubay-payments-gateway/internal/platform/middleware"
 	"azsubay-payments-gateway/internal/shared/httputil"
@@ -19,6 +20,7 @@ import (
 
 type Handler struct {
 	service      *Service
+	orgs         *orgs.Service
 	maxBodyBytes int64
 	logger       *slog.Logger
 }
@@ -35,6 +37,43 @@ func NewHandler(service *Service, maxBodyBytes int64) *Handler {
 // returned to clients (see fail).
 func (h *Handler) SetLogger(logger *slog.Logger) {
 	h.logger = logger
+}
+
+// SetOrgService wires the organization service used for merchant role
+// checks. Required for every merchant route — without it handlers fail
+// closed rather than guessing access.
+func (h *Handler) SetOrgService(service *orgs.Service) {
+	h.orgs = service
+}
+
+// requireOrgRole resolves the caller's active role for the path app and
+// enforces one permission from the central matrix (orgs.Can). The app id
+// always comes from the verified route parameter, never client input.
+// Returns the caller user id for handlers that need it.
+func (h *Handler) requireOrgRole(w http.ResponseWriter, r *http.Request, appID string, perm orgs.Permission) (string, bool) {
+	claims, ok := middleware.ClaimsFromContext(r.Context())
+	if !ok {
+		httputil.Error(w, http.StatusUnauthorized, "unauthorized", "Missing authenticated user.", nil)
+		return "", false
+	}
+	if h.orgs == nil {
+		h.log().Error("org service not wired for merchant route", "path", r.URL.Path)
+		httputil.Error(w, http.StatusInternalServerError, "internal_error", "Merchant access is not configured.", nil)
+		return "", false
+	}
+	if _, err := h.orgs.CheckAppPermission(r.Context(), claims.Subject, appID, perm); err != nil {
+		if errors.Is(err, orgs.ErrNotOrgMember) {
+			httputil.Error(w, http.StatusForbidden, "forbidden", "You don't have access to this app.", nil)
+			return "", false
+		}
+		if errors.Is(err, orgs.ErrForbidden) {
+			httputil.Error(w, http.StatusForbidden, "forbidden", "Your role doesn't allow this action.", nil)
+			return "", false
+		}
+		h.fail(w, http.StatusInternalServerError, "internal_error", "Unable to verify app access.", err)
+		return "", false
+	}
+	return claims.Subject, true
 }
 
 func (h *Handler) log() *slog.Logger {
@@ -562,11 +601,19 @@ func (h *Handler) RetryWithdrawalPayout(w http.ResponseWriter, r *http.Request) 
 }
 
 // ---------- Merchant identity & access ----------
+// Membership lives in app.org_members (Block 1 cutover). These admin
+// endpoints resolve the app to its org and delegate to the orgs service;
+// the legacy payment_app_members table is no longer read or written.
 
 func (h *Handler) ListAppMembers(w http.ResponseWriter, r *http.Request) {
-	members, err := h.service.ListAppMembers(r.Context(), r.PathValue("id"))
+	orgID, err := h.orgs.OrgIDForApp(r.Context(), r.PathValue("id"))
 	if err != nil {
-		httputil.Error(w, http.StatusInternalServerError, "list_failed", "Unable to list app members.", nil)
+		h.fail(w, http.StatusInternalServerError, "list_failed", "Unable to list app members.", err)
+		return
+	}
+	members, err := h.orgs.AdminListMembers(r.Context(), orgID)
+	if err != nil {
+		h.fail(w, http.StatusInternalServerError, "list_failed", "Unable to list app members.", err)
 		return
 	}
 	httputil.JSON(w, http.StatusOK, map[string]any{"data": members})
@@ -574,6 +621,7 @@ func (h *Handler) ListAppMembers(w http.ResponseWriter, r *http.Request) {
 
 type addAppMemberInput struct {
 	Email string `json:"email"`
+	Role  string `json:"role"`
 }
 
 func (h *Handler) AddAppMember(w http.ResponseWriter, r *http.Request) {
@@ -588,34 +636,53 @@ func (h *Handler) AddAppMember(w http.ResponseWriter, r *http.Request) {
 		httputil.Error(w, http.StatusBadRequest, "invalid_request", "Unable to decode request body.", nil)
 		return
 	}
-
-	member, vErrs, err := h.service.AddAppMemberByEmail(r.Context(), r.PathValue("id"), in.Email, claims.Subject)
+	role, err := orgs.ParseRole(strings.ToLower(strings.TrimSpace(in.Role)))
+	if strings.TrimSpace(in.Role) != "" && err != nil {
+		httputil.Error(w, http.StatusUnprocessableEntity, "validation_failed", "Role must be owner, finance, developer, or viewer.", nil)
+		return
+	}
+	if strings.TrimSpace(in.Role) == "" {
+		role = orgs.RoleDeveloper
+	}
+	orgID, err := h.orgs.OrgIDForApp(r.Context(), r.PathValue("id"))
+	if err != nil {
+		h.fail(w, http.StatusInternalServerError, "create_failed", "Unable to add app member.", err)
+		return
+	}
+	if strings.TrimSpace(in.Email) == "" || !strings.Contains(in.Email, "@") {
+		httputil.Error(w, http.StatusUnprocessableEntity, "validation_failed", "Enter a valid email address.", nil)
+		return
+	}
+	member, err := h.orgs.AdminAddMember(r.Context(), orgID, strings.TrimSpace(in.Email), role, claims.Subject)
 	if err != nil {
 		switch {
-		case errors.Is(err, ErrUserNotFound):
-			httputil.Error(w, http.StatusNotFound, "user_not_found", "No AZsubay account found for that email. They need to sign up first.", nil)
-		case errors.Is(err, ErrAlreadyMember):
+		case errors.Is(err, orgs.ErrUserNotFound):
+			httputil.Error(w, http.StatusNotFound, "user_not_found", "No account found for that email. They need to sign up first.", nil)
+		case errors.Is(err, orgs.ErrAlreadyMember):
 			httputil.Error(w, http.StatusConflict, "already_member", "This person already has access to this app.", nil)
 		default:
 			h.fail(w, http.StatusInternalServerError, "create_failed", "Unable to add app member.", err)
 		}
 		return
 	}
-	if vErrs.Any() {
-		httputil.Error(w, http.StatusUnprocessableEntity, "validation_failed", "Please check your input.", vErrs)
-		return
-	}
-
 	httputil.JSON(w, http.StatusCreated, map[string]any{"data": member})
 }
 
 func (h *Handler) RemoveAppMember(w http.ResponseWriter, r *http.Request) {
-	if err := h.service.RemoveAppMember(r.Context(), r.PathValue("id"), r.PathValue("userID")); err != nil {
-		if errors.Is(err, ErrAppMemberNotFound) {
+	orgID, err := h.orgs.OrgIDForApp(r.Context(), r.PathValue("id"))
+	if err != nil {
+		h.fail(w, http.StatusInternalServerError, "delete_failed", "Unable to remove app member.", err)
+		return
+	}
+	if err := h.orgs.AdminRemoveMember(r.Context(), orgID, r.PathValue("userID")); err != nil {
+		switch {
+		case errors.Is(err, orgs.ErrNotOrgMember):
 			httputil.Error(w, http.StatusNotFound, "not_found", "App member not found.", nil)
-			return
+		case errors.Is(err, orgs.ErrLastOwner):
+			httputil.Error(w, http.StatusConflict, "last_owner", "The organization must keep at least one owner.", nil)
+		default:
+			h.fail(w, http.StatusInternalServerError, "delete_failed", "Unable to remove app member.", err)
 		}
-		httputil.Error(w, http.StatusInternalServerError, "delete_failed", "Unable to remove app member.", nil)
 		return
 	}
 	httputil.JSON(w, http.StatusOK, map[string]any{"data": map[string]any{"removed": true}})
@@ -1101,28 +1168,7 @@ func parseOptionalBool(w http.ResponseWriter, r *http.Request, key string) (*boo
 // r.PathValue("id") themselves rather than through generic middleware
 // (middleware.RequireAdmin's check closure has no access to path values).
 
-// requireMembership returns the caller's user id and whether they're a
-// member of the given app, writing the appropriate error response itself
-// when not (401 if unauthenticated, 403 if not a member).
-func (h *Handler) requireMembership(w http.ResponseWriter, r *http.Request, appID string) (string, bool) {
-	claims, ok := middleware.ClaimsFromContext(r.Context())
-	if !ok {
-		httputil.Error(w, http.StatusUnauthorized, "unauthorized", "Missing authenticated user.", nil)
-		return "", false
-	}
-
-	isMember, err := h.service.IsAppMember(r.Context(), claims.Subject, appID)
-	if err != nil {
-		httputil.Error(w, http.StatusInternalServerError, "internal_error", "Unable to verify app access.", nil)
-		return "", false
-	}
-	if !isMember {
-		httputil.Error(w, http.StatusForbidden, "forbidden", "You don't have access to this app.", nil)
-		return "", false
-	}
-
-	return claims.Subject, true
-}
+// ---------- Merchant self-service (role-gated) ----------
 
 func (h *Handler) ListMyApps(w http.ResponseWriter, r *http.Request) {
 	claims, ok := middleware.ClaimsFromContext(r.Context())
@@ -1141,7 +1187,7 @@ func (h *Handler) ListMyApps(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) MerchantGetAppBalance(w http.ResponseWriter, r *http.Request) {
 	appID := r.PathValue("id")
-	if _, ok := h.requireMembership(w, r, appID); !ok {
+	if _, ok := h.requireOrgRole(w, r, appID, orgs.PermRead); !ok {
 		return
 	}
 
@@ -1155,7 +1201,7 @@ func (h *Handler) MerchantGetAppBalance(w http.ResponseWriter, r *http.Request) 
 
 func (h *Handler) MerchantListLedgerEntries(w http.ResponseWriter, r *http.Request) {
 	appID := r.PathValue("id")
-	if _, ok := h.requireMembership(w, r, appID); !ok {
+	if _, ok := h.requireOrgRole(w, r, appID, orgs.PermRead); !ok {
 		return
 	}
 
@@ -1174,7 +1220,7 @@ func (h *Handler) MerchantListLedgerEntries(w http.ResponseWriter, r *http.Reque
 
 func (h *Handler) MerchantSearchOrders(w http.ResponseWriter, r *http.Request) {
 	appID := r.PathValue("id")
-	if _, ok := h.requireMembership(w, r, appID); !ok {
+	if _, ok := h.requireOrgRole(w, r, appID, orgs.PermRead); !ok {
 		return
 	}
 
@@ -1203,7 +1249,7 @@ func (h *Handler) MerchantSearchOrders(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) MerchantListWithdrawals(w http.ResponseWriter, r *http.Request) {
 	appID := r.PathValue("id")
-	if _, ok := h.requireMembership(w, r, appID); !ok {
+	if _, ok := h.requireOrgRole(w, r, appID, orgs.PermRead); !ok {
 		return
 	}
 
@@ -1222,7 +1268,7 @@ func (h *Handler) MerchantListWithdrawals(w http.ResponseWriter, r *http.Request
 
 func (h *Handler) MerchantCreateWithdrawal(w http.ResponseWriter, r *http.Request) {
 	appID := r.PathValue("id")
-	userID, ok := h.requireMembership(w, r, appID)
+	userID, ok := h.requireOrgRole(w, r, appID, orgs.PermWithdraw)
 	if !ok {
 		return
 	}
@@ -1264,6 +1310,39 @@ func (h *Handler) MerchantCreateWithdrawal(w http.ResponseWriter, r *http.Reques
 	h.writeJSON(state, w, r, http.StatusCreated, map[string]any{"data": withdrawal})
 }
 
+// MerchantApproveWithdrawal approves a requested withdrawal (finance/owner
+// only). The repository re-sums the locked balance, so concurrent approvals
+// can never over-pay.
+func (h *Handler) MerchantApproveWithdrawal(w http.ResponseWriter, r *http.Request) {
+	appID := r.PathValue("id")
+	userID, ok := h.requireOrgRole(w, r, appID, orgs.PermWithdraw)
+	if !ok {
+		return
+	}
+
+	withdrawal, err := h.service.ApproveWithdrawal(r.Context(), r.PathValue("withdrawalID"), userID)
+	if err != nil {
+		h.withdrawalTransitionError(w, err, "approved")
+		return
+	}
+	httputil.JSON(w, http.StatusOK, map[string]any{"data": withdrawal})
+}
+
+// MerchantRejectWithdrawal rejects a requested withdrawal (finance/owner).
+func (h *Handler) MerchantRejectWithdrawal(w http.ResponseWriter, r *http.Request) {
+	appID := r.PathValue("id")
+	if _, ok := h.requireOrgRole(w, r, appID, orgs.PermWithdraw); !ok {
+		return
+	}
+
+	withdrawal, err := h.service.RejectWithdrawal(r.Context(), r.PathValue("withdrawalID"))
+	if err != nil {
+		h.withdrawalTransitionError(w, err, "rejected")
+		return
+	}
+	httputil.JSON(w, http.StatusOK, map[string]any{"data": withdrawal})
+}
+
 // ---------- Merchant self-service ----------
 // Every handler below scopes to the app id from the verified membership
 // path parameter — never to any client-supplied id — so a member can only
@@ -1271,7 +1350,7 @@ func (h *Handler) MerchantCreateWithdrawal(w http.ResponseWriter, r *http.Reques
 
 func (h *Handler) MerchantListWebhookEndpoints(w http.ResponseWriter, r *http.Request) {
 	appID := r.PathValue("id")
-	if _, ok := h.requireMembership(w, r, appID); !ok {
+	if _, ok := h.requireOrgRole(w, r, appID, orgs.PermRead); !ok {
 		return
 	}
 
@@ -1290,7 +1369,7 @@ type merchantWebhookEndpointInput struct {
 
 func (h *Handler) MerchantCreateWebhookEndpoint(w http.ResponseWriter, r *http.Request) {
 	appID := r.PathValue("id")
-	if _, ok := h.requireMembership(w, r, appID); !ok {
+	if _, ok := h.requireOrgRole(w, r, appID, orgs.PermDevelop); !ok {
 		return
 	}
 
@@ -1325,7 +1404,7 @@ type merchantUpdateWebhookEndpointInput struct {
 
 func (h *Handler) MerchantUpdateWebhookEndpoint(w http.ResponseWriter, r *http.Request) {
 	appID := r.PathValue("id")
-	if _, ok := h.requireMembership(w, r, appID); !ok {
+	if _, ok := h.requireOrgRole(w, r, appID, orgs.PermDevelop); !ok {
 		return
 	}
 
@@ -1365,7 +1444,7 @@ func (h *Handler) MerchantUpdateWebhookEndpoint(w http.ResponseWriter, r *http.R
 
 func (h *Handler) MerchantDeleteWebhookEndpoint(w http.ResponseWriter, r *http.Request) {
 	appID := r.PathValue("id")
-	if _, ok := h.requireMembership(w, r, appID); !ok {
+	if _, ok := h.requireOrgRole(w, r, appID, orgs.PermDevelop); !ok {
 		return
 	}
 
@@ -1382,7 +1461,7 @@ func (h *Handler) MerchantDeleteWebhookEndpoint(w http.ResponseWriter, r *http.R
 
 func (h *Handler) MerchantTestWebhookEndpoint(w http.ResponseWriter, r *http.Request) {
 	appID := r.PathValue("id")
-	if _, ok := h.requireMembership(w, r, appID); !ok {
+	if _, ok := h.requireOrgRole(w, r, appID, orgs.PermDevelop); !ok {
 		return
 	}
 
@@ -1400,7 +1479,7 @@ func (h *Handler) MerchantTestWebhookEndpoint(w http.ResponseWriter, r *http.Req
 
 func (h *Handler) MerchantListAPIKeys(w http.ResponseWriter, r *http.Request) {
 	appID := r.PathValue("id")
-	if _, ok := h.requireMembership(w, r, appID); !ok {
+	if _, ok := h.requireOrgRole(w, r, appID, orgs.PermRead); !ok {
 		return
 	}
 
@@ -1418,7 +1497,7 @@ type merchantCreateAPIKeyInput struct {
 
 func (h *Handler) MerchantCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	appID := r.PathValue("id")
-	if _, ok := h.requireMembership(w, r, appID); !ok {
+	if _, ok := h.requireOrgRole(w, r, appID, orgs.PermDevelop); !ok {
 		return
 	}
 
@@ -1439,7 +1518,7 @@ func (h *Handler) MerchantCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) MerchantRotateAPIKey(w http.ResponseWriter, r *http.Request) {
 	appID := r.PathValue("id")
-	if _, ok := h.requireMembership(w, r, appID); !ok {
+	if _, ok := h.requireOrgRole(w, r, appID, orgs.PermDevelop); !ok {
 		return
 	}
 
@@ -1456,7 +1535,7 @@ func (h *Handler) MerchantRotateAPIKey(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) MerchantRevokeAPIKey(w http.ResponseWriter, r *http.Request) {
 	appID := r.PathValue("id")
-	if _, ok := h.requireMembership(w, r, appID); !ok {
+	if _, ok := h.requireOrgRole(w, r, appID, orgs.PermDevelop); !ok {
 		return
 	}
 
@@ -1473,7 +1552,7 @@ func (h *Handler) MerchantRevokeAPIKey(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) MerchantListDeliveries(w http.ResponseWriter, r *http.Request) {
 	appID := r.PathValue("id")
-	if _, ok := h.requireMembership(w, r, appID); !ok {
+	if _, ok := h.requireOrgRole(w, r, appID, orgs.PermRead); !ok {
 		return
 	}
 
@@ -1498,7 +1577,7 @@ func (h *Handler) MerchantListDeliveries(w http.ResponseWriter, r *http.Request)
 
 func (h *Handler) MerchantReplayDelivery(w http.ResponseWriter, r *http.Request) {
 	appID := r.PathValue("id")
-	if _, ok := h.requireMembership(w, r, appID); !ok {
+	if _, ok := h.requireOrgRole(w, r, appID, orgs.PermDevelop); !ok {
 		return
 	}
 
