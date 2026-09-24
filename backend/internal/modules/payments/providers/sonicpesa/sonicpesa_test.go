@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -187,4 +188,29 @@ func sign(secret string, rawBody []byte) string {
 	mac := hmac.New(sha256.New, []byte(secret))
 	_, _ = mac.Write(rawBody)
 	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func TestRefundOrderReturnsNotSupported(t *testing.T) {
+	p := New(Config{BaseURL: "https://api.sonicpesa.com/api/v1", APIKey: "test-key"})
+	_, err := p.RefundOrder(context.Background(), map[string]string{}, "ref-1", "100.00", "TZS", "test")
+	if !errors.Is(err, provider.ErrRefundNotSupported) {
+		t.Fatalf("expected ErrRefundNotSupported (no documented refund endpoint), got %v", err)
+	}
+}
+
+func TestParseRefundWebhookNormalizesToPaymentRefunded(t *testing.T) {
+	p := New(Config{BaseURL: "https://api.sonicpesa.com/api/v1", APIKey: "test-key"})
+	event, err := p.ParseWebhook([]byte(`{"event":"refund.succeeded","order_id":"sp_123","refund_id":"rf_9","status":"SUCCESS","amount":"100.00","currency":"TZS"}`))
+	if err != nil {
+		t.Fatalf("expected parse success, got %v", err)
+	}
+	if event.EventType != "payment.refunded" {
+		t.Fatalf("expected payment.refunded, got %q", event.EventType)
+	}
+	if event.NormalizedStatus != provider.StatusReversed {
+		t.Fatalf("expected reversed, got %q", event.NormalizedStatus)
+	}
+	if event.ProviderOrderID != "sp_123" {
+		t.Fatalf("expected order sp_123, got %q", event.ProviderOrderID)
+	}
 }

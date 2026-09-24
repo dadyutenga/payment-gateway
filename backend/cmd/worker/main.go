@@ -62,6 +62,8 @@ func main() {
 		AutomatedPayoutsEnabled:        cfg.Payments.AutomatedPayoutsEnabled,
 		PayoutProvider:                 cfg.Payments.PayoutProvider,
 		PayoutReconciliationStaleAfter: cfg.Payments.PayoutReconciliationStaleAfter,
+		ProviderTimeout:                positiveDuration(cfg.HTTP.RequestTimeout-5*time.Second, 10*time.Second),
+		OrderExpiryTTL:                 cfg.Payments.OrderTTL,
 	}, logger)
 
 	deliveryTicker := time.NewTicker(positiveDuration(cfg.Payments.DeliveryPollInterval, 30*time.Second))
@@ -70,6 +72,8 @@ func main() {
 	defer reconciliationTicker.Stop()
 	payoutTicker := time.NewTicker(positiveDuration(cfg.Payments.PayoutReconciliationInterval, 5*time.Minute))
 	defer payoutTicker.Stop()
+	expiryTicker := time.NewTicker(positiveDuration(cfg.Payments.ExpiryInterval, time.Minute))
+	defer expiryTicker.Stop()
 
 	processDeliveries := func() {
 		result, err := paymentService.ProcessDueDeliveries(ctx, positiveInt(cfg.Payments.DeliveryBatchSize, 25))
@@ -104,10 +108,26 @@ func main() {
 			logger.Info("payout reconciliation completed", "scanned", result.Scanned, "updated", result.Updated)
 		}
 	}
+	expireOrders := func() {
+		result, err := paymentService.ExpireOrders(ctx, positiveInt(cfg.Payments.ReconciliationBatchSize, 50))
+		if err != nil {
+			logger.Error("payment expiry failed", "error", err)
+			return
+		}
+		if result.Expired > 0 {
+			logger.Info("payment expiry completed", "expired", result.Expired)
+		}
+		if swept, err := paymentService.CleanupIdempotencyKeys(ctx); err != nil {
+			logger.Error("idempotency cleanup failed", "error", err)
+		} else if swept > 0 {
+			logger.Info("idempotency cleanup completed", "deleted", swept)
+		}
+	}
 
 	processDeliveries()
 	reconcilePayments()
 	reconcilePayouts()
+	expireOrders()
 
 	for {
 		select {
@@ -120,6 +140,8 @@ func main() {
 			reconcilePayments()
 		case <-payoutTicker.C:
 			reconcilePayouts()
+		case <-expiryTicker.C:
+			expireOrders()
 		}
 	}
 }

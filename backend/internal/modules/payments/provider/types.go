@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"time"
 )
@@ -103,6 +104,31 @@ type DisburseResult struct {
 type Disburser interface {
 	Disburse(ctx context.Context, req DisburseRequest) (DisburseResult, error)
 	CheckPayoutStatus(ctx context.Context, providerPayoutID string) (DisburseResult, error)
+}
+
+// ErrRefundNotSupported is returned by Refunder implementations whose
+// provider documents no refund API. Callers fall back to a local ledger
+// reversal (manual attestation) instead of failing the refund.
+var ErrRefundNotSupported = errors.New("provider does not support refunds")
+
+// ProviderRefundResult is the outcome of a refund request. Status is
+// StatusReversed when the money is confirmed back with the payer,
+// StatusProcessing when the provider accepted it asynchronously (a webhook
+// or status check confirms it later), or StatusFailed when rejected.
+type ProviderRefundResult struct {
+	ProviderRefundID string
+	Status           Status
+	ProviderStatus   string
+	Raw              map[string]any
+}
+
+// Refunder is implemented by provider adapters with a verified refund API,
+// separate from PaymentProvider so adapters without one never need stub
+// methods. Credentials are passed per call (unlike collection, which binds
+// them at construction) so the caller controls exactly which account's
+// credentials fund the reversal.
+type Refunder interface {
+	RefundOrder(ctx context.Context, credentials map[string]string, externalReference, amount, currency, reason string) (ProviderRefundResult, error)
 }
 
 // Constructor builds a PaymentProvider instance from an admin-configured

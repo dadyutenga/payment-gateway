@@ -68,6 +68,27 @@ type fakePaymentProvider struct {
 	payoutStatusResp   provider.DisburseResult
 	payoutStatusErr    error
 	payoutStatusCalled int
+
+	refundCreds  map[string]string
+	refundRef    string
+	refundAmount string
+	refundCurr   string
+	refundReason string
+	refundResp   provider.ProviderRefundResult
+	refundErr    error
+	refundCalled int
+}
+
+// RefundOrder makes fakePaymentProvider satisfy provider.Refunder so refund
+// tests can exercise the provider-integrated path without a real call.
+func (f *fakePaymentProvider) RefundOrder(_ context.Context, creds map[string]string, ref, amount, currency, reason string) (provider.ProviderRefundResult, error) {
+	f.refundCalled++
+	f.refundCreds = creds
+	f.refundRef = ref
+	f.refundAmount = amount
+	f.refundCurr = currency
+	f.refundReason = reason
+	return f.refundResp, f.refundErr
 }
 
 // Disburse and CheckPayoutStatus make fakePaymentProvider satisfy
@@ -108,47 +129,64 @@ func (f *fakePaymentProvider) CheckOrderStatus(_ context.Context, _ string) (pro
 }
 
 type fakePaymentRepository struct {
-	duplicate             bool
-	order                 PaymentOrder
-	orderErr              error
-	referenceOrder        PaymentOrder
-	referenceErr          error
-	appListResult         PaymentAppListResult
-	createdOrder          PaymentOrder
-	createOrderInput      CreatePaymentOrderRepositoryInput
-	createOrderInputs     []CreatePaymentOrderRepositoryInput
-	createOrderErr        error
-	failCreateOnce        bool
-	updatedProviderOrder  PaymentOrder
-	updateProviderErr     error
-	updateProviderCalls   []updateProviderDetailsCall
-	getOrder              PaymentOrder
-	getOrderErr           error
-	reconcileCandidates   []PaymentOrder
-	searchFilter          PaymentOrderSearchFilter
-	searchResult          PaymentOrderSearchResult
-	eventFilter           PaymentEventListFilter
-	eventResult           PaymentEventListResult
-	deliveryFilter        PaymentWebhookDeliveryListFilter
-	deliveryResult        PaymentWebhookDeliveryListResult
-	replayedDeliveryID    string
-	metricsStaleBefore    time.Time
-	metrics               PaymentMetrics
-	updatedOrder          PaymentOrder
-	events                []PaymentEventInput
-	marked                []string
-	applied               []ApplyWebhookEventInput
-	orderLookups          int
-	endpointInput         CreatePaymentWebhookEndpointRepositoryInput
-	endpoint              PaymentWebhookEndpoint
-	createdDeliveries     int64
-	replayedEventID       string
-	replayedEventCount    int64
-	deliveryJobs          []PaymentWebhookDeliveryJob
-	recordedAttempts      []RecordWebhookDeliveryAttemptInput
-	recordCtxWasCancelled []bool
-	providerAccount       PaymentProviderAccount
-	providerAccountErr    error
+	duplicate               bool
+	order                   PaymentOrder
+	orderErr                error
+	referenceOrder          PaymentOrder
+	referenceErr            error
+	appListResult           PaymentAppListResult
+	createdOrder            PaymentOrder
+	createOrderInput        CreatePaymentOrderRepositoryInput
+	createOrderInputs       []CreatePaymentOrderRepositoryInput
+	createOrderErr          error
+	failCreateOnce          bool
+	updatedProviderOrder    PaymentOrder
+	updateProviderErr       error
+	updateProviderCalls     []updateProviderDetailsCall
+	getOrder                PaymentOrder
+	getOrderErr             error
+	getEvent                PaymentEvent
+	getEventErr             error
+	claimRefundInputs       []ClaimRefundInput
+	claimRefundErr          error
+	claimedRefund           PaymentRefund
+	attachedRefundIDs       map[string]string
+	attachRefundErr         error
+	confirmRefundCalls      []confirmRefundCall
+	confirmRefundErr        error
+	failRefundCalls         []failRefundCall
+	failRefundErr           error
+	reconcileCandidates     []PaymentOrder
+	expireCandidates        []PaymentOrder
+	expireErr               error
+	idempotencyRecords      map[idempotencyScope]IdempotencyRecord
+	idempotencyErr          error
+	expiredIdempotencyCount int64
+	searchFilter            PaymentOrderSearchFilter
+	searchResult            PaymentOrderSearchResult
+	eventFilter             PaymentEventListFilter
+	eventResult             PaymentEventListResult
+	deliveryFilter          PaymentWebhookDeliveryListFilter
+	deliveryResult          PaymentWebhookDeliveryListResult
+	replayedDeliveryID      string
+	metricsStaleBefore      time.Time
+	metrics                 PaymentMetrics
+	updatedOrder            PaymentOrder
+	events                  []PaymentEventInput
+	marked                  []string
+	applied                 []ApplyWebhookEventInput
+	orderLookups            int
+	endpointInput           CreatePaymentWebhookEndpointRepositoryInput
+	endpoint                PaymentWebhookEndpoint
+	createdDeliveries       int64
+	deliveryForEventCalls   []deliveryForEventCall
+	replayedEventID         string
+	replayedEventCount      int64
+	deliveryJobs            []PaymentWebhookDeliveryJob
+	recordedAttempts        []RecordWebhookDeliveryAttemptInput
+	recordCtxWasCancelled   []bool
+	providerAccount         PaymentProviderAccount
+	providerAccountErr      error
 
 	withdrawal                     PaymentWithdrawal
 	withdrawalErr                  error
@@ -319,6 +357,70 @@ func (r *fakePaymentRepository) ListReconciliationCandidates(_ context.Context, 
 	return r.reconcileCandidates, nil
 }
 
+func (r *fakePaymentRepository) ExpirePendingOrders(_ context.Context, _ int) ([]PaymentOrder, error) {
+	if r.expireErr != nil {
+		return nil, r.expireErr
+	}
+	expired := make([]PaymentOrder, len(r.expireCandidates))
+	for i, order := range r.expireCandidates {
+		order.Status = provider.StatusExpired
+		expired[i] = order
+	}
+	return expired, nil
+}
+
+func (r *fakePaymentRepository) GetIdempotencyRecord(_ context.Context, appID, endpoint, key string) (IdempotencyRecord, bool, error) {
+	record, ok := r.idempotencyRecords[idempotencyScope{appID, endpoint, key}]
+	return record, ok, r.idempotencyErr
+}
+
+func (r *fakePaymentRepository) ClaimIdempotencyKey(_ context.Context, appID, endpoint, key, requestHash string, _ time.Duration) (IdempotencyRecord, bool, error) {
+	if r.idempotencyErr != nil {
+		return IdempotencyRecord{}, false, r.idempotencyErr
+	}
+	scope := idempotencyScope{appID, endpoint, key}
+	if existing, ok := r.idempotencyRecords[scope]; ok {
+		return existing, false, nil
+	}
+	if r.idempotencyRecords == nil {
+		r.idempotencyRecords = map[idempotencyScope]IdempotencyRecord{}
+	}
+	record := IdempotencyRecord{Key: key, AppID: appID, Endpoint: endpoint, RequestHash: requestHash}
+	r.idempotencyRecords[scope] = record
+	return record, true, nil
+}
+
+func (r *fakePaymentRepository) StoreIdempotencyResponse(_ context.Context, appID, endpoint, key string, status int, body string) error {
+	if r.idempotencyErr != nil {
+		return r.idempotencyErr
+	}
+	scope := idempotencyScope{appID, endpoint, key}
+	record := r.idempotencyRecords[scope]
+	record.Completed = true
+	record.ResponseStatus = status
+	record.ResponseBody = body
+	if r.idempotencyRecords == nil {
+		r.idempotencyRecords = map[idempotencyScope]IdempotencyRecord{}
+	}
+	r.idempotencyRecords[scope] = record
+	return nil
+}
+
+func (r *fakePaymentRepository) DeleteIdempotencyKey(_ context.Context, appID, endpoint, key string) error {
+	delete(r.idempotencyRecords, idempotencyScope{appID, endpoint, key})
+	return r.idempotencyErr
+}
+
+func (r *fakePaymentRepository) DeleteExpiredIdempotencyKeys(_ context.Context) (int64, error) {
+	return r.expiredIdempotencyCount, r.idempotencyErr
+}
+
+type idempotencyScope struct {
+	appID    string
+	endpoint string
+	key      string
+}
+
 func (r *fakePaymentRepository) SearchPaymentOrders(_ context.Context, filter PaymentOrderSearchFilter) (PaymentOrderSearchResult, error) {
 	r.searchFilter = filter
 	if r.searchResult.Limit == 0 {
@@ -387,9 +489,15 @@ func (r *fakePaymentRepository) ListWebhookEndpoints(_ context.Context, _ string
 	return nil, nil
 }
 
-func (r *fakePaymentRepository) CreateWebhookDeliveriesForEvent(_ context.Context, _, _ string) (int64, error) {
+func (r *fakePaymentRepository) CreateWebhookDeliveriesForEvent(_ context.Context, eventID, eventType string) (int64, error) {
 	r.createdDeliveries++
+	r.deliveryForEventCalls = append(r.deliveryForEventCalls, deliveryForEventCall{eventID, eventType})
 	return r.createdDeliveries, nil
+}
+
+type deliveryForEventCall struct {
+	eventID   string
+	eventType string
 }
 
 func (r *fakePaymentRepository) ReplayFailedWebhookDeliveriesForEvent(_ context.Context, eventID string) (int64, error) {
@@ -565,11 +673,86 @@ func (r *fakePaymentRepository) GetPaymentOrderByID(_ context.Context, orderID s
 	if r.getOrderErr != nil {
 		return PaymentOrder{}, r.getOrderErr
 	}
-	return r.getOrder, nil
+	if r.getOrder.ID != "" {
+		return r.getOrder, nil
+	}
+	return PaymentOrder{ID: orderID}, nil
 }
 
-func (r *fakePaymentRepository) RefundOrder(_ context.Context, orderID, source string) (PaymentOrder, error) {
-	return PaymentOrder{ID: orderID, Status: provider.StatusReversed}, nil
+func (r *fakePaymentRepository) GetPaymentEventByID(_ context.Context, eventID string) (PaymentEvent, error) {
+	if r.getEventErr != nil {
+		return PaymentEvent{}, r.getEventErr
+	}
+	if r.getEvent.ID != "" {
+		return r.getEvent, nil
+	}
+	return PaymentEvent{ID: eventID, EventType: EventTypePaymentUpdated}, nil
+}
+
+func (r *fakePaymentRepository) ClaimRefund(_ context.Context, input ClaimRefundInput) (PaymentOrder, PaymentRefund, error) {
+	r.claimRefundInputs = append(r.claimRefundInputs, input)
+	if r.claimRefundErr != nil {
+		return PaymentOrder{}, PaymentRefund{}, r.claimRefundErr
+	}
+	order := PaymentOrder{ID: input.OrderID, AppID: "app_test", Provider: "sonicpesa", Amount: "10000.00", Currency: "TZS", Status: provider.StatusPaid}
+	refund := PaymentRefund{ID: "refund_test", PaymentOrderID: input.OrderID, AppID: "app_test", Amount: "10000.00", Currency: "TZS", Status: RefundStatusProcessing}
+	if input.Amount != "" {
+		refund.Amount = input.Amount
+	}
+	if input.Currency != "" {
+		refund.Currency = input.Currency
+	}
+	if input.ProviderRefundID != "" {
+		refund.ProviderRefundID = input.ProviderRefundID
+	}
+	r.claimedRefund = refund
+	return order, refund, nil
+}
+
+func (r *fakePaymentRepository) AttachRefundProviderID(_ context.Context, refundID, providerRefundID string) error {
+	if r.attachedRefundIDs == nil {
+		r.attachedRefundIDs = map[string]string{}
+	}
+	r.attachedRefundIDs[refundID] = providerRefundID
+	return r.attachRefundErr
+}
+
+func (r *fakePaymentRepository) ConfirmRefund(_ context.Context, refundID, providerRefundID, providerStatus string) (PaymentOrder, PaymentRefund, error) {
+	r.confirmRefundCalls = append(r.confirmRefundCalls, confirmRefundCall{refundID, providerRefundID, providerStatus})
+	if r.confirmRefundErr != nil {
+		return PaymentOrder{}, PaymentRefund{}, r.confirmRefundErr
+	}
+	refund := r.claimedRefund
+	refund.Status = RefundStatusConfirmed
+	if providerRefundID != "" {
+		refund.ProviderRefundID = providerRefundID
+	}
+	return PaymentOrder{ID: refund.PaymentOrderID, Status: provider.StatusReversed}, refund, nil
+}
+
+func (r *fakePaymentRepository) FailRefund(_ context.Context, refundID, reason string) (PaymentRefund, error) {
+	r.failRefundCalls = append(r.failRefundCalls, failRefundCall{refundID, reason})
+	if r.failRefundErr != nil {
+		return PaymentRefund{}, r.failRefundErr
+	}
+	refund := r.claimedRefund
+	refund.Status = RefundStatusFailed
+	return refund, nil
+}
+
+func (r *fakePaymentRepository) RefundedTotal(_ context.Context, _ string) (string, error) {
+	return "0.00", nil
+}
+
+type confirmRefundCall struct {
+	refundID         string
+	providerRefundID string
+	providerStatus   string
+}
+
+type failRefundCall struct {
+	refundID string
+	reason   string
 }
 
 type smsSendCall struct {
@@ -1355,8 +1538,14 @@ func TestCreateWebhookEndpointReturnsDerivedSecret(t *testing.T) {
 	if repo.endpointInput.SecretHash != hashAPIKey(result.SigningSecret) {
 		t.Fatal("expected stored secret hash to match returned signing secret")
 	}
-	if len(result.Endpoint.EventTypes) != 1 || result.Endpoint.EventTypes[0] != "payment.updated" {
-		t.Fatalf("expected default payment.updated event type, got %v", result.Endpoint.EventTypes)
+	wantDefaults := map[string]bool{EventTypePaymentUpdated: true, EventTypePaymentRefunded: true, EventTypePaymentExpired: true}
+	if len(result.Endpoint.EventTypes) != len(wantDefaults) {
+		t.Fatalf("expected default event types %v, got %v", wantDefaults, result.Endpoint.EventTypes)
+	}
+	for _, eventType := range result.Endpoint.EventTypes {
+		if !wantDefaults[eventType] {
+			t.Fatalf("unexpected default event type %q in %v", eventType, result.Endpoint.EventTypes)
+		}
 	}
 }
 
@@ -1587,5 +1776,354 @@ func TestIsZeroDecimal(t *testing.T) {
 		if isZeroDecimal(value) {
 			t.Fatalf("expected %q to count as non-zero", value)
 		}
+	}
+}
+
+func paidTestOrder() PaymentOrder {
+	return PaymentOrder{
+		ID: "pay_test", AppID: "app_test", Provider: "sonicpesa",
+		ProviderOrderID: "sp_123", ExternalReference: "app-order-1",
+		Amount: "10000.00", Currency: "TZS", Status: provider.StatusPaid,
+	}
+}
+
+func TestRefundOrderFallsBackToLocalReversalWhenProviderUnsupported(t *testing.T) {
+	repo := &fakePaymentRepository{getOrder: paidTestOrder()}
+	p := &fakePaymentProvider{name: "sonicpesa", refundErr: provider.ErrRefundNotSupported}
+	service := NewService(repo, registryFor(p), testCipher, testServiceOptions(), nil)
+
+	result, err := service.RefundOrder(context.Background(), RefundOrderInput{OrderID: "pay_test", Reason: "customer request", RequestedBy: "admin@localhost"})
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if p.refundCalled != 1 {
+		t.Fatalf("expected provider refund attempted once, got %d", p.refundCalled)
+	}
+	if len(repo.claimRefundInputs) != 1 {
+		t.Fatalf("expected one refund claim before the provider call, got %+v", repo.claimRefundInputs)
+	}
+	if len(repo.confirmRefundCalls) != 1 {
+		t.Fatalf("expected local confirm after unsupported provider, got %+v", repo.confirmRefundCalls)
+	}
+	if result.Order.Status != provider.StatusReversed {
+		t.Fatalf("expected reversed order, got %q", result.Order.Status)
+	}
+	if result.Refund.Status != RefundStatusConfirmed || result.Refund.Amount != "10000.00" {
+		t.Fatalf("expected confirmed full refund, got %+v", result.Refund)
+	}
+	// A payment.refunded event must be stored and fanned out signed like
+	// any other payment.* event.
+	found := false
+	for _, event := range repo.events {
+		if event.EventType == EventTypePaymentRefunded {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected payment.refunded event, got %+v", repo.events)
+	}
+	found = false
+	for _, call := range repo.deliveryForEventCalls {
+		if call.eventType == EventTypePaymentRefunded {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected refunded deliveries, got %+v", repo.deliveryForEventCalls)
+	}
+}
+
+func TestRefundOrderFailsWithoutTouchingLedgerOnProviderError(t *testing.T) {
+	repo := &fakePaymentRepository{getOrder: paidTestOrder()}
+	p := &fakePaymentProvider{name: "sonicpesa", refundErr: errors.New("provider down")}
+	service := NewService(repo, registryFor(p), testCipher, testServiceOptions(), nil)
+
+	if _, err := service.RefundOrder(context.Background(), RefundOrderInput{OrderID: "pay_test"}); !errors.Is(err, ErrRefundProviderFailed) {
+		t.Fatalf("expected ErrRefundProviderFailed, got %v", err)
+	}
+	if len(repo.failRefundCalls) != 1 {
+		t.Fatalf("expected failed claim recorded, got %+v", repo.failRefundCalls)
+	}
+	if len(repo.confirmRefundCalls) != 0 {
+		t.Fatalf("expected no ledger confirm on provider failure, got %+v", repo.confirmRefundCalls)
+	}
+}
+
+func TestRefundOrderRejectsCurrencyMismatch(t *testing.T) {
+	repo := &fakePaymentRepository{getOrder: paidTestOrder()}
+	p := &fakePaymentProvider{name: "sonicpesa"}
+	service := NewService(repo, registryFor(p), testCipher, testServiceOptions(), nil)
+
+	if _, err := service.RefundOrder(context.Background(), RefundOrderInput{OrderID: "pay_test", Currency: "USD"}); !errors.Is(err, ErrRefundCurrencyMismatch) {
+		t.Fatalf("expected ErrRefundCurrencyMismatch, got %v", err)
+	}
+	if len(repo.claimRefundInputs) != 0 || p.refundCalled != 0 {
+		t.Fatal("expected rejection before claim and provider call")
+	}
+}
+
+func TestHandleRefundWebhookConfirmsAsyncReversal(t *testing.T) {
+	repo := &fakePaymentRepository{
+		order: paidTestOrder(),
+	}
+	p := &fakePaymentProvider{
+		name: "sonicpesa",
+		event: provider.WebhookEvent{
+			EventType:        EventTypePaymentRefunded,
+			ProviderEventID:  "rf_9",
+			ProviderOrderID:  "sp_123",
+			ProviderStatus:   "SUCCESS",
+			NormalizedStatus: provider.StatusReversed,
+			Amount:           "10000.00",
+			Currency:         "TZS",
+		},
+	}
+	service := NewService(repo, registryFor(p), testCipher, testServiceOptions(), nil)
+
+	result, err := service.HandleProviderWebhook(context.Background(), "sonicpesa", http.Header{}, []byte(`{"event":"refund.succeeded","order_id":"sp_123"}`))
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if !result.Processed || !result.OrderFound {
+		t.Fatalf("expected processed refund with order, got %+v", result)
+	}
+	if len(repo.claimRefundInputs) != 1 || repo.claimRefundInputs[0].ProviderRefundID != "rf_9" {
+		t.Fatalf("expected async claim keyed by provider refund id, got %+v", repo.claimRefundInputs)
+	}
+	if len(repo.confirmRefundCalls) != 1 {
+		t.Fatalf("expected async confirm, got %+v", repo.confirmRefundCalls)
+	}
+	if len(repo.applied) != 0 {
+		t.Fatalf("expected no credit-path apply for refunds, got %+v", repo.applied)
+	}
+}
+
+func TestHandleRefundWebhookDuplicateReplayIsIdempotent(t *testing.T) {
+	repo := &fakePaymentRepository{
+		order:          paidTestOrder(),
+		claimRefundErr: ErrAlreadyRefunded,
+	}
+	p := &fakePaymentProvider{
+		name: "sonicpesa",
+		event: provider.WebhookEvent{
+			EventType:        EventTypePaymentRefunded,
+			ProviderEventID:  "rf_9",
+			ProviderOrderID:  "sp_123",
+			NormalizedStatus: provider.StatusReversed,
+		},
+	}
+	service := NewService(repo, registryFor(p), testCipher, testServiceOptions(), nil)
+
+	result, err := service.HandleProviderWebhook(context.Background(), "sonicpesa", http.Header{}, []byte(`{"event":"refund.succeeded","order_id":"sp_123"}`))
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if !result.Processed || !result.Duplicate {
+		t.Fatalf("expected idempotent duplicate result, got %+v", result)
+	}
+	if len(repo.confirmRefundCalls) != 0 {
+		t.Fatalf("expected no second confirm on replay, got %+v", repo.confirmRefundCalls)
+	}
+}
+
+func TestWebhookPayloadMatchesOrder(t *testing.T) {
+	order := PaymentOrder{Amount: "10000.00", Currency: "TZS"}
+	for _, tc := range []struct {
+		name     string
+		amount   string
+		currency string
+		want     bool
+	}{
+		{"exact", "10000.00", "TZS", true},
+		{"formatting differs", "10000", "tzs", true},
+		{"omitted", "", "", true},
+		{"amount only match", "10000.0", "", true},
+		{"amount mismatch", "9999.99", "TZS", false},
+		{"currency mismatch", "10000.00", "USD", false},
+		{"garbage amount", "abc", "TZS", false},
+	} {
+		if got := webhookPayloadMatchesOrder(order, tc.amount, tc.currency); got != tc.want {
+			t.Fatalf("%s: expected %v, got %v", tc.name, tc.want, got)
+		}
+	}
+}
+
+func TestFeePortionForRefund(t *testing.T) {
+	// Full completion returns the exact remainder (no penny drift).
+	if got := feePortionForRefund("250.00", "0", "10000.00", "10000.00", true); got != "250.00" {
+		t.Fatalf("expected exact remainder 250.00, got %q", got)
+	}
+	if got := feePortionForRefund("250.00", "100.00", "6000.00", "10000.00", true); got != "150.00" {
+		t.Fatalf("expected remainder 150.00, got %q", got)
+	}
+	// Partial refunds take the pro-rata share.
+	if got := feePortionForRefund("250.00", "0", "4000.00", "10000.00", false); got != "100.00" {
+		t.Fatalf("expected pro-rata 100.00, got %q", got)
+	}
+	// Never exceeds what is left, never pays when there is no fee.
+	if got := feePortionForRefund("250.00", "200.00", "4000.00", "10000.00", false); got != "50.00" {
+		t.Fatalf("expected clamped 50.00, got %q", got)
+	}
+	if got := feePortionForRefund("0.00", "0", "4000.00", "10000.00", false); got != "0.00" {
+		t.Fatalf("expected 0.00 for fee-less order, got %q", got)
+	}
+}
+
+func TestRefundOrderForwardsPartialAmountToClaim(t *testing.T) {
+	repo := &fakePaymentRepository{getOrder: paidTestOrder()}
+	p := &fakePaymentProvider{name: "sonicpesa", refundErr: provider.ErrRefundNotSupported}
+	service := NewService(repo, registryFor(p), testCipher, testServiceOptions(), nil)
+
+	result, err := service.RefundOrder(context.Background(), RefundOrderInput{OrderID: "pay_test", Amount: "2500", Currency: "TZS"})
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if len(repo.claimRefundInputs) != 1 || repo.claimRefundInputs[0].Amount != "2500.00" {
+		t.Fatalf("expected normalized partial claim 2500.00, got %+v", repo.claimRefundInputs)
+	}
+	if result.Refund.Amount != "2500.00" {
+		t.Fatalf("expected partial refund 2500.00, got %+v", result.Refund)
+	}
+}
+
+func TestRefundOrderRejectsOverRefund(t *testing.T) {
+	repo := &fakePaymentRepository{getOrder: paidTestOrder(), claimRefundErr: ErrRefundAmountExceeded}
+	p := &fakePaymentProvider{name: "sonicpesa"}
+	service := NewService(repo, registryFor(p), testCipher, testServiceOptions(), nil)
+
+	if _, err := service.RefundOrder(context.Background(), RefundOrderInput{OrderID: "pay_test", Amount: "99999"}); !errors.Is(err, ErrRefundAmountExceeded) {
+		t.Fatalf("expected ErrRefundAmountExceeded, got %v", err)
+	}
+	if p.refundCalled != 0 || len(repo.confirmRefundCalls) != 0 {
+		t.Fatal("expected rejection before provider call and ledger confirm")
+	}
+}
+
+func TestExpireOrdersEmitsExpiredEvents(t *testing.T) {
+	repo := &fakePaymentRepository{
+		expireCandidates: []PaymentOrder{
+			{ID: "pay_old", AppID: "app_test", Provider: "sonicpesa", ProviderOrderID: "sp_old", Amount: "5000.00", Currency: "TZS", Status: provider.StatusPending},
+		},
+	}
+	service := NewService(repo, nil, testCipher, testServiceOptions(), nil)
+
+	result, err := service.ExpireOrders(context.Background(), 50)
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if result.Expired != 1 {
+		t.Fatalf("expected one expired order, got %+v", result)
+	}
+	foundEvent := false
+	for _, event := range repo.events {
+		if event.EventType == EventTypePaymentExpired {
+			foundEvent = true
+		}
+	}
+	if !foundEvent {
+		t.Fatalf("expected payment.expired event, got %+v", repo.events)
+	}
+	foundDelivery := false
+	for _, call := range repo.deliveryForEventCalls {
+		if call.eventType == EventTypePaymentExpired {
+			foundDelivery = true
+		}
+	}
+	if !foundDelivery {
+		t.Fatalf("expected expired deliveries, got %+v", repo.deliveryForEventCalls)
+	}
+}
+
+func TestLateWebhookForExpiredOrderHeldForReview(t *testing.T) {
+	repo := &fakePaymentRepository{
+		order: PaymentOrder{
+			ID: "pay_old", AppID: "app_test", Provider: "sonicpesa",
+			ProviderOrderID: "sp_old", Amount: "5000.00", Currency: "TZS",
+			Status: provider.StatusExpired,
+		},
+	}
+	p := &fakePaymentProvider{
+		name: "sonicpesa",
+		event: provider.WebhookEvent{
+			EventType:        "payment.completed",
+			ProviderOrderID:  "sp_old",
+			NormalizedStatus: provider.StatusPaid,
+			Amount:           "5000.00",
+			Currency:         "TZS",
+		},
+	}
+	service := NewService(repo, registryFor(p), testCipher, testServiceOptions(), nil)
+
+	result, err := service.HandleProviderWebhook(context.Background(), "sonicpesa", http.Header{}, []byte(`{"order_id":"sp_old"}`))
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if !result.Processed || !result.OrderFound {
+		t.Fatalf("expected held-but-processed result, got %+v", result)
+	}
+	// Nothing may be credited or transitioned for an expired order.
+	if len(repo.applied) != 0 {
+		t.Fatalf("expected no ledger apply for expired order, got %+v", repo.applied)
+	}
+	held := false
+	for _, message := range repo.marked {
+		if strings.Contains(message, "manual review") {
+			held = true
+		}
+	}
+	if !held {
+		t.Fatalf("expected manual-review mark, got %+v", repo.marked)
+	}
+}
+
+func TestIdempotencyKeyReplaysSamePayload(t *testing.T) {
+	repo := &fakePaymentRepository{}
+	service := NewService(repo, nil, testCipher, testServiceOptions(), nil)
+	ctx := context.Background()
+
+	first, err := service.CheckIdempotencyKey(ctx, "app_test", IdempotencyEndpointOrdersCreate, "key-1", "hash-abc")
+	if err != nil || !first.Claimed {
+		t.Fatalf("expected fresh claim, got %+v, err %v", first, err)
+	}
+	if err := service.StoreIdempotencyResponse(ctx, "app_test", IdempotencyEndpointOrdersCreate, "key-1", 201, `{"data":{"id":"pay_1"}}`); err != nil {
+		t.Fatalf("expected store success, got %v", err)
+	}
+	second, err := service.CheckIdempotencyKey(ctx, "app_test", IdempotencyEndpointOrdersCreate, "key-1", "hash-abc")
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if !second.Replay || second.Status != 201 || second.Body != `{"data":{"id":"pay_1"}}` {
+		t.Fatalf("expected stored replay, got %+v", second)
+	}
+}
+
+func TestIdempotencyKeyConflictsOnDifferentPayload(t *testing.T) {
+	repo := &fakePaymentRepository{}
+	service := NewService(repo, nil, testCipher, testServiceOptions(), nil)
+	ctx := context.Background()
+
+	if _, err := service.CheckIdempotencyKey(ctx, "app_test", IdempotencyEndpointOrdersCreate, "key-1", "hash-abc"); err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	second, err := service.CheckIdempotencyKey(ctx, "app_test", IdempotencyEndpointOrdersCreate, "key-1", "hash-DIFFERENT")
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if !second.Conflict || second.Replay {
+		t.Fatalf("expected conflict, got %+v", second)
+	}
+}
+
+func TestIdempotencyKeysAreScopedPerEndpoint(t *testing.T) {
+	repo := &fakePaymentRepository{}
+	service := NewService(repo, nil, testCipher, testServiceOptions(), nil)
+	ctx := context.Background()
+
+	if _, err := service.CheckIdempotencyKey(ctx, "app_test", IdempotencyEndpointOrdersCreate, "key-1", "hash-abc"); err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	other, err := service.CheckIdempotencyKey(ctx, "app_test", IdempotencyEndpointAdminWithdrawalsCreate, "key-1", "hash-abc")
+	if err != nil || !other.Claimed {
+		t.Fatalf("expected fresh claim on different endpoint, got %+v, err %v", other, err)
 	}
 }

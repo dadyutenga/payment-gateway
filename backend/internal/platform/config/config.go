@@ -101,6 +101,12 @@ type PaymentConfig struct {
 	PayoutProvider                 string
 	PayoutReconciliationStaleAfter time.Duration
 	PayoutReconciliationInterval   time.Duration
+	// OrderTTL is the pending-order time-to-live stamped as expires_at at
+	// creation. The expiry worker transitions overdue pending rows to
+	// expired (no money moves on expiry).
+	OrderTTL time.Duration
+	// ExpiryInterval schedules the expiry worker sweep.
+	ExpiryInterval time.Duration
 }
 
 type slogLevel string
@@ -162,6 +168,8 @@ func Load() (Config, error) {
 			PayoutProvider:                 getEnv("PAYMENTS_PAYOUT_PROVIDER", "sonicpesa"),
 			PayoutReconciliationStaleAfter: mustDuration("PAYMENTS_PAYOUT_RECONCILIATION_STALE_AFTER", "15m"),
 			PayoutReconciliationInterval:   mustDuration("PAYMENTS_PAYOUT_RECONCILIATION_INTERVAL", "5m"),
+			OrderTTL:                       mustDuration("PAYMENTS_ORDER_TTL", "30m"),
+			ExpiryInterval:                 mustDuration("PAYMENTS_EXPIRY_INTERVAL", "1m"),
 		},
 	}
 

@@ -1,6 +1,9 @@
 package payments
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -51,6 +54,110 @@ func (h *Handler) fail(w http.ResponseWriter, status int, code, message string, 
 	httputil.Error(w, status, code, message, nil)
 }
 
+// ---------- Idempotency-Key ----------
+
+// idempotencyState tracks an in-progress claim for one request. Nil means
+// the client sent no Idempotency-Key and the handler behaves exactly as
+// before (every write below degrades to the plain httputil equivalent).
+type idempotencyState struct {
+	appID    string
+	endpoint string
+	key      string
+	hash     string
+}
+
+// readBodyJSON reads the size-capped request body and decodes it, returning
+// the raw bytes for request hashing alongside the decode outcome.
+func readBodyJSON(w http.ResponseWriter, r *http.Request, maxBytes int64, dst any, failMessage string) ([]byte, bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		httputil.Error(w, http.StatusBadRequest, "invalid_request", failMessage, nil)
+		return nil, false
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(dst); err != nil {
+		httputil.Error(w, http.StatusBadRequest, "invalid_request", failMessage, nil)
+		return nil, false
+	}
+	return raw, true
+}
+
+// checkIdempotency runs the pre-execution contract for Idempotency-Key
+// requests: replays stored responses, rejects reused keys with 409, or
+// claims a fresh row. Without the header it returns (nil, false) and the
+// handler proceeds untouched.
+func (h *Handler) checkIdempotency(w http.ResponseWriter, r *http.Request, appID, endpoint string, body []byte) (*idempotencyState, bool) {
+	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if key == "" {
+		return nil, false
+	}
+	if len(key) > 128 {
+		httputil.Error(w, http.StatusBadRequest, "invalid_request", "Idempotency-Key must be 128 characters or fewer.", nil)
+		return nil, true
+	}
+	sum := sha256.Sum256(body)
+	state := &idempotencyState{appID: appID, endpoint: endpoint, key: key, hash: hex.EncodeToString(sum[:])}
+	check, err := h.service.CheckIdempotencyKey(r.Context(), appID, endpoint, key, state.hash)
+	if err != nil {
+		h.fail(w, http.StatusInternalServerError, "idempotency_failed", "Unable to process idempotent request.", err)
+		return nil, true
+	}
+	switch {
+	case check.Replay:
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Idempotent-Replayed", "true")
+		w.WriteHeader(check.Status)
+		_, _ = w.Write([]byte(check.Body))
+		return nil, true
+	case check.Conflict:
+		httputil.Error(w, http.StatusConflict, "idempotency_conflict", check.Message, nil)
+		return nil, true
+	default:
+		return state, false
+	}
+}
+
+// writeJSON stores terminal (<500) responses against the claim and writes
+// them byte-identically to httputil.JSON (trailing newline included).
+// 5xx responses discard the claim so retries re-execute cleanly.
+func (h *Handler) writeJSON(state *idempotencyState, w http.ResponseWriter, r *http.Request, status int, payload any) {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		h.fail(w, http.StatusInternalServerError, "internal_error", "Unable to encode response.", err)
+		return
+	}
+	raw = append(raw, '\n')
+	if state != nil {
+		if status >= 500 {
+			_ = h.service.DiscardIdempotencyKey(r.Context(), state.appID, state.endpoint, state.key)
+		} else if storeErr := h.service.StoreIdempotencyResponse(r.Context(), state.appID, state.endpoint, state.key, status, string(raw)); storeErr != nil {
+			h.log().Error("store idempotency response failed", "endpoint", state.endpoint, "error", storeErr)
+		}
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_, _ = w.Write(raw)
+}
+
+// writeError is writeJSON for the {"error":{...}} envelope.
+func (h *Handler) writeError(state *idempotencyState, w http.ResponseWriter, r *http.Request, status int, code, message string, details map[string]string) {
+	h.writeJSON(state, w, r, status, httputil.ErrorResponse{Error: httputil.ErrorBody{Code: code, Message: message, Details: details}})
+}
+
+// failIdempotent logs server-side like fail, drops the claim (transient),
+// and writes the generic message.
+func (h *Handler) failIdempotent(state *idempotencyState, w http.ResponseWriter, r *http.Request, status int, code, message string, err error) {
+	if err != nil {
+		h.log().Error("request failed", "code", code, "status", status, "error", err)
+	}
+	if state != nil {
+		_ = h.service.DiscardIdempotencyKey(r.Context(), state.appID, state.endpoint, state.key)
+	}
+	httputil.Error(w, status, code, message, nil)
+}
+
 type createOrderHTTPInput struct {
 	Provider          string          `json:"provider"`
 	Amount            json.RawMessage `json:"amount"`
@@ -68,18 +175,22 @@ func (h *Handler) CreateOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, h.maxBodyBytes)
 	var in createOrderHTTPInput
-	decoder := json.NewDecoder(r.Body)
-	decoder.UseNumber()
-	if err := decoder.Decode(&in); err != nil {
-		httputil.Error(w, http.StatusBadRequest, "invalid_request", "Unable to decode request body.", nil)
+	rawBody, ok := readBodyJSON(w, r, h.maxBodyBytes, &in, "Unable to decode request body.")
+	if !ok {
 		return
 	}
 
 	amount, err := amountFromJSON(in.Amount)
 	if err != nil {
 		httputil.Error(w, http.StatusBadRequest, "invalid_request", "Amount must be a number or numeric string.", nil)
+		return
+	}
+
+	// Idempotency-Key is honored after auth + body parsing (both must
+	// succeed before a key can be claimed against this app).
+	state, handled := h.checkIdempotency(w, r, app.ID, IdempotencyEndpointOrdersCreate, rawBody)
+	if handled {
 		return
 	}
 
@@ -94,15 +205,15 @@ func (h *Handler) CreateOrder(w http.ResponseWriter, r *http.Request) {
 		Metadata:          in.Metadata,
 	})
 	if err != nil {
-		h.fail(w, http.StatusBadGateway, "payment_provider_error", "Unable to create payment order.", err)
+		h.failIdempotent(state, w, r, http.StatusBadGateway, "payment_provider_error", "Unable to create payment order.", err)
 		return
 	}
 	if vErrs.Any() {
-		httputil.Error(w, http.StatusUnprocessableEntity, "validation_failed", "Please check your payment order input.", vErrs)
+		h.writeError(state, w, r, http.StatusUnprocessableEntity, "validation_failed", "Please check your payment order input.", vErrs)
 		return
 	}
 
-	httputil.JSON(w, http.StatusCreated, map[string]any{"data": order})
+	h.writeJSON(state, w, r, http.StatusCreated, map[string]any{"data": order})
 }
 
 func (h *Handler) GetOrder(w http.ResponseWriter, r *http.Request) {
@@ -315,8 +426,14 @@ func (h *Handler) CreateWithdrawal(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var in createWithdrawalHTTPInput
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		httputil.Error(w, http.StatusBadRequest, "invalid_request", "Unable to decode request body.", nil)
+	rawBody, ok := readBodyJSON(w, r, h.maxBodyBytes, &in, "Unable to decode request body.")
+	if !ok {
+		return
+	}
+
+	// Idempotency-Key is scoped to the target app from the (parsed) body.
+	state, handled := h.checkIdempotency(w, r, strings.TrimSpace(in.AppID), IdempotencyEndpointAdminWithdrawalsCreate, rawBody)
+	if handled {
 		return
 	}
 
@@ -330,18 +447,18 @@ func (h *Handler) CreateWithdrawal(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		if errors.Is(err, ErrInsufficientBalance) {
-			httputil.Error(w, http.StatusUnprocessableEntity, "insufficient_balance", "This app's available balance doesn't cover that amount.", nil)
+			h.writeError(state, w, r, http.StatusUnprocessableEntity, "insufficient_balance", "This app's available balance doesn't cover that amount.", nil)
 			return
 		}
-		h.fail(w, http.StatusInternalServerError, "create_failed", "Unable to create withdrawal.", err)
+		h.failIdempotent(state, w, r, http.StatusInternalServerError, "create_failed", "Unable to create withdrawal.", err)
 		return
 	}
 	if vErrs.Any() {
-		httputil.Error(w, http.StatusUnprocessableEntity, "validation_failed", "Please check your withdrawal input.", vErrs)
+		h.writeError(state, w, r, http.StatusUnprocessableEntity, "validation_failed", "Please check your withdrawal input.", vErrs)
 		return
 	}
 
-	httputil.JSON(w, http.StatusCreated, map[string]any{"data": withdrawal})
+	h.writeJSON(state, w, r, http.StatusCreated, map[string]any{"data": withdrawal})
 }
 
 func (h *Handler) withdrawalTransitionError(w http.ResponseWriter, err error, action string) {
@@ -639,6 +756,10 @@ func (h *Handler) ListWebhookEndpoints(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) ReplayEvent(w http.ResponseWriter, r *http.Request) {
 	result, err := h.service.ReplayEvent(r.Context(), r.PathValue("eventID"))
 	if err != nil {
+		if errors.Is(err, ErrPaymentEventNotFound) {
+			httputil.Error(w, http.StatusNotFound, "not_found", "Payment event not found.", nil)
+			return
+		}
 		h.fail(w, http.StatusInternalServerError, "replay_failed", "Unable to replay payment event.", err)
 		return
 	}
@@ -646,8 +767,36 @@ func (h *Handler) ReplayEvent(w http.ResponseWriter, r *http.Request) {
 	httputil.JSON(w, http.StatusOK, map[string]any{"data": result})
 }
 
+type refundOrderHTTPInput struct {
+	Amount   *string `json:"amount"`
+	Currency string  `json:"currency"`
+	Reason   string  `json:"reason"`
+}
+
 func (h *Handler) RefundOrder(w http.ResponseWriter, r *http.Request) {
-	order, err := h.service.RefundOrder(r.Context(), r.PathValue("id"))
+	claims, ok := middleware.ClaimsFromContext(r.Context())
+	if !ok {
+		httputil.Error(w, http.StatusUnauthorized, "unauthorized", "Missing authenticated user.", nil)
+		return
+	}
+
+	var in refundOrderHTTPInput
+	r.Body = http.MaxBytesReader(w, r.Body, h.maxBodyBytes)
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil && !errors.Is(err, io.EOF) {
+		httputil.Error(w, http.StatusBadRequest, "invalid_request", "Unable to decode request body.", nil)
+		return
+	}
+	amount := ""
+	if in.Amount != nil {
+		amount = strings.TrimSpace(*in.Amount)
+	}
+	result, err := h.service.RefundOrder(r.Context(), RefundOrderInput{
+		OrderID:     r.PathValue("id"),
+		Amount:      amount,
+		Currency:    in.Currency,
+		Reason:      in.Reason,
+		RequestedBy: claims.Email,
+	})
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrPaymentOrderNotFound):
@@ -655,13 +804,21 @@ func (h *Handler) RefundOrder(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, ErrOrderNotRefundable):
 			httputil.Error(w, http.StatusConflict, "not_refundable", "Only a paid order can be refunded.", nil)
 		case errors.Is(err, ErrAlreadyRefunded):
-			httputil.Error(w, http.StatusConflict, "already_refunded", "This order has already been refunded.", nil)
+			httputil.Error(w, http.StatusConflict, "already_refunded", "This order has already been fully refunded.", nil)
+		case errors.Is(err, ErrRefundAmountExceeded):
+			httputil.Error(w, http.StatusUnprocessableEntity, "amount_exceeded", "Refund amount exceeds the remaining refundable amount.", nil)
+		case errors.Is(err, ErrRefundCurrencyMismatch):
+			httputil.Error(w, http.StatusUnprocessableEntity, "currency_mismatch", "Refund currency must match the order currency.", nil)
+		case errors.Is(err, ErrRefundInvalidAmount):
+			httputil.Error(w, http.StatusUnprocessableEntity, "invalid_amount", "Refund amount must be a positive number.", nil)
+		case errors.Is(err, ErrRefundProviderFailed):
+			h.fail(w, http.StatusBadGateway, "refund_failed", "The provider rejected the refund — nothing was reversed.", err)
 		default:
 			h.fail(w, http.StatusInternalServerError, "refund_failed", "Unable to refund order.", err)
 		}
 		return
 	}
-	httputil.JSON(w, http.StatusOK, map[string]any{"data": order})
+	httputil.JSON(w, http.StatusOK, map[string]any{"data": result})
 }
 
 func (h *Handler) SearchPaymentOrders(w http.ResponseWriter, r *http.Request) {
@@ -846,6 +1003,8 @@ func (h *Handler) ProviderWebhook(w http.ResponseWriter, r *http.Request) {
 			httputil.Error(w, http.StatusUnauthorized, "invalid_signature", "Payment webhook signature could not be verified.", nil)
 		case errors.Is(err, ErrWebhookParseFailed):
 			httputil.Error(w, http.StatusBadRequest, "invalid_webhook", "Payment webhook payload is invalid.", nil)
+		case errors.Is(err, ErrWebhookAmountMismatch):
+			httputil.Error(w, http.StatusUnprocessableEntity, "amount_mismatch", "Webhook amount or currency does not match the order — held for manual review, nothing was credited.", nil)
 		default:
 			httputil.Error(w, http.StatusInternalServerError, "internal_error", "Unable to process payment webhook.", nil)
 		}
@@ -1069,8 +1228,15 @@ func (h *Handler) MerchantCreateWithdrawal(w http.ResponseWriter, r *http.Reques
 	}
 
 	var in createWithdrawalHTTPInput
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		httputil.Error(w, http.StatusBadRequest, "invalid_request", "Unable to decode request body.", nil)
+	rawBody, ok := readBodyJSON(w, r, h.maxBodyBytes, &in, "Unable to decode request body.")
+	if !ok {
+		return
+	}
+
+	// Idempotency-Key is scoped to the path app (never the body — a
+	// merchant must not be able to address another app's key space).
+	state, handled := h.checkIdempotency(w, r, appID, IdempotencyEndpointMerchantWithdrawalsCreate, rawBody)
+	if handled {
 		return
 	}
 
@@ -1084,16 +1250,16 @@ func (h *Handler) MerchantCreateWithdrawal(w http.ResponseWriter, r *http.Reques
 	})
 	if err != nil {
 		if errors.Is(err, ErrInsufficientBalance) {
-			httputil.Error(w, http.StatusUnprocessableEntity, "insufficient_balance", "This app's available balance doesn't cover that amount.", nil)
+			h.writeError(state, w, r, http.StatusUnprocessableEntity, "insufficient_balance", "This app's available balance doesn't cover that amount.", nil)
 			return
 		}
-		h.fail(w, http.StatusInternalServerError, "create_failed", "Unable to create withdrawal.", err)
+		h.failIdempotent(state, w, r, http.StatusInternalServerError, "create_failed", "Unable to create withdrawal.", err)
 		return
 	}
 	if vErrs.Any() {
-		httputil.Error(w, http.StatusUnprocessableEntity, "validation_failed", "Please check your withdrawal input.", vErrs)
+		h.writeError(state, w, r, http.StatusUnprocessableEntity, "validation_failed", "Please check your withdrawal input.", vErrs)
 		return
 	}
 
-	httputil.JSON(w, http.StatusCreated, map[string]any{"data": withdrawal})
+	h.writeJSON(state, w, r, http.StatusCreated, map[string]any{"data": withdrawal})
 }

@@ -134,6 +134,7 @@ export type PaymentOrder = {
   buyer_phone?: string;
   status: string;
   provider_status?: string;
+  expires_at?: string;
   created_at: string;
   updated_at: string;
 };
@@ -334,8 +335,7 @@ export async function getPaymentMetrics() {
 
 // ---------- Payments ledger, balances, fees, withdrawals ----------
 
-export type AppBalance = {
-  app_id: string;
+export type CurrencyBalance = {
   currency: string;
   available_balance: string;
   total_revenue: string;
@@ -345,12 +345,24 @@ export type AppBalance = {
   available_balance_seven_days_ago: string;
 };
 
+export type AppBalance = {
+  app_id: string;
+  currency: string;
+  available_balance: string;
+  total_revenue: string;
+  total_platform_fees: string;
+  total_withdrawn: string;
+  pending_order_total: string;
+  available_balance_seven_days_ago: string;
+  balances: CurrencyBalance[];
+};
+
 export type LedgerEntry = {
   id: string;
   app_id: string;
   payment_order_id?: string;
   withdrawal_id?: string;
-  entry_type: "payment_credit" | "platform_fee_debit" | "withdrawal_debit" | "withdrawal_reversal_credit" | "adjustment_credit" | "adjustment_debit";
+  entry_type: "payment_credit" | "platform_fee_debit" | "withdrawal_debit" | "withdrawal_reversal_credit" | "adjustment_credit" | "adjustment_debit" | "refund_debit" | "refund_fee_reversal_credit";
   direction: "credit" | "debit";
   amount: string;
   currency: string;

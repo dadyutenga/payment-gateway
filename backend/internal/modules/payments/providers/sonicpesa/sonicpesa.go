@@ -112,6 +112,46 @@ func (p *Provider) ParseWebhook(rawBody []byte) (provider.WebhookEvent, error) {
 		}, nil
 	}
 
+	// Refund/reversal callbacks are detected by event name or by the
+	// presence of a refund-specific identifier field (same pattern as the
+	// payout branch above). The stored event type is normalized to
+	// "payment.refunded" so merchant endpoints subscribed to it receive the
+	// delivery; the provider's raw type stays inside Data.
+	refundID := stringField(payload, "refund_id", "reversal_id")
+	lowerEvent := strings.ToLower(eventType)
+	if strings.Contains(lowerEvent, "refund") || strings.Contains(lowerEvent, "revers") || refundID != "" {
+		providerOrderID := stringField(payload, "order_id")
+		if providerOrderID == "" {
+			return provider.WebhookEvent{}, errors.New("sonicpesa refund webhook missing order_id")
+		}
+		providerStatus := stringField(payload, "status", "refund_status", "payment_status")
+		var normalized provider.Status
+		switch NormalizeStatus(providerStatus) {
+		case provider.StatusPaid, provider.StatusReversed:
+			normalized = provider.StatusReversed
+		case provider.StatusFailed:
+			normalized = provider.StatusFailed
+		case provider.StatusProcessing:
+			normalized = provider.StatusProcessing
+		default:
+			normalized = provider.StatusUnknown
+		}
+		return provider.WebhookEvent{
+			EventType:             "payment.refunded",
+			ProviderEventID:       defaultString(stringField(payload, "event_id", "id"), refundID),
+			ProviderOrderID:       providerOrderID,
+			ProviderTransactionID: stringField(payload, "transid", "transaction_id"),
+			ProviderStatus:        providerStatus,
+			NormalizedStatus:      normalized,
+			Amount:                stringField(payload, "amount", "refund_amount"),
+			Currency:              stringField(payload, "currency", "refund_currency"),
+			Phone:                 stringField(payload, "msisdn", "phone"),
+			Reference:             defaultString(stringField(payload, "reference"), refundID),
+			OccurredAt:            parseTimePtr(stringField(payload, "timestamp", "occurred_at", "updated_at", "created_at")),
+			Data:                  payload,
+		}, nil
+	}
+
 	if eventType == "" {
 		eventType = "payment.updated"
 	}
@@ -294,6 +334,22 @@ func (p *Provider) CheckPayoutStatus(ctx context.Context, providerPayoutID strin
 		ProviderStatus:   status,
 		Raw:              parsed,
 	}, nil
+}
+
+// RefundOrder implements provider.Refunder.
+//
+// NO DOCUMENTED REFUND ENDPOINT (verified 2026-09-23): SonicPesa's public
+// API registry lists only Introduction, Create Order, Order Status,
+// Transactions, Payouts, Webhooks, and Error Codes — there is no refund or
+// reversal endpoint, and docs.sonicpesa.com refuses automated fetching
+// (HTTP 403), so the contract cannot be confirmed that way either. Per the
+// no-guessing rule this stays a stub returning
+// provider.ErrRefundNotSupported; the service falls back to a local ledger
+// reversal (manual attestation) instead. Replace this stub with a real
+// POST once SonicPesa documents the endpoint — the service already calls
+// it first and only touches the ledger after success.
+func (p *Provider) RefundOrder(_ context.Context, _ map[string]string, _, _, _, _ string) (provider.ProviderRefundResult, error) {
+	return provider.ProviderRefundResult{}, provider.ErrRefundNotSupported
 }
 
 func NormalizeStatus(status string) provider.Status {

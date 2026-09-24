@@ -42,8 +42,49 @@ type PaymentOrder struct {
 	Status                provider.Status `json:"status"`
 	ProviderStatus        string          `json:"provider_status,omitempty"`
 	Metadata              map[string]any  `json:"metadata,omitempty"`
-	CreatedAt             time.Time       `json:"created_at"`
-	UpdatedAt             time.Time       `json:"updated_at"`
+	// ExpiresAt is the order TTL deadline (nullable for rows predating the
+	// expiry feature). Pending orders past this time are transitioned to
+	// expired by the background worker; no money moves on expiry.
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
+}
+
+type ExpireOrdersResult struct {
+	Expired           int   `json:"expired"`
+	DeliveriesCreated int64 `json:"deliveries_created"`
+}
+
+// Idempotency endpoint identifiers scoped into the (app_id, key, endpoint)
+// uniqueness of app.idempotency_keys.
+const (
+	IdempotencyEndpointOrdersCreate              = "payments.orders.create"
+	IdempotencyEndpointAdminWithdrawalsCreate    = "admin.withdrawals.create"
+	IdempotencyEndpointMerchantWithdrawalsCreate = "merchant.withdrawals.create"
+)
+
+// IdempotencyRecord is one stored key. A NULL response (Completed false)
+// means the first request is still executing.
+type IdempotencyRecord struct {
+	Key            string
+	AppID          string
+	Endpoint       string
+	RequestHash    string
+	Completed      bool
+	ResponseStatus int
+	ResponseBody   string
+}
+
+// IdempotencyCheck is the outcome of CheckIdempotencyKey: either replay the
+// stored response, report a 409 conflict, or proceed (Claimed true means
+// this request owns a fresh claim row that must be stored or discarded).
+type IdempotencyCheck struct {
+	Replay   bool
+	Status   int
+	Body     string
+	Conflict bool
+	Message  string
+	Claimed  bool
 }
 
 type PaymentOrderSearchFilter struct {
@@ -91,6 +132,9 @@ type CreatePaymentOrderRepositoryInput struct {
 	Status                provider.Status
 	ProviderStatus        string
 	Metadata              map[string]any
+	// ExpiresAt is the order TTL deadline. Zero means no expiry (rows
+	// predating the expiry feature).
+	ExpiresAt time.Time
 }
 
 type PaymentEventInput struct {
@@ -176,10 +220,21 @@ type ApplyWebhookEventInput struct {
 	Currency          string
 	PlatformFeeAmount string
 
+	// PayloadAmount/PayloadCurrency carry the amount and currency as
+	// reported by the provider in this specific callback. When present they
+	// are compared against the locked order before any ledger write — a
+	// mismatch aborts with ErrWebhookAmountMismatch instead of crediting.
+	PayloadAmount   string
+	PayloadCurrency string
+
 	// PostRefund fires when a paid order transitions to reversed — reverses
-	// the original payment_credit/platform_fee_debit for this order. See
-	// postRefundEntries in repository.go.
+	// the original payment_credit/platform_fee_debit for this order via the
+	// claim-then-confirm refund machinery in repository.go.
 	PostRefund bool
+	// ProviderRefundID carries the provider-side refund identifier for
+	// async confirmations so replays are idempotent. Empty for local
+	// manual reversals.
+	ProviderRefundID string
 }
 
 type WebhookResult struct {
@@ -430,6 +485,21 @@ type AppBalance struct {
 	// estimated figure, so the mobile dashboard's trend line is never
 	// fabricated demo data.
 	AvailableBalanceSevenDaysAgo string `json:"available_balance_seven_days_ago"`
+	// Balances breaks every figure above down per currency. The top-level
+	// fields describe the primary (latest-activity) currency for backward
+	// compatibility; per-currency sums never mix.
+	Balances []CurrencyBalance `json:"balances"`
+}
+
+// CurrencyBalance is one currency's slice of an app balance.
+type CurrencyBalance struct {
+	Currency                     string `json:"currency"`
+	AvailableBalance             string `json:"available_balance"`
+	TotalRevenue                 string `json:"total_revenue"`
+	TotalPlatformFees            string `json:"total_platform_fees"`
+	TotalWithdrawn               string `json:"total_withdrawn"`
+	PendingOrderTotal            string `json:"pending_order_total"`
+	AvailableBalanceSevenDaysAgo string `json:"available_balance_seven_days_ago"`
 }
 
 type LedgerEntry struct {
@@ -520,6 +590,74 @@ var ErrWithdrawalNotFound = errors.New("withdrawal not found")
 var ErrInvalidWithdrawalTransition = errors.New("invalid withdrawal status transition")
 var ErrOrderNotRefundable = errors.New("order is not in a refundable state")
 var ErrAlreadyRefunded = errors.New("order has already been refunded")
+var ErrRefundAmountExceeded = errors.New("refund amount exceeds the remaining refundable amount")
+var ErrRefundCurrencyMismatch = errors.New("refund currency must match the order currency")
+var ErrRefundProviderFailed = errors.New("provider refund failed")
+var ErrRefundInvalidAmount = errors.New("refund amount must be positive")
+var ErrRefundNotPending = errors.New("refund is not awaiting confirmation")
+var ErrWebhookAmountMismatch = errors.New("webhook amount or currency does not match the order")
+
+// Webhook event types delivered to merchant endpoints. Endpoints subscribe
+// via event_types (default: all three for new endpoints).
+const (
+	EventTypePaymentUpdated  = "payment.updated"
+	EventTypePaymentRefunded = "payment.refunded"
+	EventTypePaymentExpired  = "payment.expired"
+)
+
+// Refund lifecycle states stored in app.payment_refunds.
+const (
+	RefundStatusConfirmed  = "confirmed"
+	RefundStatusProcessing = "processing"
+	RefundStatusFailed     = "failed"
+)
+
+// PaymentRefund records one refund attempt against an order — provider
+// confirmed, provider processing (async), failed, or local manual fallback
+// (empty provider_refund_id). The sum of non-failed rows is the amount
+// already refunded; the remainder of the order amount stays refundable.
+type PaymentRefund struct {
+	ID               string    `json:"id"`
+	PaymentOrderID   string    `json:"payment_order_id"`
+	AppID            string    `json:"app_id"`
+	ProviderRefundID string    `json:"provider_refund_id,omitempty"`
+	Amount           string    `json:"amount"`
+	Currency         string    `json:"currency"`
+	Status           string    `json:"status"`
+	Reason           string    `json:"reason,omitempty"`
+	RequestedBy      string    `json:"requested_by,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
+}
+
+// RefundOrderInput drives Service.RefundOrder. Amount "" means the full
+// remaining refundable amount (partial-refund support); Currency "" means
+// the order's currency.
+type RefundOrderInput struct {
+	OrderID     string
+	Amount      string
+	Currency    string
+	Reason      string
+	RequestedBy string
+}
+
+// RefundOrderResult is returned after a successful refund.
+type RefundOrderResult struct {
+	Order  PaymentOrder  `json:"order"`
+	Refund PaymentRefund `json:"refund"`
+}
+
+// ClaimRefundInput reserves a refund amount before the provider is called
+// so concurrent attempts serialize instead of double-refunding.
+type ClaimRefundInput struct {
+	OrderID          string
+	Amount           string
+	Currency         string
+	Reason           string
+	RequestedBy      string
+	ProviderRefundID string
+	Status           string
+}
+
 var ErrWithdrawalNotApproved = errors.New("withdrawal must be approved before it can be dispatched for payout")
 var ErrWithdrawalAlreadyDispatched = errors.New("withdrawal has already been dispatched to the payout provider")
 var ErrProviderDoesNotSupportPayouts = errors.New("payment provider does not support automated payouts")

@@ -76,6 +76,7 @@ func New(ctx context.Context) (*App, error) {
 		PayoutProvider:                 cfg.Payments.PayoutProvider,
 		PayoutReconciliationStaleAfter: cfg.Payments.PayoutReconciliationStaleAfter,
 		ProviderTimeout:                providerTimeout,
+		OrderExpiryTTL:                 cfg.Payments.OrderTTL,
 	}, logger)
 	// SMS success notifications, admin alerts, and an audit trail are all
 	// optional integrations in the full AZSUBAY backend (SetSMSSender,
@@ -267,6 +268,8 @@ func (a *App) runBackgroundJobs() {
 	defer reconciliationTicker.Stop()
 	payoutTicker := time.NewTicker(positiveDuration(a.cfg.Payments.PayoutReconciliationInterval, 5*time.Minute))
 	defer payoutTicker.Stop()
+	expiryTicker := time.NewTicker(positiveDuration(a.cfg.Payments.ExpiryInterval, time.Minute))
+	defer expiryTicker.Stop()
 
 	processDeliveries := func() {
 		if result, err := a.paymentService.ProcessDueDeliveries(a.ctx, positiveInt(a.cfg.Payments.DeliveryBatchSize, 25)); err != nil {
@@ -292,10 +295,23 @@ func (a *App) runBackgroundJobs() {
 			a.logger.Info("payout reconciliation completed", "scanned", result.Scanned, "updated", result.Updated)
 		}
 	}
+	expireOrders := func() {
+		if result, err := a.paymentService.ExpireOrders(a.ctx, positiveInt(a.cfg.Payments.ReconciliationBatchSize, 50)); err != nil {
+			a.logger.Error("payment expiry failed", "error", err)
+		} else if result.Expired > 0 {
+			a.logger.Info("payment expiry completed", "expired", result.Expired)
+		}
+		if swept, err := a.paymentService.CleanupIdempotencyKeys(a.ctx); err != nil {
+			a.logger.Error("idempotency cleanup failed", "error", err)
+		} else if swept > 0 {
+			a.logger.Info("idempotency cleanup completed", "deleted", swept)
+		}
+	}
 
 	processDeliveries()
 	reconcilePayments()
 	reconcilePayouts()
+	expireOrders()
 
 	for {
 		select {
@@ -307,6 +323,8 @@ func (a *App) runBackgroundJobs() {
 			reconcilePayments()
 		case <-payoutTicker.C:
 			reconcilePayouts()
+		case <-expiryTicker.C:
+			expireOrders()
 		}
 	}
 }

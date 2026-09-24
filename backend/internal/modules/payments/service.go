@@ -55,12 +55,14 @@ type Service struct {
 	// instead of being killed mid-flight and orphaning a provider order
 	// the buyer may still pay.
 	providerTimeout time.Duration
-	http            *http.Client
-	log             *slog.Logger
-	notifier        notify.Writer
-	gate            notify.NotificationGate
-	audit           audit.Writer
-	sms             SMSSender
+	// orderExpiryTTL is stamped as expires_at on every created order.
+	orderExpiryTTL time.Duration
+	http           *http.Client
+	log            *slog.Logger
+	notifier       notify.Writer
+	gate           notify.NotificationGate
+	audit          audit.Writer
+	sms            SMSSender
 }
 
 // SMSSender is satisfied by sms.Service. Declared narrowly here (rather than
@@ -131,7 +133,10 @@ type ServiceOptions struct {
 	// clamped below in NewService — callers should pass
 	// HTTP_REQUEST_TIMEOUT minus a margin (see httpserver.New).
 	ProviderTimeout time.Duration
-	HTTPClient      *http.Client
+	// OrderExpiryTTL is the pending-order time-to-live stamped as expires_at
+	// at creation. Zero/negative disables expiry stamping (rows stay NULL).
+	OrderExpiryTTL time.Duration
+	HTTPClient     *http.Client
 }
 
 func NewService(repo Repository, registry map[string]provider.Constructor, cipher *azcrypto.Cipher, opts ServiceOptions, logger *slog.Logger) *Service {
@@ -162,6 +167,9 @@ func NewService(repo Repository, registry map[string]provider.Constructor, ciphe
 	if opts.ProviderTimeout <= 0 {
 		opts.ProviderTimeout = 10 * time.Second
 	}
+	if opts.OrderExpiryTTL <= 0 {
+		opts.OrderExpiryTTL = 30 * time.Minute
+	}
 	if opts.AutomatedPayoutsEnabled {
 		logger.Warn("automated payouts are enabled with an unverified payout provider contract — verify SonicPesa disbursement endpoints against your own account first")
 	}
@@ -181,6 +189,7 @@ func NewService(repo Repository, registry map[string]provider.Constructor, ciphe
 		payoutProvider:                 opts.PayoutProvider,
 		payoutReconciliationStaleAfter: opts.PayoutReconciliationStaleAfter,
 		providerTimeout:                opts.ProviderTimeout,
+		orderExpiryTTL:                 opts.OrderExpiryTTL,
 		http:                           opts.HTTPClient,
 		log:                            logger,
 	}
@@ -453,13 +462,20 @@ func (s *Service) CreateWithdrawal(ctx context.Context, requestedBy string, inpu
 	if err != nil {
 		return PaymentWithdrawal{}, nil, fmt.Errorf("load app balance: %w", err)
 	}
-	// GetAppBalance is scoped to the ledger's latest currency — a withdrawal
-	// in any other currency has no balance behind it. (The authoritative
-	// check is ApproveWithdrawal's locked, currency-filtered re-sum.)
-	if !strings.EqualFold(balance.Currency, input.Currency) {
+	// Balances are per currency — a withdrawal draws only on its own
+	// currency's balance. (The authoritative check is ApproveWithdrawal's
+	// locked, currency-filtered re-sum.)
+	available := ""
+	for _, entry := range balance.Balances {
+		if strings.EqualFold(entry.Currency, input.Currency) {
+			available = entry.AvailableBalance
+			break
+		}
+	}
+	if available == "" {
 		return PaymentWithdrawal{}, nil, ErrInsufficientBalance
 	}
-	availableRat, _ := new(big.Rat).SetString(balance.AvailableBalance)
+	availableRat, _ := new(big.Rat).SetString(available)
 	amountRat, _ := new(big.Rat).SetString(input.Amount)
 	if availableRat == nil || amountRat == nil || amountRat.Cmp(availableRat) > 0 {
 		return PaymentWithdrawal{}, nil, ErrInsufficientBalance
@@ -691,11 +707,185 @@ func (s *Service) ListAppsForUser(ctx context.Context, userID string) ([]Payment
 }
 
 // ---------- Refunds & reversals ----------
-// Manual/admin fallback for when no provider webhook drives the automatic
-// path in HandleProviderWebhook (PostRefund).
 
-func (s *Service) RefundOrder(ctx context.Context, orderID string) (PaymentOrder, error) {
-	return s.repo.RefundOrder(ctx, orderID, "admin")
+// resolveRefunder loads the default provider account, decrypts its
+// credentials, and returns the adapter if it implements provider.Refunder.
+// Adapters without a verified refund API (SonicPesa today) yield
+// provider.ErrRefundNotSupported so callers fall back to local reversal.
+func (s *Service) resolveRefunder(ctx context.Context, kind string) (provider.Refunder, map[string]string, error) {
+	kind = normalizeProviderName(kind)
+	constructor, ok := s.registry[kind]
+	if !ok {
+		return nil, nil, fmt.Errorf("%w: %s", ErrUnknownProvider, kind)
+	}
+	account, err := s.repo.GetDefaultProviderAccount(ctx, kind)
+	if errors.Is(err, ErrPaymentProviderAccountNotFound) {
+		return nil, nil, fmt.Errorf("%w: %s", ErrNoActiveProviderAccount, kind)
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	decrypted, err := s.cipher.Decrypt(account.CredentialsEncrypted)
+	if err != nil {
+		return nil, nil, fmt.Errorf("decrypt payment provider credentials: %w", err)
+	}
+	var creds map[string]string
+	if err := json.Unmarshal([]byte(decrypted), &creds); err != nil {
+		return nil, nil, fmt.Errorf("parse payment provider credentials: %w", err)
+	}
+	refunder, ok := constructor(account.BaseURL, creds).(provider.Refunder)
+	if !ok {
+		return nil, nil, provider.ErrRefundNotSupported
+	}
+	return refunder, creds, nil
+}
+
+// RefundOrder refunds a paid order: full remaining amount when
+// input.Amount is empty, otherwise a partial refund validated against the
+// remaining refundable amount. The amount is claimed BEFORE the provider
+// is called so concurrent attempts serialize; the ledger refund_debit is
+// written only after the provider confirms (or immediately for the local
+// manual fallback used while the provider has no verified refund API).
+// Provider failures touch nothing — the claim is marked failed, releasing
+// the reservation.
+func (s *Service) RefundOrder(ctx context.Context, input RefundOrderInput) (RefundOrderResult, error) {
+	input.OrderID = strings.TrimSpace(input.OrderID)
+	if input.OrderID == "" {
+		return RefundOrderResult{}, errors.New("order id is required")
+	}
+	order, err := s.repo.GetPaymentOrderByID(ctx, input.OrderID)
+	if err != nil {
+		return RefundOrderResult{}, err
+	}
+	if order.Status == provider.StatusReversed {
+		return RefundOrderResult{}, ErrAlreadyRefunded
+	}
+	if order.Status != provider.StatusPaid {
+		return RefundOrderResult{}, ErrOrderNotRefundable
+	}
+	currency := strings.ToUpper(strings.TrimSpace(input.Currency))
+	if currency == "" {
+		currency = order.Currency
+	}
+	if !strings.EqualFold(currency, order.Currency) {
+		return RefundOrderResult{}, ErrRefundCurrencyMismatch
+	}
+	amount := strings.TrimSpace(input.Amount)
+	if amount != "" {
+		normalized, normErr := normalizeAmount(amount)
+		if normErr != nil {
+			return RefundOrderResult{}, ErrRefundInvalidAmount
+		}
+		amount = normalized
+	}
+
+	_, claim, err := s.repo.ClaimRefund(ctx, ClaimRefundInput{
+		OrderID:     order.ID,
+		Amount:      amount,
+		Currency:    currency,
+		Reason:      input.Reason,
+		RequestedBy: input.RequestedBy,
+		Status:      RefundStatusProcessing,
+	})
+	if err != nil {
+		return RefundOrderResult{}, err
+	}
+
+	refunder, creds, resolveErr := s.resolveRefunder(ctx, order.Provider)
+	if resolveErr != nil && !errors.Is(resolveErr, provider.ErrRefundNotSupported) {
+		_, _ = s.repo.FailRefund(ctx, claim.ID, resolveErr.Error())
+		return RefundOrderResult{}, resolveErr
+	}
+	if resolveErr == nil {
+		reference := defaultString(order.ExternalReference, order.ProviderOrderID)
+		result, refundErr := refunder.RefundOrder(ctx, creds, reference, claim.Amount, currency, input.Reason)
+		if refundErr != nil {
+			if errors.Is(refundErr, provider.ErrRefundNotSupported) {
+				return s.confirmLocalRefund(ctx, claim.ID)
+			}
+			if _, recErr := s.repo.FailRefund(ctx, claim.ID, refundErr.Error()); recErr != nil {
+				s.log.Error("record refund failure failed", "refund_id", claim.ID, "error", recErr)
+			}
+			return RefundOrderResult{}, fmt.Errorf("%w: %v", ErrRefundProviderFailed, refundErr)
+		}
+		switch result.Status {
+		case provider.StatusProcessing:
+			// Accepted asynchronously — the provider webhook confirms it
+			// later (handleRefundWebhook). Persist the provider refund id
+			// on the claim so the confirmation matches.
+			if updErr := s.repo.AttachRefundProviderID(ctx, claim.ID, result.ProviderRefundID); updErr != nil {
+				s.log.Error("attach provider refund id failed", "refund_id", claim.ID, "error", updErr)
+			} else if result.ProviderRefundID != "" {
+				claim.ProviderRefundID = result.ProviderRefundID
+			}
+			return RefundOrderResult{Order: order, Refund: claim}, nil
+		case provider.StatusFailed:
+			if _, recErr := s.repo.FailRefund(ctx, claim.ID, "Payout rejected at provider: "+result.ProviderStatus); recErr != nil {
+				s.log.Error("record refund failure failed", "refund_id", claim.ID, "error", recErr)
+			}
+			return RefundOrderResult{}, fmt.Errorf("%w: %s", ErrRefundProviderFailed, result.ProviderStatus)
+		default:
+			updated, confirmed, err := s.repo.ConfirmRefund(ctx, claim.ID, result.ProviderRefundID, result.ProviderStatus)
+			if err != nil {
+				return RefundOrderResult{}, err
+			}
+			s.emitRefundEvent(ctx, updated, confirmed)
+			return RefundOrderResult{Order: updated, Refund: confirmed}, nil
+		}
+	}
+	return s.confirmLocalRefund(ctx, claim.ID)
+}
+
+// confirmLocalRefund finalizes a claim without a provider round-trip — the
+// manual attestation fallback used while the provider has no verified
+// refund API. The claim (with its row lock + remaining check) is what
+// makes even local refunds race-safe.
+func (s *Service) confirmLocalRefund(ctx context.Context, claimID string) (RefundOrderResult, error) {
+	updated, confirmed, err := s.repo.ConfirmRefund(ctx, claimID, "", "")
+	if err != nil {
+		return RefundOrderResult{}, err
+	}
+	s.emitRefundEvent(ctx, updated, confirmed)
+	return RefundOrderResult{Order: updated, Refund: confirmed}, nil
+}
+
+// emitRefundEvent stores a payment.refunded event linked to the order and
+// fans it out to subscribed merchant endpoints with the standard signing.
+func (s *Service) emitRefundEvent(ctx context.Context, order PaymentOrder, refund PaymentRefund) {
+	raw, _ := json.Marshal(map[string]any{
+		"refund_id":          refund.ID,
+		"provider_refund_id": refund.ProviderRefundID,
+		"payment_order_id":   order.ID,
+		"amount":             refund.Amount,
+		"currency":           refund.Currency,
+		"status":             refund.Status,
+		"source":             "refund",
+	})
+	event, err := s.storeWebhookEvent(ctx, PaymentEventInput{
+		Provider:              order.Provider,
+		EventType:             EventTypePaymentRefunded,
+		ProviderEventID:       "refund-" + refund.ID,
+		ProviderOrderID:       order.ProviderOrderID,
+		ProviderTransactionID: order.ProviderTransactionID,
+		SignatureValid:        true,
+		PayloadHash:           sha256Hex(raw),
+		DedupeKey:             "refund-local-" + refund.ID,
+		Headers:               http.Header{"X-AZsubay-Source": []string{"refund"}},
+		RawBody:               string(raw),
+		NormalizedStatus:      order.Status,
+	})
+	if err != nil {
+		s.log.Error("store refund event failed", "payment_order_id", order.ID, "refund_id", refund.ID, "error", err)
+		return
+	}
+	if event.Duplicate {
+		return
+	}
+	if _, err := s.repo.CreateWebhookDeliveriesForEvent(ctx, event.ID, EventTypePaymentRefunded); err != nil {
+		s.log.Error("create refund webhook deliveries failed", "event_id", event.ID, "error", err)
+		return
+	}
+	go s.deliverDueNow()
 }
 
 func (s *Service) CreateOrder(ctx context.Context, app PaymentApp, input CreatePaymentOrderInput) (PaymentOrder, validation.Errors, error) {
@@ -758,6 +948,7 @@ func (s *Service) CreateOrder(ctx context.Context, app PaymentApp, input CreateP
 		BuyerPhone:        input.BuyerPhone,
 		Status:            provider.StatusPending,
 		Metadata:          copyMetadata(input.Metadata),
+		ExpiresAt:         time.Now().UTC().Add(s.orderExpiryTTL),
 	})
 	if err != nil {
 		if isUniqueViolation(err) && input.ExternalReference != "" {
@@ -932,7 +1123,124 @@ func (s *Service) ReconcilePayments(ctx context.Context, limit int) (ReconcilePa
 	return result, nil
 }
 
+// ExpireOrders transitions overdue pending orders to expired (no ledger
+// movement — expiry means no money moved) and emits a payment.expired event
+// per order through the standard delivery queue. Safe across concurrent
+// api/worker processes: the repository claims rows with SKIP LOCKED.
+func (s *Service) ExpireOrders(ctx context.Context, limit int) (ExpireOrdersResult, error) {
+	orders, err := s.repo.ExpirePendingOrders(ctx, limit)
+	if err != nil {
+		return ExpireOrdersResult{}, err
+	}
+
+	result := ExpireOrdersResult{Expired: len(orders)}
+	for _, order := range orders {
+		raw, _ := json.Marshal(map[string]any{
+			"payment_order_id": order.ID,
+			"expired_at":       time.Now().UTC(),
+			"source":           "expiry",
+		})
+		event, err := s.storeWebhookEvent(ctx, PaymentEventInput{
+			Provider:         order.Provider,
+			EventType:        EventTypePaymentExpired,
+			ProviderOrderID:  order.ProviderOrderID,
+			SignatureValid:   true,
+			PayloadHash:      sha256Hex(raw),
+			DedupeKey:        "expiry-" + order.ID,
+			Headers:          http.Header{"X-AZsubay-Source": []string{"expiry"}},
+			RawBody:          string(raw),
+			NormalizedStatus: provider.StatusExpired,
+		})
+		if err != nil {
+			s.log.Error("store expiry event failed", "payment_order_id", order.ID, "error", err)
+			continue
+		}
+		if event.Duplicate {
+			continue
+		}
+		if _, err := s.repo.CreateWebhookDeliveriesForEvent(ctx, event.ID, EventTypePaymentExpired); err != nil {
+			s.log.Error("create expiry webhook deliveries failed", "event_id", event.ID, "error", err)
+			continue
+		}
+		result.DeliveriesCreated++
+	}
+	if result.Expired > 0 {
+		s.log.Info("payment expiry completed", "expired", result.Expired, "deliveries_created", result.DeliveriesCreated)
+		go s.deliverDueNow()
+	}
+	return result, nil
+}
+
+// ---------- Idempotency keys ----------
+
+const (
+	// idempotencyKeyTTL bounds how long a stored response is replayable.
+	idempotencyKeyTTL = 24 * time.Hour
+	// idempotencyWaitPoll / Tries bound how long a duplicate waits for an
+	// in-flight first request to finish before getting a 409.
+	idempotencyWaitPoll  = 200 * time.Millisecond
+	idempotencyWaitTries = 15
+)
+
+// CheckIdempotencyKey implements the Idempotency-Key contract for
+// create-order / create-withdrawal endpoints: same key + same request hash
+// replays the stored response; same key + different hash is a conflict; a
+// fresh key inserts an in-progress claim the caller must Store (or Discard
+// on transient failure). An in-progress duplicate waits briefly for the
+// first request rather than re-executing.
+func (s *Service) CheckIdempotencyKey(ctx context.Context, appID, endpoint, key, requestHash string) (IdempotencyCheck, error) {
+	record, created, err := s.repo.ClaimIdempotencyKey(ctx, appID, endpoint, key, requestHash, idempotencyKeyTTL)
+	if err != nil {
+		return IdempotencyCheck{}, err
+	}
+	if created {
+		return IdempotencyCheck{Claimed: true}, nil
+	}
+	if record.RequestHash != requestHash {
+		return IdempotencyCheck{Conflict: true, Message: "Idempotency-Key was already used with a different request body."}, nil
+	}
+	if record.Completed {
+		return IdempotencyCheck{Replay: true, Status: record.ResponseStatus, Body: record.ResponseBody}, nil
+	}
+	for i := 0; i < idempotencyWaitTries; i++ {
+		select {
+		case <-ctx.Done():
+			return IdempotencyCheck{Conflict: true, Message: "Identical request is still in progress."}, nil
+		case <-time.After(idempotencyWaitPoll):
+		}
+		latest, found, err := s.repo.GetIdempotencyRecord(ctx, appID, endpoint, key)
+		if err != nil {
+			return IdempotencyCheck{}, err
+		}
+		if !found || latest.RequestHash != requestHash {
+			return IdempotencyCheck{Conflict: true, Message: "Idempotency-Key was already used with a different request body."}, nil
+		}
+		if latest.Completed {
+			return IdempotencyCheck{Replay: true, Status: latest.ResponseStatus, Body: latest.ResponseBody}, nil
+		}
+	}
+	return IdempotencyCheck{Conflict: true, Message: "Identical request is still in progress."}, nil
+}
+
+// StoreIdempotencyResponse records the terminal response for a claimed key.
+func (s *Service) StoreIdempotencyResponse(ctx context.Context, appID, endpoint, key string, status int, body string) error {
+	return s.repo.StoreIdempotencyResponse(ctx, appID, endpoint, key, status, body)
+}
+
+// DiscardIdempotencyKey drops a claim after a transient (5xx/provider)
+// failure so the next retry re-executes cleanly.
+func (s *Service) DiscardIdempotencyKey(ctx context.Context, appID, endpoint, key string) error {
+	return s.repo.DeleteIdempotencyKey(ctx, appID, endpoint, key)
+}
+
+// CleanupIdempotencyKeys deletes rows past their expiry window. Called from
+// the expiry worker sweep.
+func (s *Service) CleanupIdempotencyKeys(ctx context.Context) (int64, error) {
+	return s.repo.DeleteExpiredIdempotencyKeys(ctx)
+}
+
 func (s *Service) SearchPaymentOrders(ctx context.Context, filter PaymentOrderSearchFilter) (PaymentOrderSearchResult, error) {
+
 	filter.Query = strings.TrimSpace(filter.Query)
 	filter.AppID = strings.TrimSpace(filter.AppID)
 	filter.Provider = normalizeProviderName(filter.Provider)
@@ -991,7 +1299,7 @@ func (s *Service) CreateWebhookEndpoint(ctx context.Context, input CreatePayment
 		errs.Add("url", "Webhook URL must be a valid http or https URL.")
 	}
 	if len(input.EventTypes) == 0 {
-		input.EventTypes = []string{"payment.updated"}
+		input.EventTypes = DefaultWebhookEventTypes()
 	}
 	for _, eventType := range input.EventTypes {
 		validation.MaxRunes(eventType, 80, "Event type must be 80 characters or fewer.", errs, "event_types")
@@ -1028,7 +1336,12 @@ func (s *Service) ReplayEvent(ctx context.Context, eventID string) (ReplayPaymen
 	if eventID == "" {
 		return ReplayPaymentEventResult{}, errors.New("event id is required")
 	}
-	created, err := s.repo.CreateWebhookDeliveriesForEvent(ctx, eventID, "payment.updated")
+	stored, err := s.repo.GetPaymentEventByID(ctx, eventID)
+	if err != nil {
+		return ReplayPaymentEventResult{}, err
+	}
+	eventType := defaultString(stored.EventType, EventTypePaymentUpdated)
+	created, err := s.repo.CreateWebhookDeliveriesForEvent(ctx, eventID, eventType)
 	if err != nil {
 		return ReplayPaymentEventResult{}, err
 	}
@@ -1169,9 +1482,18 @@ func (s *Service) HandleProviderWebhook(ctx context.Context, providerName string
 		return WebhookResult{EventID: event.ID, Duplicate: event.Duplicate}, fmt.Errorf("%w: %v", ErrWebhookParseFailed, err)
 	}
 
+	// Refund confirmations (async provider refunds) are normalized to
+	// payment.refunded by the adapter. They bypass the generic store below
+	// (which would orphan a raw-typed event) and the credit path entirely
+	// — only the claim-then-confirm reversal in handleRefundWebhook can
+	// touch the ledger.
+	if webhookEvent.EventType == EventTypePaymentRefunded || strings.Contains(strings.ToLower(webhookEvent.EventType), "refund") {
+		return s.handleRefundWebhook(ctx, name, headers, rawBody, payloadHash, webhookEvent)
+	}
+
 	event, err := s.storeWebhookEvent(ctx, PaymentEventInput{
 		Provider:              name,
-		EventType:             defaultString(webhookEvent.EventType, "payment.updated"),
+		EventType:             defaultString(webhookEvent.EventType, EventTypePaymentUpdated),
 		ProviderEventID:       webhookEvent.ProviderEventID,
 		ProviderOrderID:       webhookEvent.ProviderOrderID,
 		ProviderTransactionID: webhookEvent.ProviderTransactionID,
@@ -1213,6 +1535,20 @@ func (s *Service) HandleProviderWebhook(ctx context.Context, providerName string
 		return WebhookResult{EventID: event.ID}, fmt.Errorf("find payment order for webhook: %w", err)
 	}
 
+	// Late callbacks for expired orders are never applied: the order is
+	// already terminal and any money movement needs a human to confirm what
+	// the provider actually did. Hold the event for manual review instead
+	// of silently crediting or discarding it.
+	if order.Status == provider.StatusExpired {
+		s.log.Warn("late webhook for expired order — held for manual review",
+			"provider", name, "event_id", event.ID, "payment_order_id", order.ID,
+			"payload_status", webhookEvent.ProviderStatus)
+		if markErr := s.repo.MarkEventProcessed(ctx, event.ID, order.ID, "order expired — held for manual review"); markErr != nil {
+			return WebhookResult{EventID: event.ID, OrderFound: true}, fmt.Errorf("mark expired-order event: %w", markErr)
+		}
+		return WebhookResult{EventID: event.ID, Processed: true, OrderFound: true}, nil
+	}
+
 	nextStatus := transitionStatus(order.Status, webhookEvent.NormalizedStatus)
 
 	applyInput := ApplyWebhookEventInput{
@@ -1223,13 +1559,27 @@ func (s *Service) HandleProviderWebhook(ctx context.Context, providerName string
 		ProviderStatus:        webhookEvent.ProviderStatus,
 		ProviderTransactionID: webhookEvent.ProviderTransactionID,
 		Source:                "webhook",
+		PayloadAmount:         strings.TrimSpace(webhookEvent.Amount),
+		PayloadCurrency:       strings.TrimSpace(webhookEvent.Currency),
 	}
 	paymentApp := s.applyLedgerFields(ctx, &applyInput, order, nextStatus)
 
 	if _, err := s.repo.ApplyWebhookEvent(ctx, applyInput); err != nil {
+		if errors.Is(err, ErrWebhookAmountMismatch) {
+			// Reject, don't silently credit: hold the event for manual
+			// review with the mismatch recorded, and log loudly.
+			s.log.Warn("webhook amount/currency mismatch — held for manual review",
+				"provider", name, "event_id", event.ID, "payment_order_id", order.ID,
+				"order_amount", order.Amount, "order_currency", order.Currency,
+				"payload_amount", webhookEvent.Amount, "payload_currency", webhookEvent.Currency)
+			if markErr := s.repo.MarkEventProcessed(ctx, event.ID, order.ID, "amount/currency mismatch — held for manual review"); markErr != nil {
+				s.log.Error("mark mismatched event failed", "event_id", event.ID, "error", markErr)
+			}
+			return WebhookResult{EventID: event.ID, Processed: true, OrderFound: true}, err
+		}
 		return WebhookResult{EventID: event.ID, OrderFound: true}, fmt.Errorf("apply payment webhook: %w", err)
 	}
-	if _, err := s.repo.CreateWebhookDeliveriesForEvent(ctx, event.ID, "payment.updated"); err != nil {
+	if _, err := s.repo.CreateWebhookDeliveriesForEvent(ctx, event.ID, EventTypePaymentUpdated); err != nil {
 		s.log.Error("create payment webhook deliveries failed", "event_id", event.ID, "payment_order_id", order.ID, "error", err)
 	} else {
 		// Queued deliveries default to next_attempt_at = NOW(), so they're
@@ -1256,6 +1606,120 @@ func (s *Service) HandleProviderWebhook(ctx context.Context, providerName string
 	}
 
 	s.log.Info("payment webhook processed", "provider", name, "event_id", event.ID, "payment_order_id", order.ID, "from_status", order.Status, "to_status", nextStatus)
+	return WebhookResult{EventID: event.ID, Processed: true, OrderFound: true}, nil
+}
+
+// handleRefundWebhook applies an async provider refund confirmation. The
+// event is stored normalized as payment.refunded (so subscribed merchant
+// endpoints receive it) and the reversal goes through the same
+// claim-then-confirm machinery as the synchronous path — same row lock,
+// same remaining-amount check, same provider_refund_id idempotency. A
+// replayed confirmation hits ErrAlreadyRefunded and is marked processed
+// without touching the ledger twice.
+func (s *Service) handleRefundWebhook(ctx context.Context, providerName string, headers http.Header, rawBody []byte, payloadHash string, webhookEvent provider.WebhookEvent) (WebhookResult, error) {
+	event, err := s.storeWebhookEvent(ctx, PaymentEventInput{
+		Provider:              providerName,
+		EventType:             EventTypePaymentRefunded,
+		ProviderEventID:       defaultString(webhookEvent.ProviderEventID, webhookEvent.Reference),
+		ProviderOrderID:       webhookEvent.ProviderOrderID,
+		ProviderTransactionID: webhookEvent.ProviderTransactionID,
+		SignatureValid:        true,
+		PayloadHash:           payloadHash,
+		DedupeKey:             dedupeKey(providerName, "refund", webhookEvent.ProviderEventID, webhookEvent.ProviderOrderID, payloadHash),
+		Headers:               headers,
+		RawBody:               string(rawBody),
+		NormalizedStatus:      webhookEvent.NormalizedStatus,
+	})
+	if err != nil {
+		return WebhookResult{}, fmt.Errorf("%w: %v", ErrPaymentEventPersistenceFailed, err)
+	}
+	if event.Duplicate {
+		return WebhookResult{EventID: event.ID, Duplicate: true, Processed: true}, nil
+	}
+
+	// Only terminal confirmations reverse money. Anything else (processing,
+	// unknown) is recorded and left for a later webhook — never credited,
+	// never reversed.
+	if webhookEvent.NormalizedStatus != provider.StatusReversed {
+		if err := s.repo.MarkEventProcessed(ctx, event.ID, "", "refund not yet confirmed by provider"); err != nil {
+			return WebhookResult{EventID: event.ID}, fmt.Errorf("mark unconfirmed refund event: %w", err)
+		}
+		s.log.Info("refund webhook stored without confirmation", "provider", providerName, "event_id", event.ID, "status", webhookEvent.NormalizedStatus)
+		return WebhookResult{EventID: event.ID, Processed: true, OrderFound: false}, nil
+	}
+
+	if strings.TrimSpace(webhookEvent.ProviderOrderID) == "" {
+		if err := s.repo.MarkEventProcessed(ctx, event.ID, "", "provider order id missing"); err != nil {
+			return WebhookResult{EventID: event.ID}, fmt.Errorf("mark payment event missing order id: %w", err)
+		}
+		return WebhookResult{EventID: event.ID, Processed: true}, nil
+	}
+
+	order, err := s.repo.GetPaymentOrderByProviderOrderID(ctx, providerName, webhookEvent.ProviderOrderID)
+	if errors.Is(err, ErrPaymentOrderNotFound) {
+		message := "payment order not found for provider order id"
+		if markErr := s.repo.MarkEventProcessed(ctx, event.ID, "", message); markErr != nil {
+			return WebhookResult{EventID: event.ID}, fmt.Errorf("mark unmatched refund event: %w", markErr)
+		}
+		s.log.Warn("refund webhook stored without matching order", "provider", providerName, "provider_order_id", webhookEvent.ProviderOrderID, "event_id", event.ID)
+		return WebhookResult{EventID: event.ID, Processed: true, OrderFound: false}, nil
+	}
+	if err != nil {
+		return WebhookResult{EventID: event.ID}, fmt.Errorf("find payment order for refund webhook: %w", err)
+	}
+
+	// An expired order never settled, so there is nothing to reverse — hold
+	// for manual review rather than erroring into a retry loop.
+	if order.Status == provider.StatusExpired {
+		s.log.Warn("refund webhook for expired order — held for manual review",
+			"provider", providerName, "event_id", event.ID, "payment_order_id", order.ID)
+		if markErr := s.repo.MarkEventProcessed(ctx, event.ID, order.ID, "order expired — nothing to reverse, held for manual review"); markErr != nil {
+			return WebhookResult{EventID: event.ID, OrderFound: true}, fmt.Errorf("mark expired-order refund event: %w", markErr)
+		}
+		return WebhookResult{EventID: event.ID, Processed: true, OrderFound: true}, nil
+	}
+
+	providerRefundID := defaultString(webhookEvent.ProviderEventID, webhookEvent.Reference)
+	_, claim, err := s.repo.ClaimRefund(ctx, ClaimRefundInput{
+		OrderID:          order.ID,
+		Amount:           strings.TrimSpace(webhookEvent.Amount),
+		Currency:         defaultString(webhookEvent.Currency, order.Currency),
+		Reason:           "provider webhook confirmation",
+		RequestedBy:      "webhook",
+		ProviderRefundID: providerRefundID,
+		Status:           RefundStatusProcessing,
+	})
+	if errors.Is(err, ErrAlreadyRefunded) {
+		if markErr := s.repo.MarkEventProcessed(ctx, event.ID, order.ID, ""); markErr != nil {
+			return WebhookResult{EventID: event.ID, OrderFound: true}, fmt.Errorf("mark duplicate refund event: %w", markErr)
+		}
+		return WebhookResult{EventID: event.ID, Duplicate: true, Processed: true, OrderFound: true}, nil
+	}
+	if err != nil {
+		if markErr := s.repo.MarkEventProcessed(ctx, event.ID, order.ID, err.Error()); markErr != nil {
+			s.log.Error("mark failed refund event failed", "event_id", event.ID, "error", markErr)
+		}
+		return WebhookResult{EventID: event.ID, OrderFound: true}, fmt.Errorf("claim async refund: %w", err)
+	}
+
+	updated, _, err := s.repo.ConfirmRefund(ctx, claim.ID, providerRefundID, webhookEvent.ProviderStatus)
+	if err != nil {
+		if markErr := s.repo.MarkEventProcessed(ctx, event.ID, order.ID, err.Error()); markErr != nil {
+			s.log.Error("mark failed refund event failed", "event_id", event.ID, "error", markErr)
+		}
+		return WebhookResult{EventID: event.ID, OrderFound: true}, fmt.Errorf("confirm async refund: %w", err)
+	}
+	if err := s.repo.MarkEventProcessed(ctx, event.ID, order.ID, ""); err != nil {
+		return WebhookResult{EventID: event.ID, OrderFound: true}, fmt.Errorf("mark refund event processed: %w", err)
+	}
+	if _, err := s.repo.CreateWebhookDeliveriesForEvent(ctx, event.ID, EventTypePaymentRefunded); err != nil {
+		s.log.Error("create refund webhook deliveries failed", "event_id", event.ID, "error", err)
+	} else {
+		go s.deliverDueNow()
+	}
+
+	s.log.Info("refund webhook processed", "provider", providerName, "event_id", event.ID, "payment_order_id", order.ID, "refund_id", claim.ID)
+	_ = updated
 	return WebhookResult{EventID: event.ID, Processed: true, OrderFound: true}, nil
 }
 
@@ -1393,7 +1857,7 @@ func (s *Service) handlePayoutWebhook(ctx context.Context, providerName, eventID
 
 func (s *Service) storeWebhookEvent(ctx context.Context, input PaymentEventInput) (StoredPaymentEvent, error) {
 	if input.EventType == "" {
-		input.EventType = "payment.updated"
+		input.EventType = EventTypePaymentUpdated
 	}
 	event, err := s.repo.CreatePaymentEvent(ctx, input)
 	if err != nil {
@@ -1411,7 +1875,7 @@ func (s *Service) applyProviderStatusUpdate(ctx context.Context, order PaymentOr
 		rawBody := providerStatusRawBody(providerStatus)
 		event, err := s.storeWebhookEvent(ctx, PaymentEventInput{
 			Provider:              order.Provider,
-			EventType:             "payment.updated",
+			EventType:             EventTypePaymentUpdated,
 			ProviderOrderID:       defaultString(providerStatus.OrderID, order.ProviderOrderID),
 			ProviderTransactionID: providerStatus.TransactionID,
 			SignatureValid:        true,
@@ -1435,16 +1899,28 @@ func (s *Service) applyProviderStatusUpdate(ctx context.Context, order PaymentOr
 		ProviderStatus:        providerStatus.ProviderStatus,
 		ProviderTransactionID: providerStatus.TransactionID,
 		Source:                source,
+		PayloadAmount:         strings.TrimSpace(providerStatus.Amount),
+		PayloadCurrency:       strings.TrimSpace(providerStatus.Currency),
 	}
 	paymentApp := s.applyLedgerFields(ctx, &applyInput, order, nextStatus)
 
 	updated, err := s.repo.ApplyWebhookEvent(ctx, applyInput)
 	if err != nil {
+		if errors.Is(err, ErrWebhookAmountMismatch) && eventID != "" {
+			// Same manual-review treatment as the webhook path: record the
+			// mismatch on the event so it stops polling attention and
+			// surfaces in the error queue instead of crediting.
+			s.log.Warn("provider status amount/currency mismatch — held for manual review",
+				"source", source, "event_id", eventID, "payment_order_id", order.ID)
+			if markErr := s.repo.MarkEventProcessed(ctx, eventID, order.ID, "amount/currency mismatch — held for manual review"); markErr != nil {
+				s.log.Error("mark mismatched event failed", "event_id", eventID, "error", markErr)
+			}
+		}
 		return PaymentOrder{}, eventID, 0, err
 	}
 
 	if eventID != "" {
-		deliveries, err := s.repo.CreateWebhookDeliveriesForEvent(ctx, eventID, "payment.updated")
+		deliveries, err := s.repo.CreateWebhookDeliveriesForEvent(ctx, eventID, EventTypePaymentUpdated)
 		if err != nil {
 			s.log.Error("create payment webhook deliveries failed", "event_id", eventID, "payment_order_id", updated.ID, "source", source, "error", err)
 		} else {
@@ -1535,7 +2011,7 @@ func (s *Service) deliverWebhook(ctx context.Context, job PaymentWebhookDelivery
 }
 
 func buildWebhookDeliveryPayload(job PaymentWebhookDeliveryJob) WebhookDeliveryPayload {
-	eventType := defaultString(job.EventType, "payment.updated")
+	eventType := defaultString(job.EventType, EventTypePaymentUpdated)
 	occurredAt := job.ReceivedAt
 	if occurredAt.IsZero() {
 		occurredAt = time.Now().UTC()
@@ -1553,7 +2029,7 @@ func buildWebhookDeliveryPayload(job PaymentWebhookDeliveryJob) WebhookDeliveryP
 
 	return WebhookDeliveryPayload{
 		ID:                job.EventID,
-		Type:              "payment.updated",
+		Type:              eventType,
 		Provider:          job.Provider,
 		PaymentID:         job.PaymentOrder.ID,
 		ProviderOrderID:   job.PaymentOrder.ProviderOrderID,
@@ -1649,9 +2125,15 @@ func normalizeProviderName(name string) string {
 	return strings.ToLower(strings.TrimSpace(name))
 }
 
+// DefaultWebhookEventTypes is the subscription set for new merchant
+// endpoints — every type the gateway can emit.
+func DefaultWebhookEventTypes() []string {
+	return []string{EventTypePaymentUpdated, EventTypePaymentRefunded, EventTypePaymentExpired}
+}
+
 func normalizeEventTypes(eventTypes []string) []string {
 	if len(eventTypes) == 0 {
-		return []string{"payment.updated"}
+		return DefaultWebhookEventTypes()
 	}
 
 	seen := map[string]bool{}
@@ -1665,7 +2147,7 @@ func normalizeEventTypes(eventTypes []string) []string {
 		out = append(out, eventType)
 	}
 	if len(out) == 0 {
-		return []string{"payment.updated"}
+		return DefaultWebhookEventTypes()
 	}
 	return out
 }

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"sort"
 	"strings"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 
 var ErrPaymentOrderNotFound = errors.New("payment order not found")
 var ErrPaymentAppNotFound = errors.New("payment app not found")
+var ErrPaymentEventNotFound = errors.New("payment event not found")
 var ErrPaymentWebhookDeliveryNotFound = errors.New("payment webhook delivery not found")
 var ErrPaymentProviderAccountNotFound = errors.New("payment provider account not found")
 
@@ -79,7 +81,18 @@ type Repository interface {
 	ListAppsForUser(ctx context.Context, userID string) ([]PaymentApp, error)
 
 	GetPaymentOrderByID(ctx context.Context, paymentOrderID string) (PaymentOrder, error)
-	RefundOrder(ctx context.Context, orderID, source string) (PaymentOrder, error)
+	GetPaymentEventByID(ctx context.Context, eventID string) (PaymentEvent, error)
+	ClaimRefund(ctx context.Context, input ClaimRefundInput) (PaymentOrder, PaymentRefund, error)
+	AttachRefundProviderID(ctx context.Context, refundID, providerRefundID string) error
+	ExpirePendingOrders(ctx context.Context, limit int) ([]PaymentOrder, error)
+	GetIdempotencyRecord(ctx context.Context, appID, endpoint, key string) (IdempotencyRecord, bool, error)
+	ClaimIdempotencyKey(ctx context.Context, appID, endpoint, key, requestHash string, ttl time.Duration) (IdempotencyRecord, bool, error)
+	StoreIdempotencyResponse(ctx context.Context, appID, endpoint, key string, status int, body string) error
+	DeleteIdempotencyKey(ctx context.Context, appID, endpoint, key string) error
+	DeleteExpiredIdempotencyKeys(ctx context.Context) (int64, error)
+	ConfirmRefund(ctx context.Context, refundID, providerRefundID, providerStatus string) (PaymentOrder, PaymentRefund, error)
+	FailRefund(ctx context.Context, refundID, reason string) (PaymentRefund, error)
+	RefundedTotal(ctx context.Context, orderID string) (string, error)
 }
 
 type PostgresRepository struct {
@@ -267,9 +280,10 @@ func (r *PostgresRepository) CreatePaymentOrder(ctx context.Context, input Creat
 			buyer_phone,
 			status,
 			provider_status,
-			metadata
+			metadata,
+			expires_at
 		)
-		VALUES ($1::uuid,$2,$3,$4,$5,$6::numeric,$7,$8,$9,$10,$11,$12,$13::jsonb)
+		VALUES ($1::uuid,$2,$3,$4,$5,$6::numeric,$7,$8,$9,$10,$11,$12,$13::jsonb,$14::timestamptz)
 		RETURNING
 			id::text,
 			COALESCE(app_id::text, ''),
@@ -286,7 +300,8 @@ func (r *PostgresRepository) CreatePaymentOrder(ctx context.Context, input Creat
 			COALESCE(provider_status, ''),
 			metadata::text,
 			created_at,
-			updated_at
+			updated_at,
+			expires_at
 	`
 
 	order, err := scanPaymentOrder(tx.QueryRowEx(
@@ -306,6 +321,7 @@ func (r *PostgresRepository) CreatePaymentOrder(ctx context.Context, input Creat
 		string(input.Status),
 		valueOrNil(input.ProviderStatus),
 		string(metadataJSON),
+		valueOrNilTime(input.ExpiresAt),
 	))
 	if err != nil {
 		return PaymentOrder{}, fmt.Errorf("create payment order: %w", err)
@@ -365,11 +381,12 @@ func (r *PostgresRepository) UpdatePaymentOrderProviderDetails(ctx context.Conte
 			COALESCE(buyer_name, ''),
 			COALESCE(buyer_email, ''),
 			COALESCE(buyer_phone, ''),
-			status,
-			COALESCE(provider_status, ''),
-			metadata::text,
-			created_at,
-			updated_at
+		status,
+		COALESCE(provider_status, ''),
+		metadata::text,
+		created_at,
+		updated_at,
+		expires_at
 	`
 	order, err := scanPaymentOrder(r.db.QueryRowEx(ctx, query, nil, id, valueOrNil(providerOrderID), providerTransactionID, string(status), valueOrNil(providerStatus), string(metadataJSON)))
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -547,6 +564,16 @@ func (r *PostgresRepository) ApplyWebhookEvent(ctx context.Context, input ApplyW
 		input.ToStatus == provider.StatusReversed
 	statusChanged := actualFrom != input.ToStatus
 
+	// Amount/currency validation: when the provider reported an amount or
+	// currency with this callback, it must agree with the locked order
+	// before a single ledger row is written. A mismatch aborts the whole
+	// transaction (nothing written) so a spoofed or misrouted callback can
+	// never credit the wrong amount — the caller logs it and holds the
+	// event for manual review instead.
+	if shouldPostLedger && !webhookPayloadMatchesOrder(locked, input.PayloadAmount, input.PayloadCurrency) {
+		return PaymentOrder{}, ErrWebhookAmountMismatch
+	}
+
 	const updateOrder = `
 		UPDATE app.payment_orders
 		SET status = $2,
@@ -570,7 +597,8 @@ func (r *PostgresRepository) ApplyWebhookEvent(ctx context.Context, input ApplyW
 			COALESCE(provider_status, ''),
 			metadata::text,
 			created_at,
-			updated_at
+			updated_at,
+			expires_at
 	`
 	order, err := scanPaymentOrder(tx.QueryRowEx(ctx, updateOrder, nil, input.PaymentOrderID, string(input.ToStatus), valueOrNil(input.ProviderStatus), input.ProviderTransactionID))
 	if err != nil {
@@ -639,8 +667,14 @@ func (r *PostgresRepository) ApplyWebhookEvent(ctx context.Context, input ApplyW
 	}
 
 	if shouldPostRefund {
-		if err = postRefundEntries(ctx, tx, input.AppID, input.PaymentOrderID); err != nil {
-			return PaymentOrder{}, fmt.Errorf("post refund ledger entries: %w", err)
+		// Async provider-confirmed reversal (webhook/refresh/reconciliation
+		// observing paid -> reversed). Same claim-then-confirm machinery as
+		// the synchronous path, in this transaction: the row lock above
+		// serializes racers, the remaining-amount check makes replays a
+		// no-op, and the (order, provider_refund_id) unique index catches
+		// duplicate provider confirmations.
+		if err = applyAsyncRefund(ctx, tx, input); err != nil {
+			return PaymentOrder{}, fmt.Errorf("apply async refund: %w", err)
 		}
 	}
 
@@ -1271,6 +1305,13 @@ func valueOrNil(value string) any {
 	return value
 }
 
+func valueOrNilTime(value time.Time) any {
+	if value.IsZero() {
+		return nil
+	}
+	return value
+}
+
 // isUniqueViolation reports Postgres unique-constraint violations (23505).
 func isUniqueViolation(err error) bool {
 	var pgErr pgx.PgError
@@ -1278,6 +1319,27 @@ func isUniqueViolation(err error) bool {
 		return pgErr.Code == "23505"
 	}
 	return false
+}
+
+// webhookPayloadMatchesOrder compares a provider callback's reported
+// amount/currency against the locked order. Empty payload values mean the
+// provider omitted them and are skipped — only present values are enforced.
+func webhookPayloadMatchesOrder(order PaymentOrder, payloadAmount, payloadCurrency string) bool {
+	if strings.TrimSpace(payloadAmount) != "" && !decimalEqual(order.Amount, payloadAmount) {
+		return false
+	}
+	if strings.TrimSpace(payloadCurrency) != "" && !strings.EqualFold(order.Currency, strings.TrimSpace(payloadCurrency)) {
+		return false
+	}
+	return true
+}
+
+// decimalEqual compares two numeric strings by value, not formatting
+// ("100" == "100.00").
+func decimalEqual(a, b string) bool {
+	ratA, okA := new(big.Rat).SetString(strings.TrimSpace(a))
+	ratB, okB := new(big.Rat).SetString(strings.TrimSpace(b))
+	return okA && okB && ratA.Cmp(ratB) == 0
 }
 
 // isZeroDecimal reports whether a numeric string is zero in any
@@ -1307,7 +1369,8 @@ const paymentOrderSelect = `
 		COALESCE(provider_status, ''),
 		metadata::text,
 		created_at,
-		updated_at
+		updated_at,
+		expires_at
 	FROM app.payment_orders
 `
 
@@ -1377,6 +1440,7 @@ func scanPaymentOrder(row rowScanner) (PaymentOrder, error) {
 	var order PaymentOrder
 	var status string
 	var metadata string
+	var expiresAt sql.NullTime
 	if err := row.Scan(
 		&order.ID,
 		&order.AppID,
@@ -1394,11 +1458,15 @@ func scanPaymentOrder(row rowScanner) (PaymentOrder, error) {
 		&metadata,
 		&order.CreatedAt,
 		&order.UpdatedAt,
+		&expiresAt,
 	); err != nil {
 		return PaymentOrder{}, err
 	}
 
 	order.Status = provider.Status(status)
+	if expiresAt.Valid {
+		order.ExpiresAt = &expiresAt.Time
+	}
 	if metadata != "" {
 		if err := json.Unmarshal([]byte(metadata), &order.Metadata); err != nil {
 			return PaymentOrder{}, fmt.Errorf("decode payment order metadata: %w", err)
@@ -1801,49 +1869,102 @@ func (r *PostgresRepository) DeletePaymentApp(ctx context.Context, appID string)
 // GetAppBalance derives every figure from the ledger (never a stored
 // column) plus a separate read-only total of still-unsettled orders.
 func (r *PostgresRepository) GetAppBalance(ctx context.Context, appID string) (AppBalance, error) {
-	// Balances are single-currency: every sum below is scoped to the app's
-	// latest ledger currency. Summing across currencies (e.g. TZS + USD
-	// amounts added together) produced a meaningless number, so resolve the
-	// currency first and filter everything — including pending orders — by it.
-	var currency string
+	// Balances are aggregated per currency and never summed across
+	// currencies. The legacy top-level fields describe the primary
+	// (latest-activity) currency for backward compatibility.
+	var primary string
 	if err := r.db.QueryRowEx(ctx, `
 		SELECT COALESCE((SELECT currency FROM app.payment_ledger_entries WHERE app_id = $1::uuid ORDER BY created_at DESC LIMIT 1), 'TZS')
-	`, nil, appID).Scan(&currency); err != nil {
+	`, nil, appID).Scan(&primary); err != nil {
 		return AppBalance{}, fmt.Errorf("resolve app balance currency: %w", err)
 	}
 
 	const ledgerQuery = `
-		SELECT
+		SELECT currency,
 			COALESCE(SUM(CASE WHEN direction = 'credit' THEN amount ELSE -amount END), 0)::text,
 			COALESCE(SUM(CASE WHEN entry_type = 'payment_credit' THEN amount ELSE 0 END), 0)::text,
 			COALESCE(SUM(CASE WHEN entry_type = 'platform_fee_debit' THEN amount ELSE 0 END), 0)::text,
 			COALESCE(SUM(CASE WHEN entry_type = 'withdrawal_debit' THEN amount
 			              WHEN entry_type = 'withdrawal_reversal_credit' THEN -amount ELSE 0 END), 0)::text,
-			COALESCE(SUM(CASE WHEN created_at <= $3 THEN (CASE WHEN direction = 'credit' THEN amount ELSE -amount END) ELSE 0 END), 0)::text
+			COALESCE(SUM(CASE WHEN created_at <= $2 THEN (CASE WHEN direction = 'credit' THEN amount ELSE -amount END) ELSE 0 END), 0)::text
 		FROM app.payment_ledger_entries
-		WHERE app_id = $1::uuid AND currency = $2
+		WHERE app_id = $1::uuid
+		GROUP BY currency
 	`
-
-	var balance AppBalance
-	balance.AppID = appID
-	balance.Currency = currency
 	sevenDaysAgo := time.Now().UTC().AddDate(0, 0, -7)
-	if err := r.db.QueryRowEx(ctx, ledgerQuery, nil, appID, currency, sevenDaysAgo).Scan(
-		&balance.AvailableBalance, &balance.TotalRevenue, &balance.TotalPlatformFees, &balance.TotalWithdrawn,
-		&balance.AvailableBalanceSevenDaysAgo,
-	); err != nil {
+	rows, err := r.db.QueryEx(ctx, ledgerQuery, nil, appID, sevenDaysAgo)
+	if err != nil {
 		return AppBalance{}, fmt.Errorf("compute app balance: %w", err)
+	}
+	byCurrency := map[string]*CurrencyBalance{}
+	var currencies []string
+	for rows.Next() {
+		var balance CurrencyBalance
+		if err := rows.Scan(&balance.Currency, &balance.AvailableBalance, &balance.TotalRevenue, &balance.TotalPlatformFees, &balance.TotalWithdrawn, &balance.AvailableBalanceSevenDaysAgo); err != nil {
+			rows.Close()
+			return AppBalance{}, fmt.Errorf("scan app balance: %w", err)
+		}
+		balance.PendingOrderTotal = "0.00"
+		byCurrency[balance.Currency] = &CurrencyBalance{}
+		*byCurrency[balance.Currency] = balance
+		currencies = append(currencies, balance.Currency)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return AppBalance{}, fmt.Errorf("iterate app balances: %w", err)
 	}
 
 	const pendingQuery = `
-		SELECT COALESCE(SUM(amount), 0)::text
+		SELECT currency, COALESCE(SUM(amount), 0)::text
 		FROM app.payment_orders
-		WHERE app_id = $1::uuid AND currency = $2 AND status IN ('pending', 'processing')
+		WHERE app_id = $1::uuid AND status IN ('pending', 'processing')
+		GROUP BY currency
 	`
-	if err := r.db.QueryRowEx(ctx, pendingQuery, nil, appID, currency).Scan(&balance.PendingOrderTotal); err != nil {
+	pendingRows, err := r.db.QueryEx(ctx, pendingQuery, nil, appID)
+	if err != nil {
 		return AppBalance{}, fmt.Errorf("compute pending order total: %w", err)
 	}
+	for pendingRows.Next() {
+		var currency, total string
+		if err := pendingRows.Scan(&currency, &total); err != nil {
+			pendingRows.Close()
+			return AppBalance{}, fmt.Errorf("scan pending order total: %w", err)
+		}
+		if existing, ok := byCurrency[currency]; ok {
+			existing.PendingOrderTotal = total
+		} else {
+			byCurrency[currency] = &CurrencyBalance{Currency: currency, AvailableBalance: "0.00", TotalRevenue: "0.00", TotalPlatformFees: "0.00", TotalWithdrawn: "0.00", PendingOrderTotal: total, AvailableBalanceSevenDaysAgo: "0.00"}
+			currencies = append(currencies, currency)
+		}
+	}
+	pendingRows.Close()
+	if err := pendingRows.Err(); err != nil {
+		return AppBalance{}, fmt.Errorf("iterate pending order totals: %w", err)
+	}
 
+	sort.Strings(currencies)
+	var balance AppBalance
+	balance.AppID = appID
+	balance.Currency = primary
+	balance.AvailableBalance = "0.00"
+	balance.TotalRevenue = "0.00"
+	balance.TotalPlatformFees = "0.00"
+	balance.TotalWithdrawn = "0.00"
+	balance.PendingOrderTotal = "0.00"
+	balance.AvailableBalanceSevenDaysAgo = "0.00"
+	balance.Balances = []CurrencyBalance{}
+	for _, currency := range currencies {
+		entry := *byCurrency[currency]
+		balance.Balances = append(balance.Balances, entry)
+		if currency == primary {
+			balance.AvailableBalance = entry.AvailableBalance
+			balance.TotalRevenue = entry.TotalRevenue
+			balance.TotalPlatformFees = entry.TotalPlatformFees
+			balance.TotalWithdrawn = entry.TotalWithdrawn
+			balance.PendingOrderTotal = entry.PendingOrderTotal
+			balance.AvailableBalanceSevenDaysAgo = entry.AvailableBalanceSevenDaysAgo
+		}
+	}
 	return balance, nil
 }
 
@@ -2387,88 +2508,154 @@ func (r *PostgresRepository) ListAppsForUser(ctx context.Context, userID string)
 	return apps, nil
 }
 
-// ---------- Refunds & reversals (Phase 4) ----------
+// ---------- Refunds & reversals ----------
 
 // executor is satisfied by both *pgx.Tx and *pgx.ConnPool (their ExecEx/
-// QueryRowEx signatures are identical) — lets postRefundEntries run either
-// inside an existing transaction (the automatic webhook path) or its own
-// (the manual admin path) without duplicating the insertion logic.
+// QueryRowEx signatures are identical) — lets the refund helpers run either
+// inside an existing transaction (the automatic webhook path) or their own
+// (the synchronous admin path) without duplicating the insertion logic.
 type executor interface {
 	ExecEx(ctx context.Context, sql string, options *pgx.QueryExOptions, arguments ...interface{}) (pgx.CommandTag, error)
 	QueryRowEx(ctx context.Context, sql string, options *pgx.QueryExOptions, args ...interface{}) *pgx.Row
 }
 
-// postRefundEntries reverses the original payment_credit and (if any)
-// platform_fee_debit recorded for an order at settlement time — never
-// recalculated from the app's current fee config, since fees can change
-// after the fact. Idempotent: a no-op if a refund_debit already exists for
-// this order, protecting against a replayed webhook or a duplicate admin
-// action from double-reversing the same payment.
-func postRefundEntries(ctx context.Context, tx executor, appID, orderID string) error {
-	var alreadyRefunded bool
-	if err := tx.QueryRowEx(ctx, `
-		SELECT EXISTS (SELECT 1 FROM app.payment_ledger_entries WHERE payment_order_id = $1::uuid AND entry_type = 'refund_debit')
-	`, nil, orderID).Scan(&alreadyRefunded); err != nil {
-		return fmt.Errorf("check existing refund: %w", err)
+func scanPaymentRefund(row rowScanner) (PaymentRefund, error) {
+	var refund PaymentRefund
+	if err := row.Scan(
+		&refund.ID,
+		&refund.PaymentOrderID,
+		&refund.AppID,
+		&refund.ProviderRefundID,
+		&refund.Amount,
+		&refund.Currency,
+		&refund.Status,
+		&refund.Reason,
+		&refund.RequestedBy,
+		&refund.CreatedAt,
+	); err != nil {
+		return PaymentRefund{}, err
 	}
-	if alreadyRefunded {
-		return nil
-	}
-
-	var creditAmount, currency string
-	err := tx.QueryRowEx(ctx, `
-		SELECT amount::text, currency FROM app.payment_ledger_entries
-		WHERE payment_order_id = $1::uuid AND entry_type = 'payment_credit'
-		LIMIT 1
-	`, nil, orderID).Scan(&creditAmount, &currency)
-	if errors.Is(err, pgx.ErrNoRows) {
-		// Nothing was ever credited for this order (e.g. it settled before
-		// the ledger existed and was never backfilled) — nothing to reverse.
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("load original payment credit: %w", err)
-	}
-
-	if _, err := tx.ExecEx(ctx, `
-		INSERT INTO app.payment_ledger_entries (app_id, payment_order_id, entry_type, direction, amount, currency, description)
-		VALUES ($1::uuid, $2::uuid, 'refund_debit', 'debit', $3::numeric, $4, 'Payment refunded/reversed')
-		ON CONFLICT DO NOTHING
-	`, nil, appID, orderID, creditAmount, currency); err != nil {
-		return fmt.Errorf("insert refund debit ledger entry: %w", err)
-	}
-
-	var feeAmount string
-	err = tx.QueryRowEx(ctx, `
-		SELECT amount::text FROM app.payment_ledger_entries
-		WHERE payment_order_id = $1::uuid AND entry_type = 'platform_fee_debit'
-		LIMIT 1
-	`, nil, orderID).Scan(&feeAmount)
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return fmt.Errorf("load original platform fee: %w", err)
-	}
-	if err == nil && !isZeroDecimal(feeAmount) {
-		if _, err := tx.ExecEx(ctx, `
-			INSERT INTO app.payment_ledger_entries (app_id, payment_order_id, entry_type, direction, amount, currency, description)
-			VALUES ($1::uuid, $2::uuid, 'refund_fee_reversal_credit', 'credit', $3::numeric, $4, 'Platform fee reversed on refund')
-			ON CONFLICT DO NOTHING
-		`, nil, appID, orderID, feeAmount, currency); err != nil {
-			return fmt.Errorf("insert refund fee reversal ledger entry: %w", err)
-		}
-	}
-
-	return nil
+	return refund, nil
 }
 
-// RefundOrder is the manual/admin fallback for reversing a paid order —
-// used when no provider webhook arrives to drive it automatically (see
-// PostRefund in ApplyWebhookEvent for the automatic path). Locks the order
-// row for the duration of the transaction so it can't race a concurrent
-// webhook reversing the same order.
-func (r *PostgresRepository) RefundOrder(ctx context.Context, orderID, source string) (PaymentOrder, error) {
+const paymentRefundSelect = `
+	SELECT id::text, payment_order_id::text, app_id::text,
+	       COALESCE(provider_refund_id, ''), amount::text, currency, status,
+	       COALESCE(reason, ''), COALESCE(requested_by, ''), created_at
+	FROM app.payment_refunds
+`
+
+// refundedTotalTx sums non-failed refund rows — the amount already refunded.
+// Failed attempts release their reservation and never count.
+func refundedTotalTx(ctx context.Context, tx executor, orderID string) (string, error) {
+	var total string
+	if err := tx.QueryRowEx(ctx, `
+		SELECT COALESCE(SUM(amount), 0)::text FROM app.payment_refunds
+		WHERE payment_order_id = $1::uuid AND status IN ('confirmed', 'processing')
+	`, nil, orderID).Scan(&total); err != nil {
+		return "", fmt.Errorf("sum refunded total: %w", err)
+	}
+	return total, nil
+}
+
+// RefundedTotal reports the amount already refunded for an order
+// (confirmed + in-flight processing claims; failed attempts excluded).
+func (r *PostgresRepository) RefundedTotal(ctx context.Context, orderID string) (string, error) {
+	return refundedTotalTx(ctx, r.db, orderID)
+}
+
+// remainingRefundableTx returns gross - refundedTotal as canonical "0.00"
+// strings for arithmetic by callers.
+func remainingRefundableTx(ctx context.Context, tx executor, order PaymentOrder) (gross, refunded, remaining string, err error) {
+	gross = order.Amount
+	refunded, err = refundedTotalTx(ctx, tx, order.ID)
+	if err != nil {
+		return "", "", "", err
+	}
+	grossRat, ok1 := new(big.Rat).SetString(gross)
+	refundedRat, ok2 := new(big.Rat).SetString(refunded)
+	if !ok1 || !ok2 {
+		return "", "", "", fmt.Errorf("parse refund amounts: gross=%q refunded=%q", gross, refunded)
+	}
+	remainingRat := new(big.Rat).Sub(grossRat, refundedRat)
+	if remainingRat.Sign() < 0 {
+		remainingRat = new(big.Rat)
+	}
+	return grossRat.FloatString(2), refundedRat.FloatString(2), remainingRat.FloatString(2), nil
+}
+
+// claimRefundTx locks nothing itself — callers must hold the order row lock
+// (FOR UPDATE). It validates the request against the locked state and
+// inserts a reservation row, so concurrent attempts serialize on the lock
+// and the loser sees the winner's reservation in its remaining check.
+func claimRefundTx(ctx context.Context, tx executor, order PaymentOrder, input ClaimRefundInput) (PaymentRefund, error) {
+	if order.Status == provider.StatusReversed {
+		return PaymentRefund{}, ErrAlreadyRefunded
+	}
+	if order.Status != provider.StatusPaid {
+		return PaymentRefund{}, ErrOrderNotRefundable
+	}
+	currency := strings.TrimSpace(input.Currency)
+	if currency == "" {
+		currency = order.Currency
+	}
+	if !strings.EqualFold(currency, order.Currency) {
+		return PaymentRefund{}, ErrRefundCurrencyMismatch
+	}
+	_, _, remaining, err := remainingRefundableTx(ctx, tx, order)
+	if err != nil {
+		return PaymentRefund{}, err
+	}
+	amount := strings.TrimSpace(input.Amount)
+	if amount == "" {
+		amount = remaining
+	} else if normalized, normErr := normalizeAmount(amount); normErr != nil {
+		return PaymentRefund{}, ErrRefundInvalidAmount
+	} else {
+		amount = normalized
+	}
+	amountRat, _ := new(big.Rat).SetString(amount)
+	remainingRat, _ := new(big.Rat).SetString(remaining)
+	if amountRat == nil || remainingRat == nil || amountRat.Sign() <= 0 {
+		return PaymentRefund{}, ErrRefundInvalidAmount
+	}
+	if amountRat.Cmp(remainingRat) > 0 {
+		return PaymentRefund{}, ErrRefundAmountExceeded
+	}
+	status := strings.TrimSpace(input.Status)
+	if status == "" {
+		status = RefundStatusProcessing
+	}
+
+	var refund PaymentRefund
+	err = tx.QueryRowEx(ctx, `
+		INSERT INTO app.payment_refunds (payment_order_id, app_id, provider_refund_id, amount, currency, status, reason, requested_by)
+		VALUES ($1::uuid, $2::uuid, $3, $4::numeric, $5, $6, $7, $8)
+		RETURNING id::text, payment_order_id::text, app_id::text,
+		          COALESCE(provider_refund_id, ''), amount::text, currency, status,
+		          COALESCE(reason, ''), COALESCE(requested_by, ''), created_at
+	`, nil, order.ID, order.AppID, valueOrNil(input.ProviderRefundID), amount, currency, status, strings.TrimSpace(input.Reason), strings.TrimSpace(input.RequestedBy)).Scan(
+		&refund.ID, &refund.PaymentOrderID, &refund.AppID, &refund.ProviderRefundID,
+		&refund.Amount, &refund.Currency, &refund.Status, &refund.Reason,
+		&refund.RequestedBy, &refund.CreatedAt,
+	)
+	if err != nil {
+		if isUniqueViolation(err) {
+			// Same provider refund id already recorded (async replay).
+			return PaymentRefund{}, ErrAlreadyRefunded
+		}
+		return PaymentRefund{}, fmt.Errorf("insert payment refund: %w", err)
+	}
+	return refund, nil
+}
+
+// ClaimRefund reserves a refund amount against a paid order. The order row
+// is locked for the transaction, so two concurrent claims serialize and
+// the second sees the first's reservation — amounts can never exceed gross.
+func (r *PostgresRepository) ClaimRefund(ctx context.Context, input ClaimRefundInput) (PaymentOrder, PaymentRefund, error) {
 	tx, err := r.db.BeginEx(ctx, nil)
 	if err != nil {
-		return PaymentOrder{}, fmt.Errorf("begin refund order transaction: %w", err)
+		return PaymentOrder{}, PaymentRefund{}, fmt.Errorf("begin claim refund transaction: %w", err)
 	}
 	defer func() {
 		if err != nil {
@@ -2476,56 +2663,442 @@ func (r *PostgresRepository) RefundOrder(ctx context.Context, orderID, source st
 		}
 	}()
 
-	q := paymentOrderSelect + ` WHERE id = $1::uuid FOR UPDATE`
 	var order PaymentOrder
-	order, err = scanPaymentOrder(tx.QueryRowEx(ctx, q, nil, orderID))
+	order, err = scanPaymentOrder(tx.QueryRowEx(ctx, paymentOrderSelect+` WHERE id = $1::uuid FOR UPDATE`, nil, input.OrderID))
 	if errors.Is(err, pgx.ErrNoRows) {
-		return PaymentOrder{}, ErrPaymentOrderNotFound
+		return PaymentOrder{}, PaymentRefund{}, ErrPaymentOrderNotFound
 	}
 	if err != nil {
-		return PaymentOrder{}, fmt.Errorf("lock payment order: %w", err)
-	}
-	if order.Status != provider.StatusPaid {
-		err = ErrOrderNotRefundable
-		return PaymentOrder{}, err
+		return PaymentOrder{}, PaymentRefund{}, fmt.Errorf("lock payment order: %w", err)
 	}
 
-	var alreadyRefunded bool
+	var refund PaymentRefund
+	refund, err = claimRefundTx(ctx, tx, order, input)
+	if err != nil {
+		return PaymentOrder{}, PaymentRefund{}, err
+	}
+	if err = tx.CommitEx(ctx); err != nil {
+		return PaymentOrder{}, PaymentRefund{}, fmt.Errorf("commit claim refund transaction: %w", err)
+	}
+	return order, refund, nil
+}
+
+// AttachRefundProviderID records the provider-side refund id on a
+// processing claim (async acceptance). Only processing claims can be
+// attached to — a confirmed/failed row is never rewritten.
+func (r *PostgresRepository) AttachRefundProviderID(ctx context.Context, refundID, providerRefundID string) error {
+	tag, err := r.db.ExecEx(ctx, `
+		UPDATE app.payment_refunds SET provider_refund_id = $2
+		WHERE id = $1::uuid AND status = 'processing'
+	`, nil, refundID, strings.TrimSpace(providerRefundID))
+	if err != nil {
+		return fmt.Errorf("attach provider refund id: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrRefundNotPending
+	}
+	return nil
+}
+
+// ExpirePendingOrders atomically transitions overdue pending orders to
+// expired (single statement, SKIP LOCKED claim — safe across concurrent
+// api/worker processes) with a history entry each. No ledger rows are
+// touched: expiry means no money moved. Callers fan out payment.expired
+// events for the returned rows.
+func (r *PostgresRepository) ExpirePendingOrders(ctx context.Context, limit int) ([]PaymentOrder, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	const query = `
+		WITH due AS (
+			SELECT id
+			FROM app.payment_orders
+			WHERE status = 'pending'
+			  AND expires_at IS NOT NULL
+			  AND expires_at <= NOW()
+			ORDER BY expires_at ASC
+			LIMIT $1
+			FOR UPDATE SKIP LOCKED
+		),
+		updated AS (
+			UPDATE app.payment_orders o
+			SET status = 'expired', updated_at = NOW()
+			FROM due
+			WHERE o.id = due.id
+			RETURNING o.id::text,
+				COALESCE(o.app_id::text, ''),
+				o.provider,
+				COALESCE(o.provider_order_id, ''),
+				COALESCE(o.provider_transaction_id, ''),
+				COALESCE(o.external_reference, ''),
+				o.amount::text,
+				o.currency,
+				COALESCE(o.buyer_name, ''),
+				COALESCE(o.buyer_email, ''),
+				COALESCE(o.buyer_phone, ''),
+				o.status,
+				COALESCE(o.provider_status, ''),
+				o.metadata::text,
+				o.created_at,
+				o.updated_at,
+				o.expires_at
+		),
+		hist AS (
+			INSERT INTO app.payment_status_history (payment_order_id, from_status, to_status, source)
+			SELECT oid::uuid, 'pending', 'expired', 'expiry' FROM (SELECT id AS oid FROM updated) u
+			RETURNING 1
+		)
+		SELECT * FROM updated ORDER BY expires_at ASC
+	`
+	rows, err := r.db.QueryEx(ctx, query, nil, limit)
+	if err != nil {
+		return nil, fmt.Errorf("expire pending payment orders: %w", err)
+	}
+	defer rows.Close()
+
+	orders := []PaymentOrder{}
+	for rows.Next() {
+		order, err := scanPaymentOrder(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan expired payment order: %w", err)
+		}
+		orders = append(orders, order)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate expired payment orders: %w", err)
+	}
+	return orders, nil
+}
+
+// ---------- Idempotency keys ----------
+
+func scanIdempotencyRecord(appID, endpoint, key, requestHash string, status sql.NullInt64, body sql.NullString) IdempotencyRecord {
+	record := IdempotencyRecord{Key: key, AppID: appID, Endpoint: endpoint, RequestHash: requestHash}
+	if status.Valid {
+		record.Completed = true
+		record.ResponseStatus = int(status.Int64)
+	}
+	if body.Valid {
+		record.ResponseBody = body.String
+	}
+	return record
+}
+
+// GetIdempotencyRecord loads a stored key. found=false means no row.
+func (r *PostgresRepository) GetIdempotencyRecord(ctx context.Context, appID, endpoint, key string) (IdempotencyRecord, bool, error) {
+	var recordAppID, recordEndpoint, recordKey, requestHash string
+	var status sql.NullInt64
+	var body sql.NullString
+	err := r.db.QueryRowEx(ctx, `
+		SELECT app_id::text, endpoint, key, request_hash, response_status, response_body
+		FROM app.idempotency_keys WHERE app_id = $1::uuid AND endpoint = $2 AND key = $3
+	`, nil, appID, endpoint, key).Scan(&recordAppID, &recordEndpoint, &recordKey, &requestHash, &status, &body)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return IdempotencyRecord{}, false, nil
+	}
+	if err != nil {
+		return IdempotencyRecord{}, false, fmt.Errorf("get idempotency record: %w", err)
+	}
+	return scanIdempotencyRecord(recordAppID, recordEndpoint, recordKey, requestHash, status, body), true, nil
+}
+
+// ClaimIdempotencyKey inserts an in-progress claim row. created=true means
+// this caller owns the claim and must Store (or Delete on failure) it.
+// created=false means a row already exists — the caller gets the existing
+// record to replay, compare, or wait on.
+func (r *PostgresRepository) ClaimIdempotencyKey(ctx context.Context, appID, endpoint, key, requestHash string, ttl time.Duration) (IdempotencyRecord, bool, error) {
+	if ttl <= 0 {
+		ttl = 24 * time.Hour
+	}
+	var recordAppID, recordEndpoint, recordKey, storedHash string
+	var status sql.NullInt64
+	var body sql.NullString
+	err := r.db.QueryRowEx(ctx, `
+		INSERT INTO app.idempotency_keys (app_id, endpoint, key, request_hash, expires_at)
+		VALUES ($1::uuid, $2, $3, $4, $5::timestamptz)
+		ON CONFLICT (app_id, key, endpoint) DO NOTHING
+		RETURNING app_id::text, endpoint, key, request_hash, response_status, response_body
+	`, nil, appID, endpoint, key, requestHash, time.Now().UTC().Add(ttl)).Scan(&recordAppID, &recordEndpoint, &recordKey, &storedHash, &status, &body)
+	if errors.Is(err, pgx.ErrNoRows) {
+		existing, found, getErr := r.GetIdempotencyRecord(ctx, appID, endpoint, key)
+		if getErr != nil {
+			return IdempotencyRecord{}, false, getErr
+		}
+		if !found {
+			return IdempotencyRecord{}, false, fmt.Errorf("claim idempotency key conflict without existing row")
+		}
+		return existing, false, nil
+	}
+	if err != nil {
+		return IdempotencyRecord{}, false, fmt.Errorf("claim idempotency key: %w", err)
+	}
+	return scanIdempotencyRecord(recordAppID, recordEndpoint, recordKey, storedHash, status, body), true, nil
+}
+
+// StoreIdempotencyResponse fills a claim with its terminal response. The
+// NULL guard means only the in-progress owner writes — a replay can never
+// overwrite a completed response.
+func (r *PostgresRepository) StoreIdempotencyResponse(ctx context.Context, appID, endpoint, key string, status int, body string) error {
+	if _, err := r.db.ExecEx(ctx, `
+		UPDATE app.idempotency_keys SET response_status = $4, response_body = $5
+		WHERE app_id = $1::uuid AND endpoint = $2 AND key = $3 AND response_status IS NULL
+	`, nil, appID, endpoint, key, status, body); err != nil {
+		return fmt.Errorf("store idempotency response: %w", err)
+	}
+	return nil
+}
+
+// DeleteIdempotencyKey drops a claim (used when execution fails
+// transiently, so the next retry re-executes cleanly instead of spinning
+// on an in-progress row).
+func (r *PostgresRepository) DeleteIdempotencyKey(ctx context.Context, appID, endpoint, key string) error {
+	if _, err := r.db.ExecEx(ctx, `
+		DELETE FROM app.idempotency_keys WHERE app_id = $1::uuid AND endpoint = $2 AND key = $3
+	`, nil, appID, endpoint, key); err != nil {
+		return fmt.Errorf("delete idempotency key: %w", err)
+	}
+	return nil
+}
+
+// DeleteExpiredIdempotencyKeys sweeps rows past their 24h window. Called
+// from the expiry worker sweep.
+func (r *PostgresRepository) DeleteExpiredIdempotencyKeys(ctx context.Context) (int64, error) {
+	tag, err := r.db.ExecEx(ctx, `DELETE FROM app.idempotency_keys WHERE expires_at <= NOW()`, nil)
+	if err != nil {
+		return 0, fmt.Errorf("delete expired idempotency keys: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+// feePortionForRefund computes the platform-fee reversal for a refund:
+// exact remainder when this refund completes the order (no penny drift),
+// otherwise the pro-rata share rounded to cents and clamped to what's left.
+func feePortionForRefund(feeTotal, feeReversed, refundAmount, gross string, completes bool) string {
+	totalRat, ok1 := new(big.Rat).SetString(feeTotal)
+	reversedRat, ok2 := new(big.Rat).SetString(feeReversed)
+	if !ok1 || !ok2 {
+		return "0.00"
+	}
+	remaining := new(big.Rat).Sub(totalRat, reversedRat)
+	if remaining.Sign() <= 0 {
+		return "0.00"
+	}
+	if completes {
+		return remaining.FloatString(2)
+	}
+	amountRat, ok3 := new(big.Rat).SetString(refundAmount)
+	grossRat, ok4 := new(big.Rat).SetString(gross)
+	if !ok3 || !ok4 || grossRat.Sign() <= 0 {
+		return "0.00"
+	}
+	portion := new(big.Rat).Mul(totalRat, amountRat)
+	portion.Quo(portion, grossRat)
+	if portion.Cmp(remaining) > 0 {
+		portion = remaining
+	}
+	return portion.FloatString(2)
+}
+
+// confirmRefundTx posts the ledger entries for a processing claim and flips
+// it to confirmed. When the refund completes the order (total >= gross) the
+// order transitions to reversed with a history entry; partial refunds leave
+// a paid order in place. Callers must hold the relevant row locks.
+func confirmRefundTx(ctx context.Context, tx executor, order PaymentOrder, refund PaymentRefund, providerRefundID, providerStatus string) (PaymentOrder, PaymentRefund, error) {
+	grossRat, _ := new(big.Rat).SetString(order.Amount)
+	refunded, err := refundedTotalTx(ctx, tx, order.ID)
+	if err != nil {
+		return PaymentOrder{}, PaymentRefund{}, err
+	}
+	refundedRat, _ := new(big.Rat).SetString(refunded)
+	completes := refundedRat.Cmp(grossRat) >= 0
+
+	var feeTotal, feeReversed string
 	if err = tx.QueryRowEx(ctx, `
-		SELECT EXISTS (SELECT 1 FROM app.payment_ledger_entries WHERE payment_order_id = $1::uuid AND entry_type = 'refund_debit')
-	`, nil, orderID).Scan(&alreadyRefunded); err != nil {
-		return PaymentOrder{}, fmt.Errorf("check existing refund: %w", err)
+		SELECT COALESCE(SUM(CASE WHEN entry_type = 'platform_fee_debit' THEN amount ELSE 0 END), 0)::text,
+		       COALESCE(SUM(CASE WHEN entry_type = 'refund_fee_reversal_credit' THEN amount ELSE 0 END), 0)::text
+		FROM app.payment_ledger_entries WHERE payment_order_id = $1::uuid
+	`, nil, order.ID).Scan(&feeTotal, &feeReversed); err != nil {
+		return PaymentOrder{}, PaymentRefund{}, fmt.Errorf("load original platform fee: %w", err)
 	}
-	if alreadyRefunded {
-		err = ErrAlreadyRefunded
-		return PaymentOrder{}, err
-	}
+	feePortion := feePortionForRefund(feeTotal, feeReversed, refund.Amount, order.Amount, completes)
 
-	if order.AppID != "" {
-		if err = postRefundEntries(ctx, tx, order.AppID, order.ID); err != nil {
-			return PaymentOrder{}, fmt.Errorf("post refund ledger entries: %w", err)
+	if _, err = tx.ExecEx(ctx, `
+		INSERT INTO app.payment_ledger_entries (app_id, payment_order_id, entry_type, direction, amount, currency, description)
+		VALUES ($1::uuid, $2::uuid, 'refund_debit', 'debit', $3::numeric, $4, 'Payment refunded/reversed')
+	`, nil, order.AppID, order.ID, refund.Amount, refund.Currency); err != nil {
+		return PaymentOrder{}, PaymentRefund{}, fmt.Errorf("insert refund debit ledger entry: %w", err)
+	}
+	if !isZeroDecimal(feePortion) {
+		if _, err = tx.ExecEx(ctx, `
+			INSERT INTO app.payment_ledger_entries (app_id, payment_order_id, entry_type, direction, amount, currency, description)
+			VALUES ($1::uuid, $2::uuid, 'refund_fee_reversal_credit', 'credit', $3::numeric, $4, 'Platform fee reversed on refund')
+		`, nil, order.AppID, order.ID, feePortion, refund.Currency); err != nil {
+			return PaymentOrder{}, PaymentRefund{}, fmt.Errorf("insert refund fee reversal ledger entry: %w", err)
 		}
 	}
 
-	const updateOrder = `
-		UPDATE app.payment_orders SET status = 'reversed', updated_at = NOW() WHERE id = $1::uuid
-	`
-	if _, err = tx.ExecEx(ctx, updateOrder, nil, orderID); err != nil {
-		return PaymentOrder{}, fmt.Errorf("update order to reversed: %w", err)
+	if _, err = tx.ExecEx(ctx, `
+		UPDATE app.payment_refunds SET status = 'confirmed', provider_refund_id = COALESCE(NULLIF($2, ''), provider_refund_id)
+		WHERE id = $1::uuid
+	`, nil, refund.ID, providerRefundID); err != nil {
+		return PaymentOrder{}, PaymentRefund{}, fmt.Errorf("confirm payment refund: %w", err)
+	}
+	refund.Status = RefundStatusConfirmed
+	if providerRefundID != "" {
+		refund.ProviderRefundID = providerRefundID
 	}
 
-	const insertHistory = `
-		INSERT INTO app.payment_status_history (payment_order_id, from_status, to_status, provider_status, source)
-		VALUES ($1::uuid, $2, 'reversed', $3, $4)
-	`
-	if _, err = tx.ExecEx(ctx, insertHistory, nil, orderID, string(order.Status), order.ProviderStatus, source); err != nil {
-		return PaymentOrder{}, fmt.Errorf("insert refund status history: %w", err)
+	if completes && order.Status != provider.StatusReversed {
+		if _, err = tx.ExecEx(ctx, `UPDATE app.payment_orders SET status = 'reversed', updated_at = NOW() WHERE id = $1::uuid`, nil, order.ID); err != nil {
+			return PaymentOrder{}, PaymentRefund{}, fmt.Errorf("update order to reversed: %w", err)
+		}
+		if _, err = tx.ExecEx(ctx, `
+			INSERT INTO app.payment_status_history (payment_order_id, from_status, to_status, provider_status, source)
+			VALUES ($1::uuid, $2, 'reversed', $3, $4)
+		`, nil, order.ID, string(order.Status), valueOrNil(providerStatus), "refund"); err != nil {
+			return PaymentOrder{}, PaymentRefund{}, fmt.Errorf("insert refund status history: %w", err)
+		}
+		order.Status = provider.StatusReversed
+	}
+	return order, refund, nil
+}
+
+// ConfirmRefund finalizes a processing claim: posts the ledger reversal and
+// flips the claim to confirmed (reversing the order itself when complete).
+// Confirming an already-confirmed claim is a no-op returning current state.
+func (r *PostgresRepository) ConfirmRefund(ctx context.Context, refundID, providerRefundID, providerStatus string) (PaymentOrder, PaymentRefund, error) {
+	tx, err := r.db.BeginEx(ctx, nil)
+	if err != nil {
+		return PaymentOrder{}, PaymentRefund{}, fmt.Errorf("begin confirm refund transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.RollbackEx(ctx)
+		}
+	}()
+
+	var refund PaymentRefund
+	refund, err = scanPaymentRefund(tx.QueryRowEx(ctx, paymentRefundSelect+` WHERE id = $1::uuid FOR UPDATE`, nil, refundID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PaymentOrder{}, PaymentRefund{}, ErrPaymentOrderNotFound
+	}
+	if err != nil {
+		return PaymentOrder{}, PaymentRefund{}, fmt.Errorf("lock payment refund: %w", err)
+	}
+	var order PaymentOrder
+	order, err = scanPaymentOrder(tx.QueryRowEx(ctx, paymentOrderSelect+` WHERE id = $1::uuid FOR UPDATE`, nil, refund.PaymentOrderID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PaymentOrder{}, PaymentRefund{}, ErrPaymentOrderNotFound
+	}
+	if err != nil {
+		return PaymentOrder{}, PaymentRefund{}, fmt.Errorf("lock payment order: %w", err)
+	}
+	if refund.Status == RefundStatusConfirmed {
+		return order, refund, nil
+	}
+	if refund.Status != RefundStatusProcessing {
+		err = ErrRefundNotPending
+		return PaymentOrder{}, PaymentRefund{}, err
 	}
 
+	order, refund, err = confirmRefundTx(ctx, tx, order, refund, providerRefundID, providerStatus)
+	if err != nil {
+		return PaymentOrder{}, PaymentRefund{}, err
+	}
 	if err = tx.CommitEx(ctx); err != nil {
-		return PaymentOrder{}, fmt.Errorf("commit refund order transaction: %w", err)
+		return PaymentOrder{}, PaymentRefund{}, fmt.Errorf("commit confirm refund transaction: %w", err)
 	}
+	return order, refund, nil
+}
 
-	order.Status = provider.StatusReversed
-	return order, nil
+// FailRefund marks a processing claim failed, releasing its reservation so
+// the amount becomes refundable again. A Disburse-style provider error never
+// auto-reverses ledger entries — nothing was posted for a mere claim.
+func (r *PostgresRepository) FailRefund(ctx context.Context, refundID, reason string) (PaymentRefund, error) {
+	tx, err := r.db.BeginEx(ctx, nil)
+	if err != nil {
+		return PaymentRefund{}, fmt.Errorf("begin fail refund transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.RollbackEx(ctx)
+		}
+	}()
+
+	var refund PaymentRefund
+	refund, err = scanPaymentRefund(tx.QueryRowEx(ctx, paymentRefundSelect+` WHERE id = $1::uuid FOR UPDATE`, nil, refundID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PaymentRefund{}, ErrPaymentOrderNotFound
+	}
+	if err != nil {
+		return PaymentRefund{}, fmt.Errorf("lock payment refund: %w", err)
+	}
+	if refund.Status != RefundStatusProcessing {
+		err = ErrRefundNotPending
+		return PaymentRefund{}, err
+	}
+	if _, err = tx.ExecEx(ctx, `UPDATE app.payment_refunds SET status = 'failed', reason = $2 WHERE id = $1::uuid`, nil, refundID, strings.TrimSpace(reason)); err != nil {
+		return PaymentRefund{}, fmt.Errorf("fail payment refund: %w", err)
+	}
+	if err = tx.CommitEx(ctx); err != nil {
+		return PaymentRefund{}, fmt.Errorf("commit fail refund transaction: %w", err)
+	}
+	refund.Status = RefundStatusFailed
+	refund.Reason = strings.TrimSpace(reason)
+	return refund, nil
+}
+
+// applyAsyncRefund confirms a provider-observed paid -> reversed transition
+// inside ApplyWebhookEvent's transaction: claims the full remaining amount
+// (idempotent on provider_refund_id, no-op when nothing remains) and
+// confirms it, posting the ledger reversal. The order row lock is held by
+// the caller.
+func applyAsyncRefund(ctx context.Context, tx executor, input ApplyWebhookEventInput) error {
+	var order PaymentOrder
+	var err error
+	order, err = scanPaymentOrder(tx.QueryRowEx(ctx, paymentOrderSelect+` WHERE id = $1::uuid`, nil, input.PaymentOrderID))
+	if err != nil {
+		return fmt.Errorf("reload payment order: %w", err)
+	}
+	_, _, remaining, err := remainingRefundableTx(ctx, tx, order)
+	if err != nil {
+		return err
+	}
+	if isZeroDecimal(remaining) {
+		return nil
+	}
+	refund, err := claimRefundTx(ctx, tx, order, ClaimRefundInput{
+		OrderID:          order.ID,
+		Amount:           remaining,
+		Currency:         order.Currency,
+		RequestedBy:      "webhook",
+		ProviderRefundID: input.ProviderRefundID,
+		Status:           RefundStatusProcessing,
+	})
+	if err != nil {
+		if errors.Is(err, ErrAlreadyRefunded) {
+			return nil
+		}
+		return err
+	}
+	_, _, err = confirmRefundTx(ctx, tx, order, refund, input.ProviderRefundID, input.ProviderStatus)
+	return err
+}
+
+// GetPaymentEventByID loads a single stored webhook event.
+func (r *PostgresRepository) GetPaymentEventByID(ctx context.Context, eventID string) (PaymentEvent, error) {
+	const query = paymentEventSelect + `
+		FROM app.payment_events e
+		LEFT JOIN app.payment_orders o ON o.id = e.payment_order_id
+		WHERE e.id = $1::uuid
+		LIMIT 1
+	`
+	event, err := scanPaymentEvent(r.db.QueryRowEx(ctx, query, nil, eventID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PaymentEvent{}, ErrPaymentEventNotFound
+	}
+	if err != nil {
+		return PaymentEvent{}, fmt.Errorf("get payment event: %w", err)
+	}
+	return event, nil
 }

@@ -84,7 +84,11 @@ expires.
 Providers implement the interface in
 `internal/modules/payments/provider/types.go` and register themselves in
 `internal/modules/payments/providers/registry.go`. `providers/sonicpesa`
-is a complete reference implementation to copy from.
+is a complete reference implementation to copy from. Providers with a
+verified refund API additionally implement `provider.Refunder`; SonicPesa
+documents no refund endpoint (verified 2026-09-23), so its adapter returns
+`provider.ErrRefundNotSupported` and refunds fall back to local ledger
+reversal until a real contract is confirmed.
 
 ## API surface
 
@@ -92,11 +96,57 @@ is a complete reference implementation to copy from.
 - `GET /api/v1/payments/orders/{paymentID}` — order status (public, auto-refreshes stale orders)
 - `POST /api/v1/payments/orders/{paymentID}/refresh` — force a live provider status check (public, app-API-key auth)
 - `POST /api/v1/payments/webhooks/{provider}` — inbound provider webhooks (public)
+- `POST /api/v1/admin/payments/orders/{id}/refund` — refund a paid order (admin-auth).
+  Optional JSON body `{amount?, currency?, reason?}`; omitted amount refunds
+  the full remaining amount. Currency must match the order; amounts above the
+  remaining refundable total are rejected (422 `amount_exceeded`). Response
+  `{data: {order, refund}}`. Every attempt is recorded in
+  `app.payment_refunds` (order, provider refund id, amount, status, reason).
 - `/api/v1/admin/payments/...` — apps, providers, orders, events,
   deliveries, withdrawals, metrics (admin-auth)
 - `/api/v1/merchant/apps/...` — merchant-facing views for app members
 - `GET /api/v1/health` — liveness + DB check
 - `GET /api/v1/admin/me` — `{email, is_admin}` for the signed-in user
+
+Merchant webhook event types: `payment.updated`, `payment.refunded`
+(emitted after every confirmed refund, same signing as other events),
+`payment.expired` (emitted when a pending order passes its TTL).
+New endpoints subscribe to all three by default.
+
+## Refunds
+
+`POST /api/v1/admin/payments/orders/{id}/refund` refunds a paid order —
+full remaining amount when `amount` is omitted, otherwise a partial refund
+validated so the total never exceeds the payment. Currency must match.
+The amount is claimed before any provider call, so concurrent attempts
+serialize; the ledger `refund_debit` is written only after the provider
+confirms (or immediately for the local manual fallback — SonicPesa
+documents no refund endpoint, so its adapter reports unsupported).
+Every attempt is recorded in `app.payment_refunds`.
+
+## Order expiry
+
+Pending orders carry `expires_at` (creation + `PAYMENTS_ORDER_TTL`,
+default 30m). The expiry worker (`PAYMENTS_EXPIRY_INTERVAL`, default 1m,
+runs in both `cmd/api` and `cmd/worker`) transitions overdue rows to
+`expired` — no ledger movement — and emits `payment.expired`. Expired
+orders are terminal: reconciliation and auto-refresh skip them, and late
+provider webhooks are held for manual review instead of crediting.
+
+## Idempotency-Key
+
+`POST /api/v1/payments/orders` and both `POST .../withdrawals` endpoints
+accept an `Idempotency-Key` header (max 128 chars, scoped per app +
+endpoint). Same key + same body replays the stored response (with an
+`Idempotent-Replayed: true` header); same key + different body is `409
+idempotency_conflict`; transient (5xx) failures discard the claim so
+retries re-execute. Records expire after 24h via the expiry sweep.
+
+## Balances
+
+`GET .../balance` returns per-currency breakdowns in `balances[]`; the
+top-level fields describe the latest-activity currency for backward
+compatibility. Amounts are never summed across currencies.
 
 Full route list (methods, middleware) is in
 `internal/platform/httpserver/app.go`.
