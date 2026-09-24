@@ -7,6 +7,7 @@ const NAV_ITEMS = [
   { to: "/admin/payments/apps", label: "Apps" },
   { to: "/admin/payments/withdrawals", label: "Withdrawals" },
   { to: "/admin/payments/providers", label: "Providers" },
+  { to: "/merchant/apps", label: "Merchant" },
 ];
 
 const AdminLayout = () => {

@@ -2,6 +2,7 @@ import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/sonner";
 import AdminRoute from "@/components/AdminRoute";
+import MerchantRoute from "@/components/MerchantRoute";
 import AdminLayout from "@/pages/AdminLayout";
 import SignIn from "@/pages/SignIn";
 import AdminPayments from "@/pages/AdminPayments";
@@ -9,6 +10,8 @@ import AdminPaymentApps from "@/pages/AdminPaymentApps";
 import AdminPaymentAppDetail from "@/pages/AdminPaymentAppDetail";
 import AdminPaymentWithdrawals from "@/pages/AdminPaymentWithdrawals";
 import AdminPaymentProviders from "@/pages/AdminPaymentProviders";
+import MerchantApps from "@/pages/MerchantApps";
+import MerchantAppDetail from "@/pages/MerchantAppDetail";
 
 const queryClient = new QueryClient();
 
@@ -30,8 +33,19 @@ const App = () => (
             <Route path="payments" element={<AdminPayments />} />
             <Route path="payments/apps" element={<AdminPaymentApps />} />
             <Route path="payments/apps/:id" element={<AdminPaymentAppDetail />} />
-            <Route path="payments/withdrawals" element={<AdminPaymentWithdrawals />} />
+              <Route path="payments/withdrawals" element={<AdminPaymentWithdrawals />} />
             <Route path="payments/providers" element={<AdminPaymentProviders />} />
+          </Route>
+          <Route
+            path="/merchant"
+            element={
+              <MerchantRoute>
+                <AdminLayout />
+              </MerchantRoute>
+            }
+          >
+            <Route path="apps" element={<MerchantApps />} />
+            <Route path="apps/:id" element={<MerchantAppDetail />} />
           </Route>
           <Route path="/" element={<Navigate to="/admin/payments" replace />} />
           <Route path="*" element={<Navigate to="/admin/payments" replace />} />

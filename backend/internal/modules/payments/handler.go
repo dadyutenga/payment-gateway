@@ -1263,3 +1263,252 @@ func (h *Handler) MerchantCreateWithdrawal(w http.ResponseWriter, r *http.Reques
 
 	h.writeJSON(state, w, r, http.StatusCreated, map[string]any{"data": withdrawal})
 }
+
+// ---------- Merchant self-service ----------
+// Every handler below scopes to the app id from the verified membership
+// path parameter — never to any client-supplied id — so a member can only
+// ever see or mutate their own app.
+
+func (h *Handler) MerchantListWebhookEndpoints(w http.ResponseWriter, r *http.Request) {
+	appID := r.PathValue("id")
+	if _, ok := h.requireMembership(w, r, appID); !ok {
+		return
+	}
+
+	endpoints, err := h.service.ListWebhookEndpoints(r.Context(), appID)
+	if err != nil {
+		h.fail(w, http.StatusInternalServerError, "list_failed", "Unable to list webhook endpoints.", err)
+		return
+	}
+	httputil.JSON(w, http.StatusOK, map[string]any{"data": endpoints})
+}
+
+type merchantWebhookEndpointInput struct {
+	URL        string   `json:"url"`
+	EventTypes []string `json:"event_types"`
+}
+
+func (h *Handler) MerchantCreateWebhookEndpoint(w http.ResponseWriter, r *http.Request) {
+	appID := r.PathValue("id")
+	if _, ok := h.requireMembership(w, r, appID); !ok {
+		return
+	}
+
+	var in merchantWebhookEndpointInput
+	r.Body = http.MaxBytesReader(w, r.Body, h.maxBodyBytes)
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		httputil.Error(w, http.StatusBadRequest, "invalid_request", "Unable to decode request body.", nil)
+		return
+	}
+
+	result, vErrs, err := h.service.CreateWebhookEndpoint(r.Context(), CreatePaymentWebhookEndpointInput{
+		AppID:      appID,
+		URL:        in.URL,
+		EventTypes: in.EventTypes,
+	})
+	if err != nil {
+		h.fail(w, http.StatusInternalServerError, "create_failed", "Unable to create payment webhook endpoint.", err)
+		return
+	}
+	if vErrs.Any() {
+		httputil.Error(w, http.StatusUnprocessableEntity, "validation_failed", "Please check your webhook endpoint input.", vErrs)
+		return
+	}
+	httputil.JSON(w, http.StatusCreated, map[string]any{"data": result})
+}
+
+type merchantUpdateWebhookEndpointInput struct {
+	URL        *string   `json:"url"`
+	EventTypes *[]string `json:"event_types"`
+	Status     *string   `json:"status"`
+}
+
+func (h *Handler) MerchantUpdateWebhookEndpoint(w http.ResponseWriter, r *http.Request) {
+	appID := r.PathValue("id")
+	if _, ok := h.requireMembership(w, r, appID); !ok {
+		return
+	}
+
+	var in merchantUpdateWebhookEndpointInput
+	r.Body = http.MaxBytesReader(w, r.Body, h.maxBodyBytes)
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		httputil.Error(w, http.StatusBadRequest, "invalid_request", "Unable to decode request body.", nil)
+		return
+	}
+	update := UpdateWebhookEndpointInput{}
+	if in.URL != nil {
+		update.URL = *in.URL
+	}
+	if in.EventTypes != nil {
+		update.EventTypes = *in.EventTypes
+		update.HasEventTypes = true
+	}
+	if in.Status != nil {
+		update.Status = *in.Status
+	}
+
+	endpoint, vErrs, err := h.service.UpdateWebhookEndpoint(r.Context(), appID, r.PathValue("endpointID"), update)
+	if err != nil {
+		if errors.Is(err, ErrPaymentWebhookEndpointNotFound) {
+			httputil.Error(w, http.StatusNotFound, "not_found", "Webhook endpoint not found.", nil)
+			return
+		}
+		h.fail(w, http.StatusInternalServerError, "update_failed", "Unable to update webhook endpoint.", err)
+		return
+	}
+	if vErrs.Any() {
+		httputil.Error(w, http.StatusUnprocessableEntity, "validation_failed", "Please check your webhook endpoint input.", vErrs)
+		return
+	}
+	httputil.JSON(w, http.StatusOK, map[string]any{"data": endpoint})
+}
+
+func (h *Handler) MerchantDeleteWebhookEndpoint(w http.ResponseWriter, r *http.Request) {
+	appID := r.PathValue("id")
+	if _, ok := h.requireMembership(w, r, appID); !ok {
+		return
+	}
+
+	if err := h.service.DeleteWebhookEndpoint(r.Context(), appID, r.PathValue("endpointID")); err != nil {
+		if errors.Is(err, ErrPaymentWebhookEndpointNotFound) {
+			httputil.Error(w, http.StatusNotFound, "not_found", "Webhook endpoint not found.", nil)
+			return
+		}
+		h.fail(w, http.StatusInternalServerError, "delete_failed", "Unable to delete webhook endpoint.", err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) MerchantTestWebhookEndpoint(w http.ResponseWriter, r *http.Request) {
+	appID := r.PathValue("id")
+	if _, ok := h.requireMembership(w, r, appID); !ok {
+		return
+	}
+
+	result, err := h.service.TestWebhookEndpoint(r.Context(), appID, r.PathValue("endpointID"))
+	if err != nil {
+		if errors.Is(err, ErrPaymentWebhookEndpointNotFound) {
+			httputil.Error(w, http.StatusNotFound, "not_found", "Webhook endpoint not found.", nil)
+			return
+		}
+		h.fail(w, http.StatusInternalServerError, "test_failed", "Unable to test webhook endpoint.", err)
+		return
+	}
+	httputil.JSON(w, http.StatusOK, map[string]any{"data": result})
+}
+
+func (h *Handler) MerchantListAPIKeys(w http.ResponseWriter, r *http.Request) {
+	appID := r.PathValue("id")
+	if _, ok := h.requireMembership(w, r, appID); !ok {
+		return
+	}
+
+	keys, err := h.service.ListAppAPIKeys(r.Context(), appID)
+	if err != nil {
+		h.fail(w, http.StatusInternalServerError, "list_failed", "Unable to list API keys.", err)
+		return
+	}
+	httputil.JSON(w, http.StatusOK, map[string]any{"data": keys})
+}
+
+type merchantCreateAPIKeyInput struct {
+	Environment string `json:"environment"`
+}
+
+func (h *Handler) MerchantCreateAPIKey(w http.ResponseWriter, r *http.Request) {
+	appID := r.PathValue("id")
+	if _, ok := h.requireMembership(w, r, appID); !ok {
+		return
+	}
+
+	var in merchantCreateAPIKeyInput
+	r.Body = http.MaxBytesReader(w, r.Body, h.maxBodyBytes)
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil && !errors.Is(err, io.EOF) {
+		httputil.Error(w, http.StatusBadRequest, "invalid_request", "Unable to decode request body.", nil)
+		return
+	}
+
+	result, err := h.service.CreateAppAPIKey(r.Context(), appID, in.Environment)
+	if err != nil {
+		h.fail(w, http.StatusInternalServerError, "create_failed", "Unable to create API key.", err)
+		return
+	}
+	httputil.JSON(w, http.StatusCreated, map[string]any{"data": result})
+}
+
+func (h *Handler) MerchantRotateAPIKey(w http.ResponseWriter, r *http.Request) {
+	appID := r.PathValue("id")
+	if _, ok := h.requireMembership(w, r, appID); !ok {
+		return
+	}
+
+	// Rotation issues a fresh live key; usable keys enter their 24h grace
+	// period instead of dying instantly. The raw secret is in this
+	// response exactly once.
+	result, err := h.service.CreateAppAPIKey(r.Context(), appID, APIKeyEnvLive)
+	if err != nil {
+		h.fail(w, http.StatusInternalServerError, "rotate_failed", "Unable to rotate API key.", err)
+		return
+	}
+	httputil.JSON(w, http.StatusCreated, map[string]any{"data": result})
+}
+
+func (h *Handler) MerchantRevokeAPIKey(w http.ResponseWriter, r *http.Request) {
+	appID := r.PathValue("id")
+	if _, ok := h.requireMembership(w, r, appID); !ok {
+		return
+	}
+
+	if err := h.service.RevokeAppAPIKey(r.Context(), appID, r.PathValue("keyID")); err != nil {
+		if errors.Is(err, ErrPaymentAPIKeyNotFound) {
+			httputil.Error(w, http.StatusNotFound, "not_found", "API key not found.", nil)
+			return
+		}
+		h.fail(w, http.StatusInternalServerError, "revoke_failed", "Unable to revoke API key.", err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) MerchantListDeliveries(w http.ResponseWriter, r *http.Request) {
+	appID := r.PathValue("id")
+	if _, ok := h.requireMembership(w, r, appID); !ok {
+		return
+	}
+
+	limit, offset, ok := parsePagination(w, r, 50, 200)
+	if !ok {
+		return
+	}
+
+	result, err := h.service.ListMerchantDeliveries(r.Context(), appID, PaymentWebhookDeliveryListFilter{
+		Status:     r.URL.Query().Get("status"),
+		EventID:    r.URL.Query().Get("event_id"),
+		EndpointID: r.URL.Query().Get("endpoint_id"),
+		Limit:      limit,
+		Offset:     offset,
+	})
+	if err != nil {
+		h.fail(w, http.StatusInternalServerError, "list_failed", "Unable to list webhook deliveries.", err)
+		return
+	}
+	httputil.JSON(w, http.StatusOK, map[string]any{"data": result})
+}
+
+func (h *Handler) MerchantReplayDelivery(w http.ResponseWriter, r *http.Request) {
+	appID := r.PathValue("id")
+	if _, ok := h.requireMembership(w, r, appID); !ok {
+		return
+	}
+
+	if err := h.service.ReplayMerchantDelivery(r.Context(), appID, r.PathValue("deliveryID")); err != nil {
+		if errors.Is(err, ErrPaymentWebhookDeliveryNotFound) {
+			httputil.Error(w, http.StatusNotFound, "not_found", "Webhook delivery not found.", nil)
+			return
+		}
+		h.fail(w, http.StatusInternalServerError, "replay_failed", "Unable to replay webhook delivery.", err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}

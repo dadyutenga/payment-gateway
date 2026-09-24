@@ -178,6 +178,17 @@ type fakePaymentRepository struct {
 	orderLookups            int
 	endpointInput           CreatePaymentWebhookEndpointRepositoryInput
 	endpoint                PaymentWebhookEndpoint
+	webhookEndpointErr      error
+	updatedEndpointInput    UpdateWebhookEndpointInput
+	deliveryAppID           string
+	deliveryAppErr          error
+	apiKeys                 []APIKey
+	revokeKeyErr            error
+	createdKeyAppID         string
+	createdKeyPrefix        string
+	createdKeyEnv           string
+	rotatedKeys             int64
+	rotateKeysErr           error
 	createdDeliveries       int64
 	deliveryForEventCalls   []deliveryForEventCall
 	replayedEventID         string
@@ -225,12 +236,63 @@ func (r *fakePaymentRepository) CreatePaymentApp(_ context.Context, input Create
 	return PaymentApp{ID: "app_test", Name: input.Name, Description: input.Description, Status: "active"}, nil
 }
 
-func (r *fakePaymentRepository) CreatePaymentAPIKey(_ context.Context, _, _ string) error {
+func (r *fakePaymentRepository) CreatePaymentAPIKey(_ context.Context, appID, _, prefix, environment string) error {
+	r.createdKeyAppID = appID
+	r.createdKeyPrefix = prefix
+	r.createdKeyEnv = environment
 	return nil
 }
 
 func (r *fakePaymentRepository) RevokePaymentAPIKeys(_ context.Context, _ string) error {
 	return nil
+}
+
+func (r *fakePaymentRepository) ListAppAPIKeys(_ context.Context, _ string) ([]APIKey, error) {
+	if r.apiKeys != nil {
+		return r.apiKeys, nil
+	}
+	if r.createdKeyPrefix != "" {
+		return []APIKey{{ID: "key_new", AppID: r.createdKeyAppID, Prefix: r.createdKeyPrefix, Status: APIKeyStatusActive, Environment: r.createdKeyEnv}}, nil
+	}
+	return r.apiKeys, nil
+}
+
+func (r *fakePaymentRepository) RevokeAppAPIKey(_ context.Context, _, _ string) error {
+	return r.revokeKeyErr
+}
+
+func (r *fakePaymentRepository) RotateAppAPIKeys(_ context.Context, _ string, _ time.Duration) (int64, error) {
+	r.rotatedKeys++
+	return r.rotatedKeys, r.rotateKeysErr
+}
+
+func (r *fakePaymentRepository) GetWebhookEndpoint(_ context.Context, appID, endpointID string) (PaymentWebhookEndpoint, error) {
+	if r.webhookEndpointErr != nil {
+		return PaymentWebhookEndpoint{}, r.webhookEndpointErr
+	}
+	if r.endpoint.ID != "" {
+		return r.endpoint, nil
+	}
+	return PaymentWebhookEndpoint{ID: endpointID, AppID: appID, URL: "https://example.com/hook", Status: "active"}, nil
+}
+
+func (r *fakePaymentRepository) UpdateWebhookEndpoint(_ context.Context, _, _ string, input UpdateWebhookEndpointInput) (PaymentWebhookEndpoint, error) {
+	r.updatedEndpointInput = input
+	if r.webhookEndpointErr != nil {
+		return PaymentWebhookEndpoint{}, r.webhookEndpointErr
+	}
+	return PaymentWebhookEndpoint{ID: "ep_test", URL: input.URL, Status: "active"}, nil
+}
+
+func (r *fakePaymentRepository) DeleteWebhookEndpoint(_ context.Context, _, _ string) error {
+	return r.webhookEndpointErr
+}
+
+func (r *fakePaymentRepository) GetWebhookDeliveryApp(_ context.Context, _ string) (string, error) {
+	if r.deliveryAppErr != nil {
+		return "", r.deliveryAppErr
+	}
+	return r.deliveryAppID, nil
 }
 
 func (r *fakePaymentRepository) ListPaymentApps(_ context.Context, limit, offset int) (PaymentAppListResult, error) {
@@ -2125,5 +2187,99 @@ func TestIdempotencyKeysAreScopedPerEndpoint(t *testing.T) {
 	other, err := service.CheckIdempotencyKey(ctx, "app_test", IdempotencyEndpointAdminWithdrawalsCreate, "key-1", "hash-abc")
 	if err != nil || !other.Claimed {
 		t.Fatalf("expected fresh claim on different endpoint, got %+v, err %v", other, err)
+	}
+}
+
+func TestCreateAppAPIKeyRotatesWithGrace(t *testing.T) {
+	repo := &fakePaymentRepository{}
+	service := NewService(repo, nil, testCipher, testServiceOptions(), nil)
+
+	result, err := service.CreateAppAPIKey(context.Background(), "app_test", "live")
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if repo.rotatedKeys != 1 {
+		t.Fatalf("expected old keys demoted to grace rotation, got %d", repo.rotatedKeys)
+	}
+	if result.APIKey == "" {
+		t.Fatal("expected raw key returned exactly once")
+	}
+	if len(result.APIKey) != 64 {
+		t.Fatalf("expected 64-char hex key, got %d chars", len(result.APIKey))
+	}
+	if result.Key.Prefix == "" || result.Key.Prefix != result.APIKey[:8] {
+		t.Fatalf("expected listed prefix to match raw key prefix, got %+v", result.Key)
+	}
+}
+
+func TestCreateAppAPIKeyRejectsBadEnvironment(t *testing.T) {
+	repo := &fakePaymentRepository{}
+	service := NewService(repo, nil, testCipher, testServiceOptions(), nil)
+
+	if _, err := service.CreateAppAPIKey(context.Background(), "app_test", "prod"); err == nil {
+		t.Fatal("expected environment validation error")
+	}
+}
+
+func TestRevokeAppAPIKeyNotFound(t *testing.T) {
+	repo := &fakePaymentRepository{revokeKeyErr: ErrPaymentAPIKeyNotFound}
+	service := NewService(repo, nil, testCipher, testServiceOptions(), nil)
+
+	if err := service.RevokeAppAPIKey(context.Background(), "app_test", "key_other_app"); !errors.Is(err, ErrPaymentAPIKeyNotFound) {
+		t.Fatalf("expected ErrPaymentAPIKeyNotFound, got %v", err)
+	}
+}
+
+func TestReplayMerchantDeliveryRejectsForeignApp(t *testing.T) {
+	repo := &fakePaymentRepository{deliveryAppID: "app_other"}
+	service := NewService(repo, nil, testCipher, testServiceOptions(), nil)
+
+	err := service.ReplayMerchantDelivery(context.Background(), "app_mine", "del_1")
+	if !errors.Is(err, ErrPaymentWebhookDeliveryNotFound) {
+		t.Fatalf("expected not-found for another app's delivery, got %v", err)
+	}
+	if repo.replayedDeliveryID != "" {
+		t.Fatal("expected no replay of another app's delivery")
+	}
+}
+
+func TestUpdateWebhookEndpointRejectsPrivateURL(t *testing.T) {
+	repo := &fakePaymentRepository{}
+	service := NewService(repo, nil, testCipher, testServiceOptions(), nil)
+
+	_, errs, err := service.UpdateWebhookEndpoint(context.Background(), "app_test", "ep_1", UpdateWebhookEndpointInput{URL: "http://169.254.169.254/hook"})
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if !errs.Any() {
+		t.Fatal("expected SSRF validation error for link-local URL")
+	}
+}
+
+func TestTestWebhookEndpointPostsSignedProbe(t *testing.T) {
+	var gotSignature, gotEventID string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotSignature = r.Header.Get("X-AZsubay-Signature")
+		gotEventID = r.Header.Get("X-AZsubay-Event-ID")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	repo := &fakePaymentRepository{
+		endpoint: PaymentWebhookEndpoint{ID: "ep_test", AppID: "app_test", URL: server.URL, Status: "active"},
+	}
+	opts := testServiceOptions()
+	opts.HTTPClient = server.Client()
+	service := NewService(repo, nil, testCipher, opts, nil)
+
+	result, err := service.TestWebhookEndpoint(context.Background(), "app_test", "ep_test")
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if !result.OK || result.StatusCode != 204 {
+		t.Fatalf("expected successful probe, got %+v", result)
+	}
+	if gotSignature == "" || gotEventID == "" {
+		t.Fatal("expected signed probe headers")
 	}
 }

@@ -294,6 +294,60 @@ type CreatePaymentWebhookEndpointRepositoryInput struct {
 	SecretHash string
 }
 
+// UpdateWebhookEndpointInput is a partial patch — empty fields are left
+// untouched. At least one of URL, EventTypes, Status must be set.
+type UpdateWebhookEndpointInput struct {
+	URL           string
+	EventTypes    []string
+	HasEventTypes bool
+	Status        string
+}
+
+// APIKey is the merchant-visible view of a payment_api_keys row. The raw
+// secret is returned once at creation and never again — only Prefix is
+// listed afterwards.
+type APIKey struct {
+	ID          string     `json:"id"`
+	AppID       string     `json:"app_id"`
+	Prefix      string     `json:"prefix"`
+	Status      string     `json:"status"`
+	Environment string     `json:"environment"`
+	CreatedAt   time.Time  `json:"created_at"`
+	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
+	LastUsedAt  *time.Time `json:"last_used_at,omitempty"`
+}
+
+// Key lifecycle states. Rotating keys stay valid until ExpiresAt (grace
+// period) so in-flight traffic survives rotation.
+const (
+	APIKeyStatusActive   = "active"
+	APIKeyStatusRotating = "rotating"
+	APIKeyStatusRevoked  = "revoked"
+)
+
+// Key environments. Sandbox/live isolation is enforced by the sandbox
+// feature; the column is stored from creation.
+const (
+	APIKeyEnvLive    = "live"
+	APIKeyEnvSandbox = "sandbox"
+)
+
+// CreateAPIKeyResult returns the raw secret exactly once.
+type CreateAPIKeyResult struct {
+	Key    APIKey `json:"key"`
+	APIKey string `json:"api_key"`
+}
+
+// TestWebhookEndpointResult reports a live probe POST against the
+// endpoint URL, signed exactly like a real delivery.
+type TestWebhookEndpointResult struct {
+	OK          bool      `json:"ok"`
+	StatusCode  int       `json:"status_code"`
+	Error       string    `json:"error,omitempty"`
+	EndpointURL string    `json:"endpoint_url"`
+	DeliveredAt time.Time `json:"delivered_at"`
+}
+
 type CreatePaymentWebhookEndpointResult struct {
 	Endpoint      PaymentWebhookEndpoint `json:"endpoint"`
 	SigningSecret string                 `json:"signing_secret"`
@@ -347,6 +401,7 @@ type PaymentWebhookDeliveryListFilter struct {
 	EventID        string
 	EndpointID     string
 	PaymentOrderID string
+	AppID          string
 	Limit          int
 	Offset         int
 }

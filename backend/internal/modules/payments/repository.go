@@ -18,7 +18,9 @@ import (
 
 var ErrPaymentOrderNotFound = errors.New("payment order not found")
 var ErrPaymentAppNotFound = errors.New("payment app not found")
+var ErrPaymentAPIKeyNotFound = errors.New("payment api key not found")
 var ErrPaymentEventNotFound = errors.New("payment event not found")
+var ErrPaymentWebhookEndpointNotFound = errors.New("payment webhook endpoint not found")
 var ErrPaymentWebhookDeliveryNotFound = errors.New("payment webhook delivery not found")
 var ErrPaymentProviderAccountNotFound = errors.New("payment provider account not found")
 
@@ -26,8 +28,15 @@ type Repository interface {
 	GetAppByAPIKeyHash(ctx context.Context, keyHash string) (PaymentApp, error)
 	GetPaymentAppByID(ctx context.Context, appID string) (PaymentApp, error)
 	CreatePaymentApp(ctx context.Context, input CreatePaymentAppInput) (PaymentApp, error)
-	CreatePaymentAPIKey(ctx context.Context, appID, keyHash string) error
+	CreatePaymentAPIKey(ctx context.Context, appID, keyHash, prefix, environment string) error
 	RevokePaymentAPIKeys(ctx context.Context, appID string) error
+	ListAppAPIKeys(ctx context.Context, appID string) ([]APIKey, error)
+	RevokeAppAPIKey(ctx context.Context, appID, keyID string) error
+	RotateAppAPIKeys(ctx context.Context, appID string, gracePeriod time.Duration) (int64, error)
+	GetWebhookEndpoint(ctx context.Context, appID, endpointID string) (PaymentWebhookEndpoint, error)
+	UpdateWebhookEndpoint(ctx context.Context, appID, endpointID string, input UpdateWebhookEndpointInput) (PaymentWebhookEndpoint, error)
+	DeleteWebhookEndpoint(ctx context.Context, appID, endpointID string) error
+	GetWebhookDeliveryApp(ctx context.Context, deliveryID string) (string, error)
 	ListPaymentApps(ctx context.Context, limit, offset int) (PaymentAppListResult, error)
 	CreatePaymentOrder(ctx context.Context, input CreatePaymentOrderRepositoryInput) (PaymentOrder, error)
 	UpdatePaymentOrderProviderDetails(ctx context.Context, id, providerOrderID, providerTransactionID string, status provider.Status, providerStatus string, metadata map[string]any) (PaymentOrder, error)
@@ -111,6 +120,8 @@ func (r *PostgresRepository) GetAppByAPIKeyHash(ctx context.Context, keyHash str
 		JOIN app.payment_apps a ON a.id = k.app_id
 		WHERE k.key_hash = $1
 		  AND k.revoked_at IS NULL
+		  AND k.status != 'revoked'
+		  AND (k.expires_at IS NULL OR k.expires_at > NOW())
 		  AND a.status = 'active'
 		LIMIT 1
 	`
@@ -187,30 +198,110 @@ func (r *PostgresRepository) GetPaymentAppByID(ctx context.Context, appID string
 	return app, nil
 }
 
-func (r *PostgresRepository) CreatePaymentAPIKey(ctx context.Context, appID, keyHash string) error {
+func (r *PostgresRepository) CreatePaymentAPIKey(ctx context.Context, appID, keyHash, prefix, environment string) error {
+	if environment == "" {
+		environment = APIKeyEnvLive
+	}
 	const query = `
-		INSERT INTO app.payment_api_keys (app_id, key_hash)
-		VALUES ($1::uuid, $2)
+		INSERT INTO app.payment_api_keys (app_id, key_hash, prefix, environment)
+		VALUES ($1::uuid, $2, $3, $4)
 	`
-	if _, err := r.db.ExecEx(ctx, query, nil, appID, keyHash); err != nil {
+	if _, err := r.db.ExecEx(ctx, query, nil, appID, keyHash, prefix, environment); err != nil {
 		return fmt.Errorf("create payment api key: %w", err)
 	}
 	return nil
 }
 
-// RevokePaymentAPIKeys revokes every currently-active key for an app —
-// called before issuing a new one, so an app only ever has at most one
-// active key at a time.
+// RevokePaymentAPIKeys revokes every currently-usable key for an app.
 func (r *PostgresRepository) RevokePaymentAPIKeys(ctx context.Context, appID string) error {
 	const query = `
 		UPDATE app.payment_api_keys
-		SET revoked_at = NOW()
-		WHERE app_id = $1::uuid AND revoked_at IS NULL
+		SET revoked_at = NOW(), status = 'revoked'
+		WHERE app_id = $1::uuid AND status != 'revoked'
 	`
 	if _, err := r.db.ExecEx(ctx, query, nil, appID); err != nil {
 		return fmt.Errorf("revoke payment api keys: %w", err)
 	}
 	return nil
+}
+
+func scanAPIKey(row rowScanner) (APIKey, error) {
+	var key APIKey
+	var expiresAt sql.NullTime
+	var lastUsedAt sql.NullTime
+	if err := row.Scan(
+		&key.ID, &key.AppID, &key.Prefix, &key.Status, &key.Environment,
+		&key.CreatedAt, &expiresAt, &lastUsedAt,
+	); err != nil {
+		return APIKey{}, err
+	}
+	if expiresAt.Valid {
+		key.ExpiresAt = &expiresAt.Time
+	}
+	if lastUsedAt.Valid {
+		key.LastUsedAt = &lastUsedAt.Time
+	}
+	return key, nil
+}
+
+const apiKeySelect = `
+	SELECT id::text, app_id::text, prefix, status, environment,
+	       created_at, expires_at, last_used_at
+	FROM app.payment_api_keys
+`
+
+// ListAppAPIKeys returns an app's keys newest-first. Hashes are never
+// selected — only prefixes leave the database.
+func (r *PostgresRepository) ListAppAPIKeys(ctx context.Context, appID string) ([]APIKey, error) {
+	rows, err := r.db.QueryEx(ctx, apiKeySelect+` WHERE app_id = $1::uuid ORDER BY created_at DESC`, nil, appID)
+	if err != nil {
+		return nil, fmt.Errorf("list payment api keys: %w", err)
+	}
+	defer rows.Close()
+
+	keys := []APIKey{}
+	for rows.Next() {
+		key, err := scanAPIKey(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan payment api key: %w", err)
+		}
+		keys = append(keys, key)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate payment api keys: %w", err)
+	}
+	return keys, nil
+}
+
+// RevokeAppAPIKey revokes a single key scoped to its app. No row means
+// not-found (wrong id or another app's key — indistinguishable by design).
+func (r *PostgresRepository) RevokeAppAPIKey(ctx context.Context, appID, keyID string) error {
+	tag, err := r.db.ExecEx(ctx, `
+		UPDATE app.payment_api_keys
+		SET revoked_at = NOW(), status = 'revoked'
+		WHERE id = $1::uuid AND app_id = $2::uuid AND status != 'revoked'
+	`, nil, keyID, appID)
+	if err != nil {
+		return fmt.Errorf("revoke payment api key: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrPaymentAPIKeyNotFound
+	}
+	return nil
+}
+
+// RotateAppAPIKeys demotes usable keys to rotating with a grace expiry
+// instead of killing them instantly, so in-flight traffic survives.
+func (r *PostgresRepository) RotateAppAPIKeys(ctx context.Context, appID string, gracePeriod time.Duration) (int64, error) {
+	tag, err := r.db.ExecEx(ctx, `
+		UPDATE app.payment_api_keys
+		SET status = 'rotating', expires_at = $2::timestamptz
+		WHERE app_id = $1::uuid AND status = 'active'
+	`, nil, appID, time.Now().UTC().Add(gracePeriod))
+	if err != nil {
+		return 0, fmt.Errorf("rotate payment api keys: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 func (r *PostgresRepository) ListPaymentApps(ctx context.Context, limit, offset int) (PaymentAppListResult, error) {
@@ -734,6 +825,97 @@ func (r *PostgresRepository) CreatePaymentWebhookEndpoint(ctx context.Context, i
 	return endpoint, nil
 }
 
+const webhookEndpointSelect = `
+	SELECT id::text, app_id::text, url, event_types, status, created_at, updated_at
+	FROM app.payment_webhook_endpoints
+`
+
+func scanWebhookEndpoint(row rowScanner) (PaymentWebhookEndpoint, error) {
+	var endpoint PaymentWebhookEndpoint
+	if err := row.Scan(
+		&endpoint.ID, &endpoint.AppID, &endpoint.URL, &endpoint.EventTypes,
+		&endpoint.Status, &endpoint.CreatedAt, &endpoint.UpdatedAt,
+	); err != nil {
+		return PaymentWebhookEndpoint{}, err
+	}
+	return endpoint, nil
+}
+
+// GetWebhookEndpoint loads one endpoint scoped to its app — the ownership
+// check for every merchant endpoint mutation.
+func (r *PostgresRepository) GetWebhookEndpoint(ctx context.Context, appID, endpointID string) (PaymentWebhookEndpoint, error) {
+	endpoint, err := scanWebhookEndpoint(r.db.QueryRowEx(ctx, webhookEndpointSelect+` WHERE id = $1::uuid AND app_id = $2::uuid`, nil, endpointID, appID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PaymentWebhookEndpoint{}, ErrPaymentWebhookEndpointNotFound
+	}
+	if err != nil {
+		return PaymentWebhookEndpoint{}, fmt.Errorf("get payment webhook endpoint: %w", err)
+	}
+	return endpoint, nil
+}
+
+// UpdateWebhookEndpoint applies a partial patch scoped to the app. Only
+// whitelisted columns are ever written.
+func (r *PostgresRepository) UpdateWebhookEndpoint(ctx context.Context, appID, endpointID string, input UpdateWebhookEndpointInput) (PaymentWebhookEndpoint, error) {
+	sets := []string{"updated_at = NOW()"}
+	args := []any{}
+	if input.URL != "" {
+		args = append(args, input.URL)
+		sets = append(sets, fmt.Sprintf("url = $%d", len(args)))
+	}
+	if input.HasEventTypes {
+		args = append(args, input.EventTypes)
+		sets = append(sets, fmt.Sprintf("event_types = $%d", len(args)))
+	}
+	if input.Status != "" {
+		args = append(args, input.Status)
+		sets = append(sets, fmt.Sprintf("status = $%d", len(args)))
+	}
+	args = append(args, endpointID, appID)
+	query := `UPDATE app.payment_webhook_endpoints SET ` + strings.Join(sets, ", ") +
+		fmt.Sprintf(` WHERE id = $%d::uuid AND app_id = $%d::uuid
+		RETURNING id::text, app_id::text, url, event_types, status, created_at, updated_at`, len(args)-1, len(args))
+	endpoint, err := scanWebhookEndpoint(r.db.QueryRowEx(ctx, query, nil, args...))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PaymentWebhookEndpoint{}, ErrPaymentWebhookEndpointNotFound
+	}
+	if err != nil {
+		return PaymentWebhookEndpoint{}, fmt.Errorf("update payment webhook endpoint: %w", err)
+	}
+	return endpoint, nil
+}
+
+// DeleteWebhookEndpoint removes an endpoint scoped to its app.
+func (r *PostgresRepository) DeleteWebhookEndpoint(ctx context.Context, appID, endpointID string) error {
+	tag, err := r.db.ExecEx(ctx, `DELETE FROM app.payment_webhook_endpoints WHERE id = $1::uuid AND app_id = $2::uuid`, nil, endpointID, appID)
+	if err != nil {
+		return fmt.Errorf("delete payment webhook endpoint: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrPaymentWebhookEndpointNotFound
+	}
+	return nil
+}
+
+// GetWebhookDeliveryApp resolves the owning app of a delivery (through its
+// endpoint) for merchant replay authorization.
+func (r *PostgresRepository) GetWebhookDeliveryApp(ctx context.Context, deliveryID string) (string, error) {
+	var appID string
+	err := r.db.QueryRowEx(ctx, `
+		SELECT ep.app_id::text
+		FROM app.payment_webhook_deliveries d
+		JOIN app.payment_webhook_endpoints ep ON ep.id = d.endpoint_id
+		WHERE d.id = $1::uuid
+	`, nil, deliveryID).Scan(&appID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrPaymentWebhookDeliveryNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("get webhook delivery app: %w", err)
+	}
+	return appID, nil
+}
+
 func (r *PostgresRepository) ListWebhookEndpoints(ctx context.Context, appID string) ([]PaymentWebhookEndpoint, error) {
 	conditions := []string{"1=1"}
 	args := []interface{}{}
@@ -1147,6 +1329,9 @@ func (r *PostgresRepository) ListWebhookDeliveries(ctx context.Context, filter P
 	}
 	if filter.PaymentOrderID != "" {
 		addCondition("o.id = $%d::uuid", filter.PaymentOrderID)
+	}
+	if filter.AppID != "" {
+		addCondition("ep.app_id = $%d::uuid", filter.AppID)
 	}
 
 	from := `

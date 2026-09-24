@@ -174,6 +174,37 @@ func New(ctx context.Context) (*App, error) {
 	mux.Handle("GET /api/v1/merchant/apps/{id}/withdrawals", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantListWithdrawals), middleware.RequireAuth(authVerifier)))
 	mux.Handle("POST /api/v1/merchant/apps/{id}/withdrawals", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantCreateWithdrawal), middleware.RequireAuth(authVerifier)))
 
+	// ---- Merchant self-service: webhook endpoints, API keys, deliveries ----
+	// All scoped to the path app id via membership on the caller's session —
+	// handlers never trust a client-supplied app id.
+	mux.Handle("/api/v1/merchant/apps/{id}/webhook-endpoints", middleware.Chain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			paymentHandler.MerchantListWebhookEndpoints(w, r)
+		case http.MethodPost:
+			paymentHandler.MerchantCreateWebhookEndpoint(w, r)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}), middleware.RequireAuth(authVerifier)))
+	mux.Handle("PATCH /api/v1/merchant/apps/{id}/webhook-endpoints/{endpointID}", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantUpdateWebhookEndpoint), middleware.RequireAuth(authVerifier)))
+	mux.Handle("DELETE /api/v1/merchant/apps/{id}/webhook-endpoints/{endpointID}", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantDeleteWebhookEndpoint), middleware.RequireAuth(authVerifier)))
+	mux.Handle("POST /api/v1/merchant/apps/{id}/webhook-endpoints/{endpointID}/test-send", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantTestWebhookEndpoint), middleware.RequireAuth(authVerifier)))
+	mux.Handle("/api/v1/merchant/apps/{id}/api-keys", middleware.Chain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			paymentHandler.MerchantListAPIKeys(w, r)
+		case http.MethodPost:
+			paymentHandler.MerchantCreateAPIKey(w, r)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}), middleware.RequireAuth(authVerifier)))
+	mux.Handle("POST /api/v1/merchant/apps/{id}/api-keys/{keyID}/rotate", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantRotateAPIKey), middleware.RequireAuth(authVerifier)))
+	mux.Handle("POST /api/v1/merchant/apps/{id}/api-keys/{keyID}/revoke", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantRevokeAPIKey), middleware.RequireAuth(authVerifier)))
+	mux.Handle("GET /api/v1/merchant/apps/{id}/deliveries", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantListDeliveries), middleware.RequireAuth(authVerifier)))
+	mux.Handle("POST /api/v1/merchant/apps/{id}/deliveries/{deliveryID}/replay", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantReplayDelivery), middleware.RequireAuth(authVerifier)))
+
 	// ---- Admin: withdrawals ----
 	mux.Handle("/api/v1/admin/payments/withdrawals", middleware.Chain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {

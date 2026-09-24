@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/big"
 	"net"
@@ -354,31 +355,80 @@ func (s *Service) CreateApp(ctx context.Context, input CreatePaymentAppInput) (C
 	if err != nil {
 		return CreatePaymentAppResult{}, nil, err
 	}
-	if err := s.repo.CreatePaymentAPIKey(ctx, app.ID, hashAPIKey(rawKey)); err != nil {
+	if err := s.repo.CreatePaymentAPIKey(ctx, app.ID, hashAPIKey(rawKey), apiKeyPrefix(rawKey), APIKeyEnvLive); err != nil {
 		return CreatePaymentAppResult{}, nil, err
 	}
 
 	return CreatePaymentAppResult{App: app, APIKey: rawKey}, nil, nil
 }
 
-// GenerateAPIKey revokes any existing active key for the app and issues a
-// new one, so an app only ever has at most one active key at a time. The
-// raw key is returned exactly once and is never stored — only its hash is
-// (mirrors products.Service.GenerateAPIKey).
+// apiKeyRotationGrace is how long rotated keys keep working so in-flight
+// traffic survives rotation.
+const apiKeyRotationGrace = 24 * time.Hour
+
+// apiKeyPrefix returns the public display prefix of a raw key. Only the
+// prefix is ever listed — the secret itself is shown once at creation.
+func apiKeyPrefix(rawKey string) string {
+	rawKey = strings.TrimSpace(rawKey)
+	if len(rawKey) < 8 {
+		return rawKey
+	}
+	return rawKey[:8]
+}
+
+// GenerateAPIKey rotates an app's keys with a grace period and issues a
+// new live key: usable keys become rotating (valid until expiry) instead
+// of dying instantly. The raw key is returned exactly once and is never
+// stored — only its hash is.
 func (s *Service) GenerateAPIKey(ctx context.Context, appID string) (string, error) {
-	rawKey, err := randomHex(32)
+	result, err := s.CreateAppAPIKey(ctx, appID, APIKeyEnvLive)
 	if err != nil {
 		return "", err
 	}
+	return result.APIKey, nil
+}
 
-	if err := s.repo.RevokePaymentAPIKeys(ctx, appID); err != nil {
-		return "", err
+// CreateAppAPIKey rotates existing usable keys into their grace period and
+// issues a fresh key of the given environment. The raw secret is in the
+// result exactly once.
+func (s *Service) CreateAppAPIKey(ctx context.Context, appID, environment string) (CreateAPIKeyResult, error) {
+	environment = strings.ToLower(strings.TrimSpace(environment))
+	if environment == "" {
+		environment = APIKeyEnvLive
 	}
-	if err := s.repo.CreatePaymentAPIKey(ctx, appID, hashAPIKey(rawKey)); err != nil {
-		return "", err
+	if environment != APIKeyEnvLive && environment != APIKeyEnvSandbox {
+		return CreateAPIKeyResult{}, errors.New("environment must be live or sandbox")
 	}
+	rawKey, err := randomHex(32)
+	if err != nil {
+		return CreateAPIKeyResult{}, err
+	}
+	if _, err := s.repo.RotateAppAPIKeys(ctx, appID, apiKeyRotationGrace); err != nil {
+		return CreateAPIKeyResult{}, err
+	}
+	if err := s.repo.CreatePaymentAPIKey(ctx, appID, hashAPIKey(rawKey), apiKeyPrefix(rawKey), environment); err != nil {
+		return CreateAPIKeyResult{}, err
+	}
+	keys, err := s.repo.ListAppAPIKeys(ctx, appID)
+	if err != nil {
+		return CreateAPIKeyResult{}, err
+	}
+	for _, key := range keys {
+		if key.Prefix == apiKeyPrefix(rawKey) && key.Status == APIKeyStatusActive {
+			return CreateAPIKeyResult{Key: key, APIKey: rawKey}, nil
+		}
+	}
+	return CreateAPIKeyResult{APIKey: rawKey}, nil
+}
 
-	return rawKey, nil
+// ListAppAPIKeys lists an app's keys (prefixes only, never secrets).
+func (s *Service) ListAppAPIKeys(ctx context.Context, appID string) ([]APIKey, error) {
+	return s.repo.ListAppAPIKeys(ctx, appID)
+}
+
+// RevokeAppAPIKey kills one key immediately (no grace). Scoped to the app.
+func (s *Service) RevokeAppAPIKey(ctx context.Context, appID, keyID string) error {
+	return s.repo.RevokeAppAPIKey(ctx, appID, keyID)
 }
 
 func (s *Service) ListApps(ctx context.Context, limit, offset int) (PaymentAppListResult, error) {
@@ -1329,6 +1379,122 @@ func (s *Service) CreateWebhookEndpoint(ctx context.Context, input CreatePayment
 
 func (s *Service) ListWebhookEndpoints(ctx context.Context, appID string) ([]PaymentWebhookEndpoint, error) {
 	return s.repo.ListWebhookEndpoints(ctx, strings.TrimSpace(appID))
+}
+
+// UpdateWebhookEndpoint applies a merchant-scoped partial patch. URLs are
+// re-validated (including the SSRF guard); event types are normalized.
+func (s *Service) UpdateWebhookEndpoint(ctx context.Context, appID, endpointID string, input UpdateWebhookEndpointInput) (PaymentWebhookEndpoint, validation.Errors, error) {
+	input.URL = strings.TrimSpace(input.URL)
+	input.Status = strings.ToLower(strings.TrimSpace(input.Status))
+
+	errs := validation.Errors{}
+	if input.URL == "" && !input.HasEventTypes && input.Status == "" {
+		errs.Add("url", "Nothing to update — provide url, event_types, or status.")
+		return PaymentWebhookEndpoint{}, errs, nil
+	}
+	if input.URL != "" {
+		if err := validateWebhookURL(input.URL); err != nil {
+			errs.Add("url", "Webhook URL must be a valid public http or https URL.")
+		}
+		input.URL = strings.TrimSpace(input.URL)
+	}
+	if input.HasEventTypes {
+		input.EventTypes = normalizeEventTypes(input.EventTypes)
+		for _, eventType := range input.EventTypes {
+			validation.MaxRunes(eventType, 80, "Event type must be 80 characters or fewer.", errs, "event_types")
+		}
+	}
+	if input.Status != "" && input.Status != "active" && input.Status != "disabled" {
+		errs.Add("status", "Status must be active or disabled.")
+	}
+	if errs.Any() {
+		return PaymentWebhookEndpoint{}, errs, nil
+	}
+	endpoint, err := s.repo.UpdateWebhookEndpoint(ctx, appID, endpointID, input)
+	return endpoint, nil, err
+}
+
+// DeleteWebhookEndpoint removes a merchant-scoped endpoint.
+func (s *Service) DeleteWebhookEndpoint(ctx context.Context, appID, endpointID string) error {
+	return s.repo.DeleteWebhookEndpoint(ctx, appID, endpointID)
+}
+
+// TestWebhookEndpoint POSTs a signed webhook.test probe to the endpoint URL
+// and reports the outcome. Nothing is stored and no ledger moves — it only
+// proves reachability plus signature verification on the merchant side.
+func (s *Service) TestWebhookEndpoint(ctx context.Context, appID, endpointID string) (TestWebhookEndpointResult, error) {
+	endpoint, err := s.repo.GetWebhookEndpoint(ctx, appID, endpointID)
+	if err != nil {
+		return TestWebhookEndpointResult{}, err
+	}
+	body, _ := json.Marshal(map[string]any{
+		"id":          "webhook-test-" + endpoint.ID,
+		"type":        "webhook.test",
+		"provider":    "gateway",
+		"endpoint_id": endpoint.ID,
+		"app_id":      endpoint.AppID,
+		"occurred_at": time.Now().UTC(),
+	})
+	timestamp := time.Now().UTC().Format(time.RFC3339)
+	signature := signDeliveryPayload(s.endpointSigningSecret(endpoint.ID), timestamp, body)
+
+	client := s.http
+	if client == nil {
+		client = &http.Client{Timeout: 10 * time.Second}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.URL, bytes.NewReader(body))
+	if err != nil {
+		return TestWebhookEndpointResult{}, fmt.Errorf("build webhook test request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-AZsubay-Event-ID", "webhook-test-"+endpoint.ID)
+	req.Header.Set("X-AZsubay-Timestamp", timestamp)
+	req.Header.Set("X-AZsubay-Signature", signature)
+
+	result := TestWebhookEndpointResult{EndpointURL: endpoint.URL, DeliveredAt: time.Now().UTC()}
+	resp, err := client.Do(req)
+	if err != nil {
+		result.Error = err.Error()
+		return result, nil
+	}
+	defer resp.Body.Close()
+	result.StatusCode = resp.StatusCode
+	result.OK = resp.StatusCode >= 200 && resp.StatusCode < 300
+	if !result.OK {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		result.Error = fmt.Sprintf("endpoint returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	return result, nil
+}
+
+// ListMerchantDeliveries lists webhook deliveries scoped to the merchant's
+// app — the app_id always comes from the verified membership path, never
+// from client input.
+func (s *Service) ListMerchantDeliveries(ctx context.Context, appID string, filter PaymentWebhookDeliveryListFilter) (PaymentWebhookDeliveryListResult, error) {
+	filter.AppID = strings.TrimSpace(appID)
+	filter.Status = strings.ToLower(strings.TrimSpace(filter.Status))
+	filter.EventID = strings.TrimSpace(filter.EventID)
+	filter.EndpointID = strings.TrimSpace(filter.EndpointID)
+	filter.Limit, filter.Offset = boundedLimitOffset(filter.Limit, filter.Offset, 50, 200)
+	return s.repo.ListWebhookDeliveries(ctx, filter)
+}
+
+// ReplayMerchantDelivery re-queues a failed delivery after verifying it
+// belongs to the merchant's app.
+func (s *Service) ReplayMerchantDelivery(ctx context.Context, appID, deliveryID string) error {
+	owner, err := s.repo.GetWebhookDeliveryApp(ctx, deliveryID)
+	if err != nil {
+		return err
+	}
+	if owner != strings.TrimSpace(appID) {
+		return ErrPaymentWebhookDeliveryNotFound
+	}
+	if err := s.repo.ReplayWebhookDelivery(ctx, deliveryID); err != nil {
+		return err
+	}
+	s.log.Info("merchant webhook delivery replay queued", "delivery_id", deliveryID, "app_id", appID)
+	go s.deliverDueNow()
+	return nil
 }
 
 func (s *Service) ReplayEvent(ctx context.Context, eventID string) (ReplayPaymentEventResult, error) {

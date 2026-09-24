@@ -105,6 +105,16 @@ reversal until a real contract is confirmed.
 - `/api/v1/admin/payments/...` — apps, providers, orders, events,
   deliveries, withdrawals, metrics (admin-auth)
 - `/api/v1/merchant/apps/...` — merchant-facing views for app members
+- `/api/v1/merchant/apps/{id}/webhook-endpoints` — merchant webhook CRUD
+  (GET/POST), plus `PATCH`/`DELETE .../{endpointID}` and
+  `POST .../{endpointID}/test-send` (signed live probe, nothing stored)
+- `/api/v1/merchant/apps/{id}/api-keys` — list (prefixes only) + create;
+  `POST .../{keyID}/rotate` (old keys stay valid 24h) and
+  `POST .../{keyID}/revoke` (immediate)
+- `GET /api/v1/merchant/apps/{id}/deliveries` — delivery logs scoped to
+  the app, plus `POST .../{deliveryID}/replay`
+- All merchant routes require a signed-in session AND app membership —
+  the app id always comes from the verified path, never client input.
 - `GET /api/v1/health` — liveness + DB check
 - `GET /api/v1/admin/me` — `{email, is_admin}` for the signed-in user
 
