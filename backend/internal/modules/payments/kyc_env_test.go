@@ -3,6 +3,7 @@ package payments
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -116,8 +117,43 @@ func TestCreateOrderLiveCaps(t *testing.T) {
 	}
 }
 
-func TestAuthenticateAppKeyReturnsEnvironment(t *testing.T) {
-	svc, _ := newServiceWithFake(t, ServiceOptions{})
+func TestCreateOrderRejectsLiveSandboxProvider(t *testing.T) {
+	repo := &fakePaymentRepository{}
+	registry := registryFor(&fakePaymentProvider{name: "sandbox"})
+	svc := NewService(repo, registry, testCipher, ServiceOptions{}, nil)
+	app := PaymentApp{ID: "app_test", Name: "Test", Status: "active"}
+
+	// Live + sandbox simulator fails closed on the provider field — even
+	// though "sandbox" resolves fine in this registry.
+	_, vErrs, err := svc.CreateOrder(context.Background(), app, CreatePaymentOrderInput{
+		Provider: "sandbox", Amount: "100", Currency: "TZS",
+		BuyerName: "A", BuyerEmail: "a@example.com", BuyerPhone: "+255712345678",
+		Environment: "live",
+	})
+	if err != nil {
+		t.Fatalf("expected validation errors, not error: %v", err)
+	}
+	msg, ok := vErrs["provider"]
+	if !ok {
+		t.Fatalf("expected provider validation error, got %v", vErrs)
+	}
+	if !strings.Contains(msg, "sandbox simulator") {
+		t.Fatalf("wrong provider message: %q", msg)
+	}
+
+	// Same provider in sandbox mode passes the guard (fails later at the
+	// fake, which never delivers — the point is no provider-field error).
+	_, vErrs, _ = svc.CreateOrder(context.Background(), app, CreatePaymentOrderInput{
+		Provider: "sandbox", Amount: "100", Currency: "TZS",
+		BuyerName: "A", BuyerEmail: "a@example.com", BuyerPhone: "+255712345678",
+		Environment: "sandbox",
+	})
+	if _, ok := vErrs["provider"]; ok {
+		t.Fatalf("sandbox env must not trip the provider guard: %v", vErrs)
+	}
+}
+
+func TestAuthenticateAppKeyReturnsEnvironment(t *testing.T) {	svc, _ := newServiceWithFake(t, ServiceOptions{})
 	app, environment, err := svc.AuthenticateAppKey(context.Background(), "sk_test_123")
 	if err != nil {
 		t.Fatalf("auth: %v", err)

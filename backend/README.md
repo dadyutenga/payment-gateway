@@ -188,8 +188,36 @@ verifying). If a secret leaks, rotate it:
 - The frontend webhooks tab shows `vN` per endpoint with a Rotate-secret
   button and a copy-once reveal.
 
-## Adding a payment provider
+## Sandbox testing (simulator provider)
 
+`sandbox` is a deterministic provider simulator for merchant integration
+testing — no network calls, no real money. Wire it like any real kind:
+
+1. Admin → Providers → create account: kind `sandbox`, any name, base URL
+   anything (ignored), credentials JSON e.g.
+   `{"settle_seconds": "10"}`. Set it as default for kind `sandbox`.
+2. Merchant: create an app (unverified orgs get a sandbox key
+   automatically), then `POST /api/v1/payments/orders` with
+   `provider: "sandbox"` using that key.
+
+Behavior:
+
+- Orders mint `pending` instantly; the provider order id
+  (`sbx_<unix>_<rand>`) embeds its creation time — that is the whole
+  settlement clock, the adapter is stateless.
+- `POST .../orders/{id}/refresh` (or reconciliation) reports `paid`
+  once the order is older than `settle_seconds` (default 30, `0` settles
+  on first check), crediting the ledger and emitting
+  `payment.updated` webhooks exactly like a slow real provider.
+- `{"always_fail": "true"}` in the account credentials forces `failed`
+  instead (failure-path testing). Admin refunds against sandbox orders
+  reverse instantly with a simulated provider refund id.
+- There are no inbound webhooks for the simulator.
+- **Guardrail:** `provider: "sandbox"` with a live key is rejected
+  (`422` on the provider field) — simulated money can never settle
+  real ledger credits, no matter which caller tries.
+
+## Adding a payment provider
 Providers implement the interface in
 `internal/modules/payments/provider/types.go` and register themselves in
 `internal/modules/payments/providers/registry.go`. `providers/sonicpesa`

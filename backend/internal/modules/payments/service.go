@@ -1030,6 +1030,12 @@ func (s *Service) CreateOrder(ctx context.Context, app PaymentApp, input CreateP
 	}
 	input.Amount = amount
 	input.Environment = defaultOrderEnvironment(input.Environment)
+	// The sandbox simulator must never settle live orders: simulated money
+	// would credit the real ledger. Fail closed on the provider field
+	// itself (422) rather than trusting every caller to check.
+	if input.Environment == "live" && input.Provider == ProviderSandbox {
+		errs.Add("provider", "The sandbox simulator cannot take live payments.")
+	}
 
 	p, providerErr := s.resolveProvider(ctx, input.Provider)
 	if providerErr != nil {

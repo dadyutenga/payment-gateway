@@ -355,6 +355,12 @@ const (
 	APIKeyEnvSandbox = "sandbox"
 )
 
+// ProviderSandbox is the deterministic simulator kind for merchant
+// integration testing (no network, no real money). Live orders can never
+// use it — CreateOrder rejects the combination, so simulated money can
+// never settle real ledger credits.
+const ProviderSandbox = "sandbox"
+
 // CreateAPIKeyResult returns the raw secret exactly once.
 type CreateAPIKeyResult struct {
 	Key    APIKey `json:"key"`

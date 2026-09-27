@@ -11,6 +11,7 @@ package providers
 
 import (
 	"azsubay-payments-gateway/internal/modules/payments/provider"
+	"azsubay-payments-gateway/internal/modules/payments/providers/sandbox"
 	"azsubay-payments-gateway/internal/modules/payments/providers/sonicpesa"
 )
 
@@ -21,5 +22,13 @@ var Registry = map[string]provider.Constructor{
 			APIKey:    credentials["api_key"],
 			APISecret: credentials["api_secret"],
 		})
+	},
+	// sandbox is the deterministic simulator for merchant integration
+	// testing (no network, no real money). Wired to an admin-managed
+	// provider account like any real kind; settle_seconds and
+	// always_fail come from that account's credentials. Live orders
+	// can never use it — payments.Service rejects the combination.
+	"sandbox": func(_ string, credentials map[string]string) provider.PaymentProvider {
+		return sandbox.New(sandbox.ConfigFromCredentials(credentials))
 	},
 }
