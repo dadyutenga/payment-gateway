@@ -26,8 +26,9 @@ frontend/   React admin panel — Apps, Withdrawals, Providers, Orders/Ledger/Ev
 2. **Backend**:
    ```
    cd backend
-   cp .env.example .env   # fill in DATABASE_URL, AUTH_JWT_SECRET, APP_ENCRYPTION_KEY, ADMIN_EMAILS
+   cp .env.example .env   # fill in DATABASE_URL, AUTH_JWT_SECRET, APP_ENCRYPTION_KEY
    go run ./cmd/migrate -action up
+   go run ./cmd/seed-admin -email admin@example.com   # create the first admin
    go run ./cmd/api
    ```
    That's one process — it serves the API and runs delivery/reconciliation
@@ -42,10 +43,11 @@ frontend/   React admin panel — Apps, Withdrawals, Providers, Orders/Ledger/Ev
    npm run dev
    ```
 
-4. Put your email in `ADMIN_EMAILS`, start the frontend, then create that
-   account from its sign-in page. That account can now sign in
-   to the admin panel, register apps, generate API keys, configure
-   payment providers, and manage withdrawals.
+4. Sign in with the account created by `cmd/seed-admin` (self-registration
+   never grants admin). Merchants can sign up from the frontend, create an
+   organization, and work in sandbox mode immediately — live API keys and
+   live payments unlock after their organization's verification (KYC) is
+   submitted and approved.
 
 ## Handing this to someone else
 

@@ -33,6 +33,8 @@ type Repository interface {
 	CountOwners(ctx context.Context, orgID string) (int64, error)
 	FindUserIDByEmail(ctx context.Context, email string) (string, error)
 	CountActiveMembers(ctx context.Context, orgID string) (int64, error)
+	SubmitKYC(ctx context.Context, orgID, businessName, tin, docURL string) (KYCSubmission, error)
+	GetKYCSubmission(ctx context.Context, orgID string) (KYCSubmission, bool, error)
 }
 
 type PostgresRepository struct {
@@ -65,9 +67,7 @@ const organizationSelect = `
 	FROM app.organizations
 `
 
-func scanOrgMember(row interface {
-	Scan(dest ...interface{}) error
-}) (OrgMember, error) {
+func scanOrgMember(row interface{ Scan(dest ...interface{}) error }) (OrgMember, error) {
 	var member OrgMember
 	var email, fullName, phone sql.NullString
 	var role, status string
@@ -416,4 +416,84 @@ func (r *PostgresRepository) FindUserIDByEmail(ctx context.Context, email string
 		return "", fmt.Errorf("find user by email: %w", err)
 	}
 	return id, nil
+}
+
+func scanKYCSubmission(row interface{ Scan(dest ...interface{}) error }) (KYCSubmission, error) {
+	var sub KYCSubmission
+	var reviewedBy, rejectionReason sql.NullString
+	var reviewedAt sql.NullTime
+	if err := row.Scan(
+		&sub.OrgID, &sub.BusinessName, &sub.TIN, &sub.IDDocumentURL,
+		&sub.SubmittedAt, &reviewedBy, &reviewedAt, &rejectionReason,
+	); err != nil {
+		return KYCSubmission{}, err
+	}
+	sub.ReviewedBy = reviewedBy.String
+	if reviewedAt.Valid {
+		sub.ReviewedAt = &reviewedAt.Time
+	}
+	sub.RejectionReason = rejectionReason.String
+	return sub, nil
+}
+
+const kycSubmissionSelect = `
+	SELECT org_id::text, business_name, tin, id_document_url, submitted_at,
+	       reviewed_by, reviewed_at, COALESCE(rejection_reason, '')
+	FROM app.kyc_submissions
+`
+
+// SubmitKYC records (or resubmits) verification evidence and flips the org
+// to submitted. Resubmission clears any prior review outcome.
+func (r *PostgresRepository) SubmitKYC(ctx context.Context, orgID, businessName, tin, docURL string) (KYCSubmission, error) {
+	tx, err := r.db.BeginEx(ctx, nil)
+	if err != nil {
+		return KYCSubmission{}, fmt.Errorf("begin submit kyc transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.RollbackEx(ctx)
+		}
+	}()
+
+	if _, err = tx.ExecEx(ctx, `
+		INSERT INTO app.kyc_submissions (org_id, business_name, tin, id_document_url)
+		VALUES ($1::uuid, $2, $3, $4)
+		ON CONFLICT (org_id) DO UPDATE SET
+			business_name = EXCLUDED.business_name,
+			tin = EXCLUDED.tin,
+			id_document_url = EXCLUDED.id_document_url,
+			submitted_at = NOW(),
+			reviewed_by = NULL,
+			reviewed_at = NULL,
+			rejection_reason = ''
+	`, nil, orgID, businessName, tin, docURL); err != nil {
+		return KYCSubmission{}, fmt.Errorf("upsert kyc submission: %w", err)
+	}
+	if _, err = tx.ExecEx(ctx, `
+		UPDATE app.organizations SET business_name = $2, tin = $3, kyc_status = 'submitted', updated_at = NOW()
+		WHERE id = $1::uuid
+	`, nil, orgID, valueOrNil(businessName), valueOrNil(tin)); err != nil {
+		return KYCSubmission{}, fmt.Errorf("mark org kyc submitted: %w", err)
+	}
+	var sub KYCSubmission
+	sub, err = scanKYCSubmission(tx.QueryRowEx(ctx, kycSubmissionSelect+` WHERE org_id = $1::uuid`, nil, orgID))
+	if err != nil {
+		return KYCSubmission{}, fmt.Errorf("load kyc submission: %w", err)
+	}
+	if err = tx.CommitEx(ctx); err != nil {
+		return KYCSubmission{}, fmt.Errorf("commit submit kyc transaction: %w", err)
+	}
+	return sub, nil
+}
+
+// GetKYCSubmission loads the evidence row; found=false when never submitted.
+func (r *PostgresRepository) GetKYCSubmission(ctx context.Context, orgID string) (KYCSubmission, bool, error) {
+	sub, err := scanKYCSubmission(r.db.QueryRowEx(ctx, kycSubmissionSelect+` WHERE org_id = $1::uuid`, nil, orgID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return KYCSubmission{}, false, nil
+	}
+	if err != nil {
+		return KYCSubmission{}, false, fmt.Errorf("get kyc submission: %w", err)
+	}
+	return sub, true, nil
 }

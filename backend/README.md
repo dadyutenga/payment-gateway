@@ -13,9 +13,10 @@ here depends on AZSUBAY's production systems.
 
 ```
 cp .env.example .env
-# fill in DATABASE_URL, AUTH_JWT_SECRET, APP_ENCRYPTION_KEY, ADMIN_EMAILS at minimum
+# fill in DATABASE_URL, AUTH_JWT_SECRET, APP_ENCRYPTION_KEY at minimum
 
 go run ./cmd/migrate -action up
+go run ./cmd/seed-admin -email admin@example.com
 go run ./cmd/api
 ```
 
@@ -45,6 +46,7 @@ go run ./cmd/worker
 ```
 go run ./cmd/migrate -action up      # apply migrations
 go run ./cmd/migrate -action down    # roll back one migration
+go run ./cmd/seed-admin -email ...   # create/promote an admin (never via signup)
 go build ./...                        # build all binaries
 go vet ./...
 go test ./...
@@ -60,24 +62,67 @@ required ones to get running at all:
 | `DATABASE_URL` | Postgres connection string |
 | `AUTH_JWT_SECRET` | signs and verifies local user sessions |
 | `APP_ENCRYPTION_KEY` | encrypts provider credentials at rest (`openssl rand -base64 32`) |
-| `ADMIN_EMAILS` | comma-separated bootstrap admin allowlist (replace example addresses!) |
 | `AUTH_ALLOW_PUBLIC_REGISTER` | `false` (default): only the first account may self-register, then signup closes |
+| `PAYMENTS_LIVE_MAX_TXN_AMOUNT` | per-transaction live cap (default `5000000`) |
+| `PAYMENTS_LIVE_DAILY_VOLUME_CAP` | per-app per-currency live daily cap (default `50000000`) |
 
 ## Admin access
 
-User accounts, password hashes, and roles live in `app.users`. Email
-addresses in `ADMIN_EMAILS` receive the admin role on registration — put
-your first administrator there before creating the account, and never
-deploy with the example addresses still listed (anyone registering a
-listed address would become admin).
+User accounts and password hashes live in `app.users`. Self-registration
+**never** grants admin — there is no `ADMIN_EMAILS` allowlist anymore. The
+only automated way to mint an admin is:
 
-Self-registration is closed by default: only the very first account (empty
-users table) may self-register to bootstrap the deployment; afterwards
-`POST /api/v1/auth/register` returns `403 registration_disabled` unless
-`AUTH_ALLOW_PUBLIC_REGISTER=true`. Admin rights are re-read from
-`app.users` on every request, so revoking `is_admin` takes effect
-immediately instead of lingering in the token until `AUTH_TOKEN_TTL`
-expires.
+```
+go run ./cmd/seed-admin -email admin@example.com          # generates a password
+go run ./cmd/seed-admin -email admin@example.com -password '...'
+```
+
+It creates the account if missing, promotes an existing non-admin, and is
+a no-op for existing admins. Self-registration is closed by default: only
+the very first account (empty users table) may self-register to bootstrap
+the deployment; afterwards `POST /api/v1/auth/register` returns
+`403 registration_disabled` unless `AUTH_ALLOW_PUBLIC_REGISTER=true`.
+Admin rights are re-read from `app.users` on every request, so revoking
+`is_admin` takes effect immediately instead of lingering in the token
+until `AUTH_TOKEN_TTL` expires.
+
+## Signup verification (OTP)
+
+- `POST /api/v1/auth/otp/request` `{channel: email|sms, purpose, phone?}`
+  and `POST /api/v1/auth/otp/verify` `{channel, purpose, code}` (both
+  session-authenticated).
+- Codes are 6 digits, bcrypt-hashed in `app.otp_codes`, expire in 10
+  minutes, max 5 requests/hour per user, locked after 5 wrong attempts
+  (re-request clears the lock).
+- SMS numbers must be Tanzanian mobiles (`+2556…` / `+2557…`).
+- No mail/SMS provider ships with this repo: `Mailer`/`SMSSender` are
+  narrow interfaces (see `internal/platform/auth`) with log-only stubs
+  wired in `httpserver.New`. Production must wire a real provider (e.g.
+  Beem Africa for TZ SMS) — until then OTP requests return
+  `503 otp_not_configured`.
+- `GET /api/v1/admin/me` reports `email_verified`, `phone`, and
+  `phone_verified` for the frontend flow.
+
+## KYC (verification) & sandbox gating
+
+- `POST /api/v1/orgs/{orgID}/kyc` `{business_name, tin, id_document_url}`
+  (owner/`manage_org`), `GET /api/v1/orgs/{orgID}/kyc` for status;
+  `POST .../kyc/document` (multipart `document`, JPEG/PNG/WEBP/PDF, ≤5MB,
+  stored under `backend/uploads/kyc/`) and `GET .../kyc/document` to fetch.
+- Submission flips `organizations.kyc_status` to `submitted` (review
+  approve/reject is a later admin block; `000039_kyc_submissions` keeps
+  the evidence + review queue).
+- **Gates:** live API keys (merchant create/rotate) and live orders
+  return `403 kyc_required` until the org is `verified`. Sandbox keys and
+  sandbox orders skip the gate. The order's environment comes from the
+  API key — never from the request body.
+- **Live caps:** `PAYMENTS_LIVE_MAX_TXN_AMOUNT` (per txn) and
+  `PAYMENTS_LIVE_DAILY_VOLUME_CAP` (ledger-summed per app/currency/UTC
+  day) return `422 live_txn_cap_exceeded` / `422 live_daily_cap_exceeded`.
+  Sandbox orders skip both.
+- Frontend: `/signup` (email + OTP verify), `/onboarding/kyc/{orgID}`
+  (business name, TIN, document upload), and a sandbox-mode banner while
+  the active org is unverified.
 
 ## Organizations & roles
 

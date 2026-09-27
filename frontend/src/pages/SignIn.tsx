@@ -1,5 +1,5 @@
 import { FormEvent, useState } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { authenticate } from "@/lib/auth";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -49,6 +49,11 @@ const SignIn = () => {
         <button type="button" className="mt-4 text-xs text-blue-600 hover:underline" onClick={() => setRegistering(!registering)}>
           {registering ? "Already have an account? Sign in" : "Create an account"}
         </button>
+        {!registering && (
+          <p className="mt-2 text-center text-xs text-slate-500">
+            New here? <Link to="/signup" className="text-blue-600 hover:underline">Sign up</Link>
+          </p>
+        )}
       </div>
     </div>
   );

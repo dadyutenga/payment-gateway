@@ -50,8 +50,14 @@ func New(ctx context.Context) (*App, error) {
 	}
 
 	authVerifier := auth.NewVerifier(cfg.Auth, logger)
-	authService := auth.NewService(db, authVerifier, cfg.Admin.Emails)
+	authService := auth.NewService(db, authVerifier)
 	authService.SetAllowPublicRegister(cfg.Auth.AllowPublicRegister)
+	// OTP delivery stubs: log-only in every environment. Wire real
+	// Mailer/SMSSender implementations (e.g. Beem Africa for TZ SMS) for
+	// production — until then OTP requests return 503 otp_not_configured
+	// rather than silently swallowing codes.
+	authService.SetMailer(auth.NewLogMailer(logger))
+	authService.SetSMSSender(auth.NewLogSMSSender(logger))
 
 	cipher, err := azcrypto.New(cfg.Security.EncryptionKey)
 	if err != nil {
@@ -78,6 +84,8 @@ func New(ctx context.Context) (*App, error) {
 		PayoutReconciliationStaleAfter: cfg.Payments.PayoutReconciliationStaleAfter,
 		ProviderTimeout:                providerTimeout,
 		OrderExpiryTTL:                 cfg.Payments.OrderTTL,
+		LiveMaxTxnAmount:               cfg.Payments.LiveMaxTxnAmount,
+		LiveDailyVolumeCap:             cfg.Payments.LiveDailyVolumeCap,
 	}, logger)
 	// SMS success notifications, admin alerts, and an audit trail are all
 	// optional integrations in the full AZSUBAY backend (SetSMSSender,
@@ -93,8 +101,8 @@ func New(ctx context.Context) (*App, error) {
 	paymentHandler.SetOrgService(orgService)
 
 	// Admin privileges are stored in app.users and read from the database on
-	// every request — never trusted from the token claim. ADMIN_EMAILS only
-	// bootstraps the first administrators as they register, and revoking
+	// every request — never trusted from the token claim. Admins are created
+	// via cmd/seed-admin (self-registration never grants admin) and revoking
 	// is_admin takes effect immediately (no waiting for token expiry).
 	adminCheck := func(ctx context.Context, claims auth.Claims) (bool, error) {
 		return authService.IsAdmin(ctx, claims.Subject)
@@ -103,6 +111,8 @@ func New(ctx context.Context) (*App, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/auth/register", authService.HandleRegister)
 	mux.HandleFunc("POST /api/v1/auth/login", authService.HandleLogin)
+	mux.Handle("POST /api/v1/auth/otp/request", middleware.Chain(http.HandlerFunc(authService.HandleOTPRequest), middleware.RequireAuth(authVerifier)))
+	mux.Handle("POST /api/v1/auth/otp/verify", middleware.Chain(http.HandlerFunc(authService.HandleOTPVerify), middleware.RequireAuth(authVerifier)))
 
 	mux.HandleFunc("GET /api/v1/health", func(w http.ResponseWriter, r *http.Request) {
 		dbStatus := "up"
@@ -124,7 +134,8 @@ func New(ctx context.Context) (*App, error) {
 	})
 
 	// A lightweight identity endpoint so the frontend can show "signed in
-	// as X" / "not an admin" without guessing from 401s alone.
+	// as X" / "not an admin" without guessing from 401s alone. Includes
+	// verification flags for the signup/KYC flow.
 	mux.Handle("GET /api/v1/admin/me", middleware.Chain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		claims, ok := middleware.ClaimsFromContext(r.Context())
 		if !ok {
@@ -136,9 +147,18 @@ func New(ctx context.Context) (*App, error) {
 			httputil.Error(w, http.StatusInternalServerError, "internal_error", "Unable to check admin status.", nil)
 			return
 		}
+		profile, profileErr := authService.GetUserProfile(r.Context(), claims.Subject)
+		if profileErr != nil {
+			httputil.Error(w, http.StatusInternalServerError, "internal_error", "Unable to load profile.", nil)
+			return
+		}
 		httputil.JSON(w, http.StatusOK, map[string]any{"data": map[string]any{
-			"email":    claims.Email,
-			"is_admin": isAdmin,
+			"email":           claims.Email,
+			"is_admin":        isAdmin,
+			"user":            profile,
+			"email_verified":  profile.EmailVerified,
+			"phone":           profile.Phone,
+			"phone_verified":  profile.PhoneVerified,
 		}})
 	}), middleware.RequireAuth(authVerifier)))
 
@@ -234,6 +254,10 @@ func New(ctx context.Context) (*App, error) {
 	mux.Handle("PATCH /api/v1/orgs/{orgID}/members/{userID}", middleware.Chain(http.HandlerFunc(orgHandler.ChangeMemberRole), middleware.RequireAuth(authVerifier)))
 	mux.Handle("DELETE /api/v1/orgs/{orgID}/members/{userID}", middleware.Chain(http.HandlerFunc(orgHandler.RemoveMember), middleware.RequireAuth(authVerifier)))
 	mux.Handle("POST /api/v1/orgs/{orgID}/leave", middleware.Chain(http.HandlerFunc(orgHandler.LeaveOrganization), middleware.RequireAuth(authVerifier)))
+	mux.Handle("POST /api/v1/orgs/{orgID}/kyc", middleware.Chain(http.HandlerFunc(orgHandler.SubmitKYC), middleware.RequireAuth(authVerifier)))
+	mux.Handle("GET /api/v1/orgs/{orgID}/kyc", middleware.Chain(http.HandlerFunc(orgHandler.GetKYCSubmission), middleware.RequireAuth(authVerifier)))
+	mux.Handle("POST /api/v1/orgs/{orgID}/kyc/document", middleware.Chain(http.HandlerFunc(orgHandler.UploadKYCDocument), middleware.RequireAuth(authVerifier)))
+	mux.Handle("GET /api/v1/orgs/{orgID}/kyc/document", middleware.Chain(http.HandlerFunc(orgHandler.ServeKYCDocument), middleware.RequireAuth(authVerifier)))
 
 	// ---- Admin: withdrawals ----
 	mux.Handle("/api/v1/admin/payments/withdrawals", middleware.Chain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

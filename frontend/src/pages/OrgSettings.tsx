@@ -1,5 +1,5 @@
 import { FormEvent, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ShieldAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -87,17 +87,21 @@ const OrgSettings = () => {
       ) : org ? (
         <>
           <Card className="mt-4">
-            <CardContent className="flex items-start gap-3 p-4">
-              <ShieldAlert className="mt-0.5 h-5 w-5 shrink-0 text-amber-500" />
-              <div className="text-sm">
-                <p className="font-semibold text-slate-900">
-                  Verification: {org.kyc_status}
-                </p>
-                <p className="mt-0.5 text-slate-500">{KYC_COPY[org.kyc_status] ?? org.kyc_status}</p>
-                <p className="mt-1 text-xs text-slate-400">
-                  Full KYC submission and review arrive in the next step — this banner already reflects live status.
-                </p>
+            <CardContent className="flex items-start justify-between gap-3 p-4">
+              <div className="flex items-start gap-3">
+                <ShieldAlert className="mt-0.5 h-5 w-5 shrink-0 text-amber-500" />
+                <div className="text-sm">
+                  <p className="font-semibold text-slate-900">
+                    Verification: {org.kyc_status}
+                  </p>
+                  <p className="mt-0.5 text-slate-500">{KYC_COPY[org.kyc_status] ?? org.kyc_status}</p>
+                </div>
               </div>
+              {isOwner && org.kyc_status !== "verified" && (
+                <Link to={`/onboarding/kyc/${orgId}`} className="shrink-0 text-sm font-medium text-blue-600 hover:underline">
+                  {org.kyc_status === "submitted" ? "View submission" : "Submit verification"}
+                </Link>
+              )}
             </CardContent>
           </Card>
 

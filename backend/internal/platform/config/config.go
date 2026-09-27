@@ -20,7 +20,6 @@ type Config struct {
 	HTTP     HTTPConfig
 	Database DatabaseConfig
 	Auth     AuthConfig
-	Admin    AdminConfig
 	Payments PaymentConfig
 	CORS     CORSConfig
 	Security SecurityConfig
@@ -58,19 +57,10 @@ type AuthConfig struct {
 	// AllowPublicRegister keeps POST /api/v1/auth/register open to anyone.
 	// Default false: only the very first account (empty users table) may
 	// self-register as a bootstrap; afterwards registration is closed and
-	// additional accounts must be created by an operator. Leaving this open
-	// with ADMIN_EMAILS copied from an example lets anyone claim admin by
-	// registering a listed address.
+	// additional accounts must be created by cmd/seed-admin or an operator.
+	// Self-registration never grants admin — there is no ADMIN_EMAILS
+	// allowlist grant path anymore.
 	AllowPublicRegister bool
-}
-
-// AdminConfig is deliberately simple: a fixed allowlist of emails, set via
-// env var, rather than a database-backed admin-role system. That's enough
-// for "who's allowed to run this Payments Gateway" — if you need a richer
-// admin model (roles, invitations, audit trail of admin changes), that's
-// what the full AZSUBAY backend's oauth/users modules are for.
-type AdminConfig struct {
-	Emails []string
 }
 
 type CORSConfig struct {
@@ -107,6 +97,11 @@ type PaymentConfig struct {
 	OrderTTL time.Duration
 	// ExpiryInterval schedules the expiry worker sweep.
 	ExpiryInterval time.Duration
+	// LiveMaxTxnAmount caps a single live order; LiveDailyVolumeCap caps
+	// confirmed live volume per app per currency per UTC day. Empty
+	// disables the respective check (defaults applied in payments.NewService).
+	LiveMaxTxnAmount   string
+	LiveDailyVolumeCap string
 }
 
 type slogLevel string
@@ -144,9 +139,6 @@ func Load() (Config, error) {
 			HealthTimeout:   mustDuration("DATABASE_HEALTH_TIMEOUT", "3s"),
 		},
 		Auth: AuthConfig{JWTSecret: strings.TrimSpace(os.Getenv("AUTH_JWT_SECRET")), TokenTTL: mustDuration("AUTH_TOKEN_TTL", "24h"), AllowPublicRegister: mustBool("AUTH_ALLOW_PUBLIC_REGISTER", false)},
-		Admin: AdminConfig{
-			Emails: splitCSVLower(os.Getenv("ADMIN_EMAILS")),
-		},
 		CORS: CORSConfig{
 			AllowedOrigins: splitCSV(getEnv("CORS_ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:3000")),
 		},
@@ -170,6 +162,8 @@ func Load() (Config, error) {
 			PayoutReconciliationInterval:   mustDuration("PAYMENTS_PAYOUT_RECONCILIATION_INTERVAL", "5m"),
 			OrderTTL:                       mustDuration("PAYMENTS_ORDER_TTL", "30m"),
 			ExpiryInterval:                 mustDuration("PAYMENTS_EXPIRY_INTERVAL", "1m"),
+			LiveMaxTxnAmount:               strings.TrimSpace(os.Getenv("PAYMENTS_LIVE_MAX_TXN_AMOUNT")),
+			LiveDailyVolumeCap:             strings.TrimSpace(os.Getenv("PAYMENTS_LIVE_DAILY_VOLUME_CAP")),
 		},
 	}
 
@@ -182,9 +176,6 @@ func Load() (Config, error) {
 	}
 	if len(cfg.Auth.JWTSecret) < 32 {
 		validationErrs = append(validationErrs, "AUTH_JWT_SECRET must be at least 32 characters")
-	}
-	if len(cfg.Admin.Emails) == 0 {
-		validationErrs = append(validationErrs, "ADMIN_EMAILS is required (comma-separated list of emails allowed to sign in as admin)")
 	}
 	if strings.EqualFold(cfg.App.Env, "production") && cfg.Payments.DeliverySigningSecret == "development-payment-delivery-secret" {
 		validationErrs = append(validationErrs, "PAYMENTS_DELIVERY_SIGNING_SECRET is required in production")
@@ -299,15 +290,6 @@ func splitCSV(input string) []string {
 		if trimmed != "" {
 			out = append(out, trimmed)
 		}
-	}
-	return out
-}
-
-func splitCSVLower(input string) []string {
-	parts := splitCSV(input)
-	out := make([]string, 0, len(parts))
-	for _, part := range parts {
-		out = append(out, strings.ToLower(part))
 	}
 	return out
 }

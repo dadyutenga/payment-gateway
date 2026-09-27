@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { LogOut, Wallet } from "lucide-react";
 import { signOut } from "@/lib/auth";
 import { listMyOrgs } from "@/lib/orgApi";
+import SandboxModeBanner from "@/components/SandboxModeBanner";
 
 const NAV_ITEMS = [
   { to: "/admin/payments", label: "Overview", end: true },
@@ -88,6 +89,7 @@ const AdminLayout = () => {
         </div>
       </header>
       <main className="mx-auto max-w-6xl px-4 py-6 sm:px-6">
+        <SandboxModeBanner />
         <Outlet />
       </main>
     </div>

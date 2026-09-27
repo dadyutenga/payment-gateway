@@ -143,6 +143,77 @@ func (s *Service) AdminListMembers(ctx context.Context, orgID string) ([]OrgMemb
 	return s.repo.ListMembers(ctx, strings.TrimSpace(orgID))
 }
 
+// OrgKYCStatus returns an app's org KYC status with no actor check —
+// callers (order/key gates) are already authorized via key or membership.
+func (s *Service) OrgKYCStatus(ctx context.Context, appID string) (string, error) {
+	orgID, err := s.repo.GetAppOrgID(ctx, strings.TrimSpace(appID))
+	if err != nil {
+		return "", err
+	}
+	org, err := s.repo.GetOrganization(ctx, orgID)
+	if err != nil {
+		return "", err
+	}
+	return org.KYCStatus, nil
+}
+
+func validTIN(tin string) bool {
+	digits := 0
+	for _, r := range tin {
+		if r >= '0' && r <= '9' {
+			digits++
+		} else if r != ' ' && r != '-' {
+			return false
+		}
+	}
+	return digits >= 9 && digits <= 20
+}
+
+// SubmitKYC files (or refiles) verification evidence for owner-run orgs.
+// Business name, TIN, and an uploaded document are all required; review
+// (approve/reject) is an admin action in a later block.
+func (s *Service) SubmitKYC(ctx context.Context, userID, orgID, businessName, tin, docURL string) (KYCSubmission, validation.Errors, error) {
+	if _, err := s.CheckOrgPermission(ctx, userID, orgID, PermManageOrg); err != nil {
+		return KYCSubmission{}, nil, err
+	}
+	businessName = strings.TrimSpace(businessName)
+	tin = strings.TrimSpace(tin)
+	docURL = strings.TrimSpace(docURL)
+
+	errs := validation.Errors{}
+	validation.Required(businessName, "Business name is required.", errs, "business_name")
+	validation.MaxRunes(businessName, 200, "Business name must be 200 characters or fewer.", errs, "business_name")
+	if !validTIN(tin) {
+		errs.Add("tin", "TIN must be 9-20 digits.")
+	}
+	validation.Required(docURL, "An ID document upload is required.", errs, "id_document_url")
+	if errs.Any() {
+		return KYCSubmission{}, errs, nil
+	}
+	sub, err := s.repo.SubmitKYC(ctx, strings.TrimSpace(orgID), businessName, tin, docURL)
+	return sub, nil, err
+}
+
+// GetKYCSubmission returns the evidence row plus live org status for the
+// status view (any active member may read).
+func (s *Service) GetKYCSubmission(ctx context.Context, userID, orgID string) (KYCSubmission, string, error) {
+	if _, err := s.CheckOrgPermission(ctx, userID, orgID, PermRead); err != nil {
+		return KYCSubmission{}, "", err
+	}
+	sub, found, err := s.repo.GetKYCSubmission(ctx, strings.TrimSpace(orgID))
+	if err != nil {
+		return KYCSubmission{}, "", err
+	}
+	if !found {
+		return KYCSubmission{}, "", ErrKYCNotSubmitted
+	}
+	org, err := s.repo.GetOrganization(ctx, strings.TrimSpace(orgID))
+	if err != nil {
+		return KYCSubmission{}, "", err
+	}
+	return sub, org.KYCStatus, nil
+}
+
 func (s *Service) ListMembers(ctx context.Context, userID, orgID string) ([]OrgMember, error) {
 	if _, err := s.CheckOrgPermission(ctx, userID, orgID, PermRead); err != nil {
 		return nil, err

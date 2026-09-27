@@ -56,6 +56,7 @@ type fakeOrgRepository struct {
 	updatedRoles [][3]string
 	invited      []OrgMember
 	org          Organization
+	kycFound     bool
 }
 
 func orgKey(orgID, userID string) string { return orgID + "\x00" + userID }
@@ -176,6 +177,17 @@ func (r *fakeOrgRepository) FindUserIDByEmail(_ context.Context, email string) (
 		return id, nil
 	}
 	return "", ErrUserNotFound
+}
+
+func (r *fakeOrgRepository) SubmitKYC(_ context.Context, orgID, businessName, tin, docURL string) (KYCSubmission, error) {
+	return KYCSubmission{OrgID: orgID, BusinessName: businessName, TIN: tin, IDDocumentURL: docURL}, nil
+}
+
+func (r *fakeOrgRepository) GetKYCSubmission(_ context.Context, orgID string) (KYCSubmission, bool, error) {
+	if r.kycFound {
+		return KYCSubmission{OrgID: orgID, BusinessName: "Acme", TIN: "123456789"}, true, nil
+	}
+	return KYCSubmission{}, false, nil
 }
 
 func ownerRepo() *fakeOrgRepository {

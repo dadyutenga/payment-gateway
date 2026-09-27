@@ -232,8 +232,20 @@ func (r *fakePaymentRepository) GetAppByAPIKeyHash(_ context.Context, _ string) 
 	return PaymentApp{ID: "app_test", Name: "Test App", Status: "active"}, nil
 }
 
+func (r *fakePaymentRepository) GetAPIKeyContext(_ context.Context, _ string) (PaymentApp, string, error) {
+	return PaymentApp{ID: "app_test", Name: "Test App", Status: "active"}, "sandbox", nil
+}
+
+func (r *fakePaymentRepository) TodayLiveVolume(_ context.Context, _, _ string) (string, error) {
+	return "0", nil
+}
+
 func (r *fakePaymentRepository) CreatePaymentApp(_ context.Context, input CreatePaymentAppInput) (PaymentApp, error) {
-	return PaymentApp{ID: "app_test", Name: input.Name, Description: input.Description, Status: "active"}, nil
+	return PaymentApp{ID: "app_test", Name: input.Name, Description: input.Description, Status: "active", OrgID: input.OrgID}, nil
+}
+
+func (r *fakePaymentRepository) OrganizationExists(_ context.Context, orgID string) (bool, error) {
+	return orgID != "" && orgID != "org_missing", nil
 }
 
 func (r *fakePaymentRepository) CreatePaymentAPIKey(_ context.Context, appID, _, prefix, environment string) error {

@@ -17,10 +17,7 @@ import (
 
 type contextKey string
 
-const (
-	requestIDKey contextKey = "request_id"
-	claimsKey    contextKey = "claims"
-)
+const requestIDKey contextKey = "request_id"
 
 func Chain(handler http.Handler, middlewares ...func(http.Handler) http.Handler) http.Handler {
 	for i := len(middlewares) - 1; i >= 0; i-- {
@@ -154,7 +151,7 @@ func RequireAuth(verifier *auth.Verifier) func(http.Handler) http.Handler {
 				return
 			}
 
-			ctx := context.WithValue(r.Context(), claimsKey, claims)
+			ctx := auth.WithClaims(r.Context(), claims)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
@@ -193,8 +190,7 @@ func RequestIDFromContext(ctx context.Context) string {
 }
 
 func ClaimsFromContext(ctx context.Context) (auth.Claims, bool) {
-	claims, ok := ctx.Value(claimsKey).(auth.Claims)
-	return claims, ok
+	return auth.ClaimsFromContext(ctx)
 }
 
 type statusRecorder struct {

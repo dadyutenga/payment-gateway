@@ -208,9 +208,40 @@ type createOrderHTTPInput struct {
 	Metadata          map[string]any  `json:"metadata"`
 }
 
+// requireLiveKYC blocks live-mode operations for orgs that are not
+// KYC-verified. Sandbox operations skip this gate.
+func (h *Handler) requireLiveKYC(w http.ResponseWriter, r *http.Request, appID, environment string) bool {
+	if environment != "live" {
+		return true
+	}
+	if h.orgs == nil {
+		h.log().Error("org service not wired for live KYC gate", "path", r.URL.Path)
+		httputil.Error(w, http.StatusInternalServerError, "internal_error", "Verification gate is not configured.", nil)
+		return false
+	}
+	status, err := h.orgs.OrgKYCStatus(r.Context(), appID)
+	if err != nil {
+		h.fail(w, http.StatusInternalServerError, "internal_error", "Unable to check verification status.", err)
+		return false
+	}
+	if status != "verified" {
+		httputil.Error(w, http.StatusForbidden, "kyc_required",
+			"Live payments require a verified organization. Submit your verification documents first; sandbox mode remains available.", nil)
+		return false
+	}
+	return true
+}
+
 func (h *Handler) CreateOrder(w http.ResponseWriter, r *http.Request) {
-	app, ok := h.authenticateApp(w, r)
+	app, environment, ok := h.authenticateAppKey(w, r)
 	if !ok {
+		return
+	}
+
+	// Live gate runs BEFORE body parsing, idempotency, and any provider
+	// call: unverified orgs must never reach a real provider on a live key.
+	// Sandbox keys skip the gate entirely.
+	if !h.requireLiveKYC(w, r, app.ID, environment) {
 		return
 	}
 
@@ -233,6 +264,8 @@ func (h *Handler) CreateOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Environment comes from the API key, never from the request body —
+	// clients cannot self-assign sandbox/live.
 	order, vErrs, err := h.service.CreateOrder(r.Context(), app, CreatePaymentOrderInput{
 		Provider:          in.Provider,
 		Amount:            amount,
@@ -242,9 +275,17 @@ func (h *Handler) CreateOrder(w http.ResponseWriter, r *http.Request) {
 		BuyerPhone:        in.BuyerPhone,
 		ExternalReference: in.ExternalReference,
 		Metadata:          in.Metadata,
+		Environment:       environment,
 	})
 	if err != nil {
-		h.failIdempotent(state, w, r, http.StatusBadGateway, "payment_provider_error", "Unable to create payment order.", err)
+		switch {
+		case errors.Is(err, ErrLiveTxnCapExceeded):
+			h.writeError(state, w, r, http.StatusUnprocessableEntity, "live_txn_cap_exceeded", "Order amount exceeds the live per-transaction cap.", nil)
+		case errors.Is(err, ErrLiveDailyCapExceeded):
+			h.writeError(state, w, r, http.StatusUnprocessableEntity, "live_daily_cap_exceeded", "Order would exceed the live daily volume cap.", nil)
+		default:
+			h.failIdempotent(state, w, r, http.StatusBadGateway, "payment_provider_error", "Unable to create payment order.", err)
+		}
 		return
 	}
 	if vErrs.Any() {
@@ -1088,23 +1129,30 @@ func (h *Handler) ProviderWebhook(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) authenticateApp(w http.ResponseWriter, r *http.Request) (PaymentApp, bool) {
+	app, _, ok := h.authenticateAppKey(w, r)
+	return app, ok
+}
+
+// authenticateAppKey resolves the X-Api-Key header and returns the app
+// plus the key's environment (live/sandbox).
+func (h *Handler) authenticateAppKey(w http.ResponseWriter, r *http.Request) (PaymentApp, string, bool) {
 	apiKey := strings.TrimSpace(r.Header.Get("X-Api-Key"))
 	if apiKey == "" {
 		httputil.Error(w, http.StatusUnauthorized, "unauthorized", "Missing payment API key.", nil)
-		return PaymentApp{}, false
+		return PaymentApp{}, "", false
 	}
 
-	app, err := h.service.AuthenticateApp(r.Context(), apiKey)
+	app, environment, err := h.service.AuthenticateAppKey(r.Context(), apiKey)
 	if err != nil {
 		if errors.Is(err, ErrPaymentAppUnauthorized) {
 			httputil.Error(w, http.StatusUnauthorized, "unauthorized", "Invalid payment API key.", nil)
-			return PaymentApp{}, false
+			return PaymentApp{}, "", false
 		}
 		httputil.Error(w, http.StatusInternalServerError, "internal_error", "Unable to authenticate payment app.", nil)
-		return PaymentApp{}, false
+		return PaymentApp{}, "", false
 	}
 
-	return app, true
+	return app, environment, true
 }
 
 func amountFromJSON(raw json.RawMessage) (string, error) {
@@ -1507,9 +1555,20 @@ func (h *Handler) MerchantCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		httputil.Error(w, http.StatusBadRequest, "invalid_request", "Unable to decode request body.", nil)
 		return
 	}
+	if in.Environment == "" {
+		in.Environment = APIKeyEnvLive
+	}
+	// Live keys require a verified org; sandbox keys do not.
+	if !h.requireLiveKYC(w, r, appID, strings.ToLower(strings.TrimSpace(in.Environment))) {
+		return
+	}
 
 	result, err := h.service.CreateAppAPIKey(r.Context(), appID, in.Environment)
 	if err != nil {
+		if strings.Contains(err.Error(), "environment must be") {
+			httputil.Error(w, http.StatusUnprocessableEntity, "invalid_environment", "Environment must be live or sandbox.", nil)
+			return
+		}
 		h.fail(w, http.StatusInternalServerError, "create_failed", "Unable to create API key.", err)
 		return
 	}
@@ -1524,7 +1583,10 @@ func (h *Handler) MerchantRotateAPIKey(w http.ResponseWriter, r *http.Request) {
 
 	// Rotation issues a fresh live key; usable keys enter their 24h grace
 	// period instead of dying instantly. The raw secret is in this
-	// response exactly once.
+	// response exactly once. Live keys require a verified org.
+	if !h.requireLiveKYC(w, r, appID, APIKeyEnvLive) {
+		return
+	}
 	result, err := h.service.CreateAppAPIKey(r.Context(), appID, APIKeyEnvLive)
 	if err != nil {
 		h.fail(w, http.StatusInternalServerError, "rotate_failed", "Unable to rotate API key.", err)

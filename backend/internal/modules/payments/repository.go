@@ -26,6 +26,7 @@ var ErrPaymentProviderAccountNotFound = errors.New("payment provider account not
 
 type Repository interface {
 	GetAppByAPIKeyHash(ctx context.Context, keyHash string) (PaymentApp, error)
+	GetAPIKeyContext(ctx context.Context, keyHash string) (PaymentApp, string, error)
 	GetPaymentAppByID(ctx context.Context, appID string) (PaymentApp, error)
 	CreatePaymentApp(ctx context.Context, input CreatePaymentAppInput) (PaymentApp, error)
 	CreatePaymentAPIKey(ctx context.Context, appID, keyHash, prefix, environment string) error
@@ -84,6 +85,11 @@ type Repository interface {
 
 	ListAppMembers(ctx context.Context, appID string) ([]AppMember, error)
 	ListAppsForUser(ctx context.Context, userID string) ([]PaymentApp, error)
+	TodayLiveVolume(ctx context.Context, appID, currency string) (string, error)
+	// OrganizationExists gates app creation: payment_apps.org_id is NOT
+	// NULL, so an unknown org must fail fast with a clean 422 rather than
+	// a foreign-key 500.
+	OrganizationExists(ctx context.Context, orgID string) (bool, error)
 
 	GetPaymentOrderByID(ctx context.Context, paymentOrderID string) (PaymentOrder, error)
 	GetPaymentEventByID(ctx context.Context, eventID string) (PaymentEvent, error)
@@ -148,20 +154,68 @@ func (r *PostgresRepository) GetAppByAPIKeyHash(ctx context.Context, keyHash str
 	return app, nil
 }
 
-func (r *PostgresRepository) CreatePaymentApp(ctx context.Context, input CreatePaymentAppInput) (PaymentApp, error) {
+// GetAPIKeyContext resolves an API key like GetAppByAPIKeyHash but also
+// returns the key's environment (live/sandbox) so callers can gate and
+// tag operations by environment. Unknown, revoked, or grace-expired keys
+// yield ErrPaymentAppNotFound like the plain lookup.
+func (r *PostgresRepository) GetAPIKeyContext(ctx context.Context, keyHash string) (PaymentApp, string, error) {
 	const query = `
-		INSERT INTO app.payment_apps (name, description)
-		VALUES ($1, $2)
-		RETURNING id::text, name, COALESCE(description, ''), status,
-		          fee_type, fee_percent::text, fee_fixed::text, created_at, updated_at
+		SELECT a.id::text, a.name, COALESCE(a.description, ''), a.status,
+		       a.fee_type, a.fee_percent::text, a.fee_fixed::text, a.created_at, a.updated_at,
+		       k.environment
+		FROM app.payment_api_keys k
+		JOIN app.payment_apps a ON a.id = k.app_id
+		WHERE k.key_hash = $1
+		  AND k.revoked_at IS NULL
+		  AND k.status != 'revoked'
+		  AND (k.expires_at IS NULL OR k.expires_at > NOW())
+		  AND a.status = 'active'
+		LIMIT 1
 	`
 
 	var app PaymentApp
-	err := r.db.QueryRowEx(ctx, query, nil, input.Name, valueOrNil(input.Description)).Scan(
+	var environment string
+	err := r.db.QueryRowEx(ctx, query, nil, keyHash).Scan(
 		&app.ID,
 		&app.Name,
 		&app.Description,
 		&app.Status,
+		&app.FeeType,
+		&app.FeePercent,
+		&app.FeeFixed,
+		&app.CreatedAt,
+		&app.UpdatedAt,
+		&environment,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PaymentApp{}, "", ErrPaymentAppNotFound
+	}
+	if err != nil {
+		return PaymentApp{}, "", fmt.Errorf("get payment app by api key: %w", err)
+	}
+
+	if _, err := r.db.ExecEx(ctx, `UPDATE app.payment_api_keys SET last_used_at = NOW() WHERE key_hash = $1`, nil, keyHash); err != nil {
+		return PaymentApp{}, "", fmt.Errorf("update payment api key last used: %w", err)
+	}
+
+	return app, environment, nil
+}
+
+func (r *PostgresRepository) CreatePaymentApp(ctx context.Context, input CreatePaymentAppInput) (PaymentApp, error) {
+	const query = `
+		INSERT INTO app.payment_apps (name, description, org_id)
+		VALUES ($1, $2, $3::uuid)
+		RETURNING id::text, name, COALESCE(description, ''), status, org_id::text,
+		          fee_type, fee_percent::text, fee_fixed::text, created_at, updated_at
+	`
+
+	var app PaymentApp
+	err := r.db.QueryRowEx(ctx, query, nil, input.Name, valueOrNil(input.Description), input.OrgID).Scan(
+		&app.ID,
+		&app.Name,
+		&app.Description,
+		&app.Status,
+		&app.OrgID,
 		&app.FeeType,
 		&app.FeePercent,
 		&app.FeeFixed,
@@ -172,6 +226,16 @@ func (r *PostgresRepository) CreatePaymentApp(ctx context.Context, input CreateP
 		return PaymentApp{}, fmt.Errorf("create payment app: %w", err)
 	}
 	return app, nil
+}
+
+// OrganizationExists reports whether an org id names a real organization.
+func (r *PostgresRepository) OrganizationExists(ctx context.Context, orgID string) (bool, error) {
+	var exists bool
+	err := r.db.QueryRowEx(ctx, `SELECT EXISTS (SELECT 1 FROM app.organizations WHERE id = $1::uuid)`, nil, orgID).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("check organization exists: %w", err)
+	}
+	return exists, nil
 }
 
 func (r *PostgresRepository) GetPaymentAppByID(ctx context.Context, appID string) (PaymentApp, error) {
@@ -368,9 +432,10 @@ func (r *PostgresRepository) CreatePaymentOrder(ctx context.Context, input Creat
 			status,
 			provider_status,
 			metadata,
-			expires_at
+			expires_at,
+			environment
 		)
-		VALUES ($1::uuid,$2,$3,$4,$5,$6::numeric,$7,$8,$9,$10,$11,$12,$13::jsonb,$14::timestamptz)
+		VALUES ($1::uuid,$2,$3,$4,$5,$6::numeric,$7,$8,$9,$10,$11,$12,$13::jsonb,$14::timestamptz,$15)
 		RETURNING
 			id::text,
 			COALESCE(app_id::text, ''),
@@ -388,7 +453,8 @@ func (r *PostgresRepository) CreatePaymentOrder(ctx context.Context, input Creat
 			metadata::text,
 			created_at,
 			updated_at,
-			expires_at
+			expires_at,
+			environment
 	`
 
 	order, err := scanPaymentOrder(tx.QueryRowEx(
@@ -409,6 +475,7 @@ func (r *PostgresRepository) CreatePaymentOrder(ctx context.Context, input Creat
 		valueOrNil(input.ProviderStatus),
 		string(metadataJSON),
 		valueOrNilTime(input.ExpiresAt),
+		defaultOrderEnvironment(input.Environment),
 	))
 	if err != nil {
 		return PaymentOrder{}, fmt.Errorf("create payment order: %w", err)
@@ -468,12 +535,13 @@ func (r *PostgresRepository) UpdatePaymentOrderProviderDetails(ctx context.Conte
 			COALESCE(buyer_name, ''),
 			COALESCE(buyer_email, ''),
 			COALESCE(buyer_phone, ''),
-		status,
-		COALESCE(provider_status, ''),
-		metadata::text,
-		created_at,
-		updated_at,
-		expires_at
+			status,
+			COALESCE(provider_status, ''),
+			metadata::text,
+			created_at,
+			updated_at,
+			expires_at,
+			environment
 	`
 	order, err := scanPaymentOrder(r.db.QueryRowEx(ctx, query, nil, id, valueOrNil(providerOrderID), providerTransactionID, string(status), valueOrNil(providerStatus), string(metadataJSON)))
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -685,7 +753,8 @@ func (r *PostgresRepository) ApplyWebhookEvent(ctx context.Context, input ApplyW
 			metadata::text,
 			created_at,
 			updated_at,
-			expires_at
+			expires_at,
+			environment
 	`
 	order, err := scanPaymentOrder(tx.QueryRowEx(ctx, updateOrder, nil, input.PaymentOrderID, string(input.ToStatus), valueOrNil(input.ProviderStatus), input.ProviderTransactionID))
 	if err != nil {
@@ -1493,6 +1562,16 @@ func valueOrNilTime(value time.Time) any {
 	return value
 }
 
+// defaultOrderEnvironment normalizes the order environment, defaulting to
+// live (every historical order settled real money).
+func defaultOrderEnvironment(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value != "sandbox" {
+		return "live"
+	}
+	return value
+}
+
 // isUniqueViolation reports Postgres unique-constraint violations (23505).
 func isUniqueViolation(err error) bool {
 	var pgErr pgx.PgError
@@ -1551,7 +1630,8 @@ const paymentOrderSelect = `
 		metadata::text,
 		created_at,
 		updated_at,
-		expires_at
+		expires_at,
+		environment
 	FROM app.payment_orders
 `
 
@@ -1640,6 +1720,7 @@ func scanPaymentOrder(row rowScanner) (PaymentOrder, error) {
 		&order.CreatedAt,
 		&order.UpdatedAt,
 		&expiresAt,
+		&order.Environment,
 	); err != nil {
 		return PaymentOrder{}, err
 	}
@@ -2609,6 +2690,24 @@ func (r *PostgresRepository) ListAppMembers(ctx context.Context, appID string) (
 	return members, nil
 }
 
+// TodayLiveVolume sums today's confirmed live payment credits for an app
+// in one currency — the ledger as source of truth for daily caps.
+func (r *PostgresRepository) TodayLiveVolume(ctx context.Context, appID, currency string) (string, error) {
+	var total string
+	err := r.db.QueryRowEx(ctx, `
+		SELECT COALESCE(SUM(l.amount), 0)::text
+		FROM app.payment_ledger_entries l
+		JOIN app.payment_orders o ON o.id = l.payment_order_id
+		WHERE l.app_id = $1::uuid AND l.entry_type = 'payment_credit'
+		  AND l.currency = $2 AND o.environment = 'live'
+		  AND l.created_at >= date_trunc('day', NOW())
+	`, nil, appID, currency).Scan(&total)
+	if err != nil {
+		return "", fmt.Errorf("sum today live volume: %w", err)
+	}
+	return total, nil
+}
+
 // ListAppsForUser is the merchant-facing counterpart to ListPaymentApps —
 // only apps in organizations the user actively belongs to.
 func (r *PostgresRepository) ListAppsForUser(ctx context.Context, userID string) ([]PaymentApp, error) {
@@ -2874,7 +2973,8 @@ func (r *PostgresRepository) ExpirePendingOrders(ctx context.Context, limit int)
 				o.metadata::text,
 				o.created_at,
 				o.updated_at,
-				o.expires_at
+				o.expires_at,
+				o.environment
 		),
 		hist AS (
 			INSERT INTO app.payment_status_history (payment_order_id, from_status, to_status, source)

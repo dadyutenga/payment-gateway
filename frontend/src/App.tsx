@@ -15,6 +15,8 @@ import MerchantAppDetail from "@/pages/MerchantAppDetail";
 import CreateOrg from "@/pages/CreateOrg";
 import OrgMembers from "@/pages/OrgMembers";
 import OrgSettings from "@/pages/OrgSettings";
+import SignUp from "@/pages/SignUp";
+import OnboardingKYC from "@/pages/OnboardingKYC";
 
 const queryClient = new QueryClient();
 
@@ -25,6 +27,7 @@ const App = () => (
       <BrowserRouter>
         <Routes>
           <Route path="/signin" element={<SignIn />} />
+          <Route path="/signup" element={<SignUp />} />
           <Route
             path="/admin"
             element={
@@ -70,6 +73,16 @@ const App = () => (
           >
             <Route path="members" element={<OrgMembers />} />
             <Route path="settings" element={<OrgSettings />} />
+          </Route>
+          <Route
+            path="/onboarding/kyc/:orgId"
+            element={
+              <MerchantRoute>
+                <AdminLayout />
+              </MerchantRoute>
+            }
+          >
+            <Route index element={<OnboardingKYC />} />
           </Route>
           <Route path="/" element={<Navigate to="/admin/payments" replace />} />
           <Route path="*" element={<Navigate to="/admin/payments" replace />} />

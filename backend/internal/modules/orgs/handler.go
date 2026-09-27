@@ -3,9 +3,14 @@ package orgs
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"azsubay-payments-gateway/internal/platform/middleware"
 	"azsubay-payments-gateway/internal/shared/httputil"
@@ -266,4 +271,155 @@ func (h *Handler) LeaveOrganization(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// maxKYCDocumentBytes caps ID uploads at 5MB.
+const maxKYCDocumentBytes = 5 << 20
+
+// kycUploadDir is relative to the process working directory (backend/ for
+// `go run ./cmd/api`). No object storage exists in this repo yet — when an
+// S3-compatible store is introduced, only saveKYCDocument/serveKYCDocument
+// need to change (the DB keeps a location string either way).
+const kycUploadDir = "uploads/kyc"
+
+var allowedKYCExtensions = map[string]bool{
+	".jpg": true, ".jpeg": true, ".png": true, ".webp": true, ".pdf": true,
+}
+
+func kycContentTypeAllowed(detected, filename string) bool {
+	switch detected {
+	case "image/jpeg", "image/png", "image/webp", "application/pdf":
+	default:
+		return false
+	}
+	ext := strings.ToLower(filepath.Ext(filename))
+	return allowedKYCExtensions[ext]
+}
+
+type submitKYCHTTPInput struct {
+	BusinessName  string `json:"business_name"`
+	TIN           string `json:"tin"`
+	IDDocumentURL string `json:"id_document_url"`
+}
+
+func (h *Handler) SubmitKYC(w http.ResponseWriter, r *http.Request) {
+	userID, ok := claimsUserID(w, r)
+	if !ok {
+		return
+	}
+	var in submitKYCHTTPInput
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		httputil.Error(w, http.StatusBadRequest, "invalid_request", "Unable to decode request body.", nil)
+		return
+	}
+	sub, vErrs, err := h.service.SubmitKYC(r.Context(), userID, r.PathValue("orgID"), in.BusinessName, in.TIN, in.IDDocumentURL)
+	if err != nil {
+		h.orgError(w, err, "submit verification")
+		return
+	}
+	if vErrs.Any() {
+		httputil.Error(w, http.StatusUnprocessableEntity, "validation_failed", "Please check your submission.", vErrs)
+		return
+	}
+	httputil.JSON(w, http.StatusOK, map[string]any{"data": sub})
+}
+
+func (h *Handler) GetKYCSubmission(w http.ResponseWriter, r *http.Request) {
+	userID, ok := claimsUserID(w, r)
+	if !ok {
+		return
+	}
+	sub, status, err := h.service.GetKYCSubmission(r.Context(), userID, r.PathValue("orgID"))
+	if err != nil {
+		if errors.Is(err, ErrKYCNotSubmitted) {
+			httputil.Error(w, http.StatusNotFound, "not_submitted", "No verification submission yet.", nil)
+			return
+		}
+		h.orgError(w, err, "view verification")
+		return
+	}
+	httputil.JSON(w, http.StatusOK, map[string]any{"data": map[string]any{"submission": sub, "kyc_status": status}})
+}
+
+func (h *Handler) UploadKYCDocument(w http.ResponseWriter, r *http.Request) {
+	userID, ok := claimsUserID(w, r)
+	if !ok {
+		return
+	}
+	orgID := r.PathValue("orgID")
+	if _, err := h.service.CheckOrgPermission(r.Context(), userID, orgID, PermManageOrg); err != nil {
+		h.orgError(w, err, "upload verification documents")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxKYCDocumentBytes+1<<20)
+	if err := r.ParseMultipartForm(maxKYCDocumentBytes); err != nil {
+		httputil.Error(w, http.StatusBadRequest, "invalid_request", "Document must be under 5MB.", nil)
+		return
+	}
+	file, header, err := r.FormFile("document")
+	if err != nil {
+		httputil.Error(w, http.StatusBadRequest, "invalid_request", "Attach the ID document as the 'document' field.", nil)
+		return
+	}
+	defer file.Close()
+	if header.Size > maxKYCDocumentBytes {
+		httputil.Error(w, http.StatusBadRequest, "invalid_request", "Document must be under 5MB.", nil)
+		return
+	}
+	head := make([]byte, 512)
+	n, _ := io.ReadFull(file, head)
+	head = head[:n]
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		h.fail(w, http.StatusInternalServerError, "upload_failed", "Unable to store document.", err)
+		return
+	}
+	detected := http.DetectContentType(head)
+	if !kycContentTypeAllowed(detected, header.Filename) {
+		httputil.Error(w, http.StatusUnprocessableEntity, "invalid_document", "Document must be a JPEG, PNG, WEBP image or PDF.", nil)
+		return
+	}
+	if err := os.MkdirAll(kycUploadDir, 0o750); err != nil {
+		h.fail(w, http.StatusInternalServerError, "upload_failed", "Unable to store document.", err)
+		return
+	}
+	ext := strings.ToLower(filepath.Ext(header.Filename))
+	name := orgID + "-" + strconv.FormatInt(time.Now().UnixNano(), 10) + ext
+	path := filepath.Join(kycUploadDir, name)
+	out, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o640)
+	if err != nil {
+		h.fail(w, http.StatusInternalServerError, "upload_failed", "Unable to store document.", err)
+		return
+	}
+	if _, err := io.Copy(out, file); err != nil {
+		_ = out.Close()
+		_ = os.Remove(path)
+		h.fail(w, http.StatusInternalServerError, "upload_failed", "Unable to store document.", err)
+		return
+	}
+	_ = out.Close()
+	httputil.JSON(w, http.StatusCreated, map[string]any{"data": map[string]any{"id_document_url": filepath.ToSlash(path)}})
+}
+
+func (h *Handler) ServeKYCDocument(w http.ResponseWriter, r *http.Request) {
+	userID, ok := claimsUserID(w, r)
+	if !ok {
+		return
+	}
+	orgID := r.PathValue("orgID")
+	if _, err := h.service.CheckOrgPermission(r.Context(), userID, orgID, PermRead); err != nil {
+		h.orgError(w, err, "view verification documents")
+		return
+	}
+	sub, kycStatus, err := h.service.GetKYCSubmission(r.Context(), userID, orgID)
+	if err != nil || sub.IDDocumentURL == "" {
+		httputil.Error(w, http.StatusNotFound, "not_found", "No verification document.", nil)
+		return
+	}
+	_ = kycStatus
+	clean := filepath.Clean(sub.IDDocumentURL)
+	if strings.Contains(clean, "..") || !strings.HasPrefix(filepath.ToSlash(clean), "uploads/kyc/") {
+		h.fail(w, http.StatusInternalServerError, "internal_error", "Stored document path is invalid.", errors.New("kyc path escape"))
+		return
+	}
+	http.ServeFile(w, r, clean)
 }

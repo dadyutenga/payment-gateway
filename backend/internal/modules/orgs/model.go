@@ -106,6 +106,20 @@ type OrgMember struct {
 	CreatedAt time.Time    `json:"created_at"`
 }
 
+// KYCSubmission is one org's verification file. Rewritten on resubmit
+// (review fields cleared); organizations.kyc_status stays the enforced
+// source of truth. Admin review (approve/reject) lands in a later block.
+type KYCSubmission struct {
+	OrgID           string     `json:"org_id"`
+	BusinessName    string     `json:"business_name"`
+	TIN             string     `json:"tin"`
+	IDDocumentURL   string     `json:"id_document_url"`
+	SubmittedAt     time.Time  `json:"submitted_at"`
+	ReviewedBy      string     `json:"reviewed_by,omitempty"`
+	ReviewedAt      *time.Time `json:"reviewed_at,omitempty"`
+	RejectionReason string     `json:"rejection_reason,omitempty"`
+}
+
 var (
 	ErrOrgNotFound      = errors.New("organization not found")
 	ErrNotOrgMember     = errors.New("not a member of this organization")
@@ -116,4 +130,5 @@ var (
 	ErrOrgNotEmpty      = errors.New("organization still has apps — delete or move them first")
 	ErrInviteNotFound   = errors.New("no pending invite for this user")
 	ErrCannotRemoveSelf = errors.New("use leave instead of removing yourself")
+	ErrKYCNotSubmitted  = errors.New("no kyc submission for this organization")
 )

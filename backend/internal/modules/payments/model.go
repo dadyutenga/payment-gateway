@@ -43,6 +43,8 @@ type PaymentOrder struct {
 	Status                provider.Status `json:"status"`
 	ProviderStatus        string          `json:"provider_status,omitempty"`
 	Metadata              map[string]any  `json:"metadata,omitempty"`
+	// Environment is live/sandbox (KYC gating + sandbox isolation).
+	Environment           string          `json:"environment,omitempty"`
 	// ExpiresAt is the order TTL deadline (nullable for rows predating the
 	// expiry feature). Pending orders past this time are transitioned to
 	// expired by the background worker; no money moves on expiry.
@@ -117,6 +119,9 @@ type CreatePaymentOrderInput struct {
 	BuyerPhone        string         `json:"buyer_phone"`
 	ExternalReference string         `json:"external_reference"`
 	Metadata          map[string]any `json:"metadata"`
+	// Environment tags the order live/sandbox (KYC gating + isolation).
+	// Empty defaults to live.
+	Environment string `json:"environment,omitempty"`
 }
 
 type CreatePaymentOrderRepositoryInput struct {
@@ -136,6 +141,8 @@ type CreatePaymentOrderRepositoryInput struct {
 	// ExpiresAt is the order TTL deadline. Zero means no expiry (rows
 	// predating the expiry feature).
 	ExpiresAt time.Time
+	// Environment is live/sandbox (KYC gating + sandbox isolation).
+	Environment           string
 }
 
 type PaymentEventInput struct {
@@ -264,6 +271,10 @@ type PaymentStatusHistory struct {
 type CreatePaymentAppInput struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
+	// OrgID owns the app. Required: payment_apps.org_id is NOT NULL, so an
+	// org-less create would die on the constraint — fail fast with a clean
+	// 422 instead.
+	OrgID string `json:"org_id"`
 }
 
 type CreatePaymentAppResult struct {
@@ -652,6 +663,8 @@ var ErrRefundProviderFailed = errors.New("provider refund failed")
 var ErrRefundInvalidAmount = errors.New("refund amount must be positive")
 var ErrRefundNotPending = errors.New("refund is not awaiting confirmation")
 var ErrWebhookAmountMismatch = errors.New("webhook amount or currency does not match the order")
+var ErrLiveTxnCapExceeded = errors.New("order amount exceeds the live per-transaction cap")
+var ErrLiveDailyCapExceeded = errors.New("order would exceed the live daily volume cap")
 
 // Webhook event types delivered to merchant endpoints. Endpoints subscribe
 // via event_types (default: all three for new endpoints).

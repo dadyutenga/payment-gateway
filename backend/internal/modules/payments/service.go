@@ -58,6 +58,10 @@ type Service struct {
 	providerTimeout time.Duration
 	// orderExpiryTTL is stamped as expires_at on every created order.
 	orderExpiryTTL time.Duration
+	// liveMaxTxnAmount / liveDailyVolumeCap bound live orders (per
+	// currency) for verified orgs. Empty disables the check.
+	liveMaxTxnAmount   string
+	liveDailyVolumeCap string
 	http           *http.Client
 	log            *slog.Logger
 	notifier       notify.Writer
@@ -137,7 +141,13 @@ type ServiceOptions struct {
 	// OrderExpiryTTL is the pending-order time-to-live stamped as expires_at
 	// at creation. Zero/negative disables expiry stamping (rows stay NULL).
 	OrderExpiryTTL time.Duration
-	HTTPClient     *http.Client
+	// LiveMaxTxnAmount caps a single live order (in the order's currency).
+	// LiveDailyVolumeCap caps confirmed live volume per app per currency
+	// per UTC day. Empty disables the check; Block 6 adds per-org
+	// overrides on top of these platform defaults.
+	LiveMaxTxnAmount    string
+	LiveDailyVolumeCap  string
+	HTTPClient          *http.Client
 }
 
 func NewService(repo Repository, registry map[string]provider.Constructor, cipher *azcrypto.Cipher, opts ServiceOptions, logger *slog.Logger) *Service {
@@ -171,6 +181,12 @@ func NewService(repo Repository, registry map[string]provider.Constructor, ciphe
 	if opts.OrderExpiryTTL <= 0 {
 		opts.OrderExpiryTTL = 30 * time.Minute
 	}
+	if strings.TrimSpace(opts.LiveMaxTxnAmount) == "" {
+		opts.LiveMaxTxnAmount = "5000000"
+	}
+	if strings.TrimSpace(opts.LiveDailyVolumeCap) == "" {
+		opts.LiveDailyVolumeCap = "50000000"
+	}
 	if opts.AutomatedPayoutsEnabled {
 		logger.Warn("automated payouts are enabled with an unverified payout provider contract — verify SonicPesa disbursement endpoints against your own account first")
 	}
@@ -191,6 +207,8 @@ func NewService(repo Repository, registry map[string]provider.Constructor, ciphe
 		payoutReconciliationStaleAfter: opts.PayoutReconciliationStaleAfter,
 		providerTimeout:                opts.ProviderTimeout,
 		orderExpiryTTL:                 opts.OrderExpiryTTL,
+		liveMaxTxnAmount:               strings.TrimSpace(opts.LiveMaxTxnAmount),
+		liveDailyVolumeCap:             strings.TrimSpace(opts.LiveDailyVolumeCap),
 		http:                           opts.HTTPClient,
 		log:                            logger,
 	}
@@ -334,15 +352,43 @@ func (s *Service) AuthenticateApp(ctx context.Context, rawAPIKey string) (Paymen
 	return app, nil
 }
 
+// AuthenticateAppKey resolves an API key like AuthenticateApp but also
+// returns the key's environment so order creation can tag and gate by it.
+func (s *Service) AuthenticateAppKey(ctx context.Context, rawAPIKey string) (PaymentApp, string, error) {
+	rawAPIKey = strings.TrimSpace(rawAPIKey)
+	if rawAPIKey == "" {
+		return PaymentApp{}, "", ErrPaymentAppUnauthorized
+	}
+
+	app, environment, err := s.repo.GetAPIKeyContext(ctx, hashAPIKey(rawAPIKey))
+	if errors.Is(err, ErrPaymentAppNotFound) {
+		return PaymentApp{}, "", ErrPaymentAppUnauthorized
+	}
+	if err != nil {
+		return PaymentApp{}, "", err
+	}
+	return app, environment, nil
+}
+
 func (s *Service) CreateApp(ctx context.Context, input CreatePaymentAppInput) (CreatePaymentAppResult, validation.Errors, error) {
 	input.Name = strings.TrimSpace(input.Name)
 	input.Description = strings.TrimSpace(input.Description)
+	input.OrgID = strings.TrimSpace(input.OrgID)
 
 	errs := validation.Errors{}
 	validation.Required(input.Name, "Name is required.", errs, "name")
 	validation.MaxRunes(input.Name, 100, "Name must be 100 characters or fewer.", errs, "name")
 	validation.MaxRunes(input.Description, 500, "Description must be 500 characters or fewer.", errs, "description")
+	validation.Required(input.OrgID, "Organization is required.", errs, "org_id")
 	if errs.Any() {
+		return CreatePaymentAppResult{}, errs, nil
+	}
+	exists, err := s.repo.OrganizationExists(ctx, input.OrgID)
+	if err != nil {
+		return CreatePaymentAppResult{}, nil, err
+	}
+	if !exists {
+		errs.Add("org_id", "Unknown organization.")
 		return CreatePaymentAppResult{}, errs, nil
 	}
 
@@ -933,6 +979,7 @@ func (s *Service) CreateOrder(ctx context.Context, app PaymentApp, input CreateP
 		errs.Add("amount", "Amount must be a positive number.")
 	}
 	input.Amount = amount
+	input.Environment = defaultOrderEnvironment(input.Environment)
 
 	p, providerErr := s.resolveProvider(ctx, input.Provider)
 	if providerErr != nil {
@@ -941,6 +988,26 @@ func (s *Service) CreateOrder(ctx context.Context, app PaymentApp, input CreateP
 
 	if errs.Any() {
 		return PaymentOrder{}, errs, nil
+	}
+
+	// Live guardrails for verified orgs (unverified orgs never reach here —
+	// the handler rejects live operations at the KYC gate). Sandbox orders
+	// skip caps entirely. All figures come from the ledger, per currency.
+	if input.Environment == "live" {
+		if over, err := decimalOver(input.Amount, s.liveMaxTxnAmount); err != nil {
+			return PaymentOrder{}, nil, err
+		} else if over {
+			return PaymentOrder{}, nil, ErrLiveTxnCapExceeded
+		}
+		volume, err := s.repo.TodayLiveVolume(ctx, app.ID, input.Currency)
+		if err != nil {
+			return PaymentOrder{}, nil, err
+		}
+		if over, err := decimalSumOver(volume, input.Amount, s.liveDailyVolumeCap); err != nil {
+			return PaymentOrder{}, nil, err
+		} else if over {
+			return PaymentOrder{}, nil, ErrLiveDailyCapExceeded
+		}
 	}
 
 	if input.ExternalReference != "" {
@@ -972,6 +1039,7 @@ func (s *Service) CreateOrder(ctx context.Context, app PaymentApp, input CreateP
 		Status:            provider.StatusPending,
 		Metadata:          copyMetadata(input.Metadata),
 		ExpiresAt:         time.Now().UTC().Add(s.orderExpiryTTL),
+		Environment:       input.Environment,
 	})
 	if err != nil {
 		if isUniqueViolation(err) && input.ExternalReference != "" {
@@ -2388,6 +2456,36 @@ func normalizeAmount(value string) (string, error) {
 	}
 
 	return amount.FloatString(2), nil
+}
+
+// decimalOver reports whether value exceeds a cap ("5000000"). An empty
+// cap disables the check; unparsable input fails closed (treated as over).
+func decimalOver(value, cap string) (bool, error) {
+	cap = strings.TrimSpace(cap)
+	if cap == "" {
+		return false, nil
+	}
+	valueRat, ok1 := new(big.Rat).SetString(strings.TrimSpace(value))
+	capRat, ok2 := new(big.Rat).SetString(cap)
+	if !ok1 || !ok2 {
+		return false, fmt.Errorf("parse cap amounts: value=%q cap=%q", value, cap)
+	}
+	return valueRat.Cmp(capRat) > 0, nil
+}
+
+// decimalSumOver reports whether a+b exceeds a cap. Same fail-closed rules.
+func decimalSumOver(a, b, cap string) (bool, error) {
+	cap = strings.TrimSpace(cap)
+	if cap == "" {
+		return false, nil
+	}
+	aRat, ok1 := new(big.Rat).SetString(strings.TrimSpace(a))
+	bRat, ok2 := new(big.Rat).SetString(strings.TrimSpace(b))
+	capRat, ok3 := new(big.Rat).SetString(cap)
+	if !ok1 || !ok2 || !ok3 {
+		return false, fmt.Errorf("parse cap amounts: a=%q b=%q cap=%q", a, b, cap)
+	}
+	return new(big.Rat).Add(aRat, bRat).Cmp(capRat) > 0, nil
 }
 
 // computePlatformFee is deliberately clamped to [0, gross] and never errors
