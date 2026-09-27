@@ -194,6 +194,8 @@ func New(ctx context.Context) (*App, error) {
 	// ---- Merchant-facing (authenticated, not admin-gated — each handler
 	// checks the caller's own app_id membership) ----
 	mux.Handle("GET /api/v1/merchant/apps", middleware.Chain(http.HandlerFunc(paymentHandler.ListMyApps), middleware.RequireAuth(authVerifier)))
+	mux.Handle("POST /api/v1/merchant/apps", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantCreateApp), middleware.RequireAuth(authVerifier)))
+	mux.Handle("PATCH /api/v1/merchant/apps/{id}", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantUpdateApp), middleware.RequireAuth(authVerifier)))
 	mux.Handle("GET /api/v1/merchant/apps/{id}/balance", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantGetAppBalance), middleware.RequireAuth(authVerifier)))
 	mux.Handle("GET /api/v1/merchant/apps/{id}/ledger", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantListLedgerEntries), middleware.RequireAuth(authVerifier)))
 	mux.Handle("GET /api/v1/merchant/apps/{id}/orders", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantSearchOrders), middleware.RequireAuth(authVerifier)))
@@ -229,6 +231,7 @@ func New(ctx context.Context) (*App, error) {
 		}
 	}), middleware.RequireAuth(authVerifier)))
 	mux.Handle("POST /api/v1/merchant/apps/{id}/api-keys/{keyID}/rotate", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantRotateAPIKey), middleware.RequireAuth(authVerifier)))
+	mux.Handle("PATCH /api/v1/merchant/apps/{id}/api-keys/{keyID}", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantUpdateAPIKeyLabel), middleware.RequireAuth(authVerifier)))
 	mux.Handle("POST /api/v1/merchant/apps/{id}/api-keys/{keyID}/revoke", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantRevokeAPIKey), middleware.RequireAuth(authVerifier)))
 	mux.Handle("GET /api/v1/merchant/apps/{id}/deliveries", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantListDeliveries), middleware.RequireAuth(authVerifier)))
 	mux.Handle("POST /api/v1/merchant/apps/{id}/deliveries/{deliveryID}/replay", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantReplayDelivery), middleware.RequireAuth(authVerifier)))

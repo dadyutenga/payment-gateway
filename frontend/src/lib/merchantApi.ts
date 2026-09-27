@@ -121,6 +121,7 @@ export type MerchantAPIKey = {
   id: string;
   app_id: string;
   prefix: string;
+  label?: string;
   status: "active" | "rotating" | "revoked";
   environment: "live" | "sandbox";
   created_at: string;
@@ -163,6 +164,24 @@ export type MerchantTestSendResult = {
 
 export async function listMyApps() {
   return (await request<MerchantApp[]>("/api/v1/merchant/apps")).data;
+}
+
+export async function createMerchantApp(input: { org_id: string; name: string; description?: string }) {
+  return (
+    await request<{ app: MerchantApp; api_key: string }>("/api/v1/merchant/apps", {
+      method: "POST",
+      body: input,
+    })
+  ).data;
+}
+
+export async function updateMerchantApp(appId: string, input: { name: string; description?: string }) {
+  return (
+    await request<MerchantApp>(`/api/v1/merchant/apps/${appId}`, {
+      method: "PATCH",
+      body: input,
+    })
+  ).data;
 }
 
 // ---------- Webhook endpoints (scoped to the path app) ----------
@@ -211,13 +230,20 @@ export async function listMerchantKeys(appId: string) {
   return (await request<MerchantAPIKey[]>(`/api/v1/merchant/apps/${appId}/api-keys`)).data;
 }
 
-export async function createMerchantKey(appId: string, input?: { environment?: string }) {
+export async function createMerchantKey(appId: string, input?: { environment?: string; label?: string }) {
   return (
     await request<MerchantAPIKeyResult>(`/api/v1/merchant/apps/${appId}/api-keys`, {
       method: "POST",
       body: input ?? {},
     })
   ).data;
+}
+
+export async function updateMerchantKeyLabel(appId: string, keyId: string, label: string) {
+  await request<unknown>(`/api/v1/merchant/apps/${appId}/api-keys/${keyId}`, {
+    method: "PATCH",
+    body: { label },
+  });
 }
 
 export async function rotateMerchantKey(appId: string, keyId: string) {

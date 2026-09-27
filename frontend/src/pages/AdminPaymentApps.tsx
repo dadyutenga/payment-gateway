@@ -38,6 +38,7 @@ import {
   type PaymentApp,
   type UpdateAppFeesInput,
 } from "@/lib/adminApi";
+import { listMyOrgs } from "@/lib/orgApi";
 
 const VIEW_MODE_KEY = "admin-payment-apps-view-mode";
 
@@ -73,6 +74,7 @@ const AdminPaymentApps = () => {
   const [creatingApp, setCreatingApp] = useState(false);
   const [newAppName, setNewAppName] = useState("");
   const [newAppDescription, setNewAppDescription] = useState("");
+  const [newAppOrgId, setNewAppOrgId] = useState("");
   const [revealedAppKey, setRevealedAppKey] = useState<string | null>(null);
 
   const [webhookDialogOpen, setWebhookDialogOpen] = useState(false);
@@ -119,6 +121,13 @@ const AdminPaymentApps = () => {
   const apps = appsQuery.data ?? [];
   const endpoints = endpointsQuery.data ?? [];
   const loading = appsQuery.isLoading;
+
+  const orgsQuery = useQuery({
+    queryKey: ["orgs", "mine"],
+    queryFn: () => listMyOrgs(),
+    staleTime: 60_000,
+  });
+  const adminOrgs = (orgsQuery.data ?? []).filter((o) => o.status === "active");
 
   const balanceQueries = useQueries({
     queries: apps.map((app) => ({
@@ -224,11 +233,12 @@ const AdminPaymentApps = () => {
     event.preventDefault();
     setCreatingApp(true);
     try {
-      const result = await createPaymentApp(newAppName.trim(), newAppDescription.trim());
+      const result = await createPaymentApp(newAppName.trim(), newAppDescription.trim(), newAppOrgId);
       setRevealedAppKey(result.api_key);
       toast.success("Payment app created.");
       setNewAppName("");
       setNewAppDescription("");
+      setNewAppOrgId("");
       reload();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Unable to create payment app.");
@@ -329,6 +339,23 @@ const AdminPaymentApps = () => {
               ) : (
                 <form onSubmit={handleCreateApp} className="space-y-4">
                   <div>
+                    <label className="text-sm font-medium text-slate-700">Organization</label>
+                    <select
+                      className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+                      value={newAppOrgId}
+                      onChange={(e) => setNewAppOrgId(e.target.value)}
+                      required
+                    >
+                      <option value="">Select organization…</option>
+                      {adminOrgs.map((o) => (
+                        <option key={o.id} value={o.id}>{o.name} · {o.kyc_status}</option>
+                      ))}
+                    </select>
+                    {adminOrgs.length === 0 && (
+                      <p className="mt-1 text-xs text-slate-400">Join or create an organization first — apps must belong to one.</p>
+                    )}
+                  </div>
+                  <div>
                     <label className="text-sm font-medium text-slate-700">Name</label>
                     <Input value={newAppName} onChange={(e) => setNewAppName(e.target.value)} required className="mt-1" />
                   </div>
@@ -337,7 +364,7 @@ const AdminPaymentApps = () => {
                     <Input value={newAppDescription} onChange={(e) => setNewAppDescription(e.target.value)} className="mt-1" />
                   </div>
                   <DialogFooter>
-                    <Button type="submit" disabled={creatingApp}>{creatingApp ? "Creating..." : "Create"}</Button>
+                    <Button type="submit" disabled={creatingApp || !newAppOrgId}>{creatingApp ? "Creating..." : "Create"}</Button>
                   </DialogFooter>
                 </form>
               )}

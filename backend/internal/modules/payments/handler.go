@@ -347,6 +347,11 @@ func (h *Handler) CreateApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The first key follows the org's verification: verified orgs get a
+	// live key, everyone else a sandbox one. No path mints a live key for
+	// an unverified org — not even the admin override.
+	input.InitialKeyEnvironment = h.initialKeyEnvironment(r, input.OrgID)
+
 	result, vErrs, err := h.service.CreateApp(r.Context(), input)
 	if err != nil {
 		h.fail(w, http.StatusInternalServerError, "create_failed", "Unable to create payment app.", err)
@@ -358,6 +363,23 @@ func (h *Handler) CreateApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	httputil.JSON(w, http.StatusCreated, map[string]any{"data": result})
+}
+
+// initialKeyEnvironment resolves the env for a newly created app's first
+// key from the org's KYC status. Unknown/unverifiable orgs fail safe to
+// sandbox (service.CreateApp still 422s on unknown org_id).
+func (h *Handler) initialKeyEnvironment(r *http.Request, orgID string) string {
+	if h.orgs == nil {
+		return APIKeyEnvSandbox
+	}
+	status, err := h.orgs.KYCStatusForOrg(r.Context(), orgID)
+	if err != nil {
+		return APIKeyEnvSandbox
+	}
+	if status == "verified" {
+		return APIKeyEnvLive
+	}
+	return APIKeyEnvSandbox
 }
 
 // GenerateAPIKey is admin-only: it issues a new key for an app (revoking
@@ -1233,6 +1255,103 @@ func (h *Handler) ListMyApps(w http.ResponseWriter, r *http.Request) {
 	httputil.JSON(w, http.StatusOK, map[string]any{"data": apps})
 }
 
+type merchantCreateAppInput struct {
+	OrgID       string `json:"org_id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+// MerchantCreateApp creates an app inside one of the caller's orgs.
+// Requires the develop permission (owner/developer); finance/viewer get
+// 403. The first key follows the org's KYC status (verified → live,
+// otherwise sandbox) — the client never chooses.
+func (h *Handler) MerchantCreateApp(w http.ResponseWriter, r *http.Request) {
+	claims, ok := middleware.ClaimsFromContext(r.Context())
+	if !ok {
+		httputil.Error(w, http.StatusUnauthorized, "unauthorized", "Missing authenticated user.", nil)
+		return
+	}
+
+	var in merchantCreateAppInput
+	r.Body = http.MaxBytesReader(w, r.Body, h.maxBodyBytes)
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		httputil.Error(w, http.StatusBadRequest, "invalid_request", "Unable to decode request body.", nil)
+		return
+	}
+	orgID := strings.TrimSpace(in.OrgID)
+	if orgID == "" {
+		httputil.Error(w, http.StatusUnprocessableEntity, "validation_failed", "Please check your payment app input.", map[string]string{"org_id": "Organization is required."})
+		return
+	}
+	if h.orgs == nil {
+		h.log().Error("org service not wired for merchant route", "path", r.URL.Path)
+		httputil.Error(w, http.StatusInternalServerError, "internal_error", "Merchant access is not configured.", nil)
+		return
+	}
+	if _, err := h.orgs.CheckOrgPermission(r.Context(), claims.Subject, orgID, orgs.PermDevelop); err != nil {
+		if errors.Is(err, orgs.ErrNotOrgMember) {
+			httputil.Error(w, http.StatusForbidden, "forbidden", "You don't have access to this organization.", nil)
+			return
+		}
+		if errors.Is(err, orgs.ErrForbidden) {
+			httputil.Error(w, http.StatusForbidden, "forbidden", "Your role doesn't allow creating apps.", nil)
+			return
+		}
+		h.fail(w, http.StatusInternalServerError, "internal_error", "Unable to verify organization access.", err)
+		return
+	}
+
+	result, vErrs, err := h.service.CreateApp(r.Context(), CreatePaymentAppInput{
+		Name:                  in.Name,
+		Description:           in.Description,
+		OrgID:                 orgID,
+		InitialKeyEnvironment: h.initialKeyEnvironment(r, orgID),
+	})
+	if err != nil {
+		h.fail(w, http.StatusInternalServerError, "create_failed", "Unable to create payment app.", err)
+		return
+	}
+	if vErrs.Any() {
+		httputil.Error(w, http.StatusUnprocessableEntity, "validation_failed", "Please check your payment app input.", vErrs)
+		return
+	}
+	httputil.JSON(w, http.StatusCreated, map[string]any{"data": result})
+}
+
+type merchantUpdateAppInput struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+// MerchantUpdateApp renames an app (owner/developer via PermDevelop).
+func (h *Handler) MerchantUpdateApp(w http.ResponseWriter, r *http.Request) {
+	appID := r.PathValue("id")
+	if _, ok := h.requireOrgRole(w, r, appID, orgs.PermDevelop); !ok {
+		return
+	}
+
+	var in merchantUpdateAppInput
+	r.Body = http.MaxBytesReader(w, r.Body, h.maxBodyBytes)
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil && !errors.Is(err, io.EOF) {
+		httputil.Error(w, http.StatusBadRequest, "invalid_request", "Unable to decode request body.", nil)
+		return
+	}
+	app, vErrs, err := h.service.UpdatePaymentApp(r.Context(), appID, in.Name, in.Description)
+	if err != nil {
+		if errors.Is(err, ErrPaymentAppNotFound) {
+			httputil.Error(w, http.StatusNotFound, "not_found", "Payment app not found.", nil)
+			return
+		}
+		h.fail(w, http.StatusInternalServerError, "update_failed", "Unable to update payment app.", err)
+		return
+	}
+	if vErrs.Any() {
+		httputil.Error(w, http.StatusUnprocessableEntity, "validation_failed", "Please check your payment app input.", vErrs)
+		return
+	}
+	httputil.JSON(w, http.StatusOK, map[string]any{"data": app})
+}
+
 func (h *Handler) MerchantGetAppBalance(w http.ResponseWriter, r *http.Request) {
 	appID := r.PathValue("id")
 	if _, ok := h.requireOrgRole(w, r, appID, orgs.PermRead); !ok {
@@ -1541,6 +1660,7 @@ func (h *Handler) MerchantListAPIKeys(w http.ResponseWriter, r *http.Request) {
 
 type merchantCreateAPIKeyInput struct {
 	Environment string `json:"environment"`
+	Label       string `json:"label"`
 }
 
 func (h *Handler) MerchantCreateAPIKey(w http.ResponseWriter, r *http.Request) {
@@ -1563,10 +1683,12 @@ func (h *Handler) MerchantCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := h.service.CreateAppAPIKey(r.Context(), appID, in.Environment)
+	result, err := h.service.CreateAppAPIKey(r.Context(), appID, in.Environment, in.Label)
 	if err != nil {
-		if strings.Contains(err.Error(), "environment must be") {
-			httputil.Error(w, http.StatusUnprocessableEntity, "invalid_environment", "Environment must be live or sandbox.", nil)
+		// Over-long labels surface as plain errors from the service;
+		// everything else is server-side.
+		if strings.Contains(err.Error(), "Label must be") {
+			httputil.Error(w, http.StatusUnprocessableEntity, "validation_failed", err.Error(), nil)
 			return
 		}
 		h.fail(w, http.StatusInternalServerError, "create_failed", "Unable to create API key.", err)
@@ -1587,12 +1709,45 @@ func (h *Handler) MerchantRotateAPIKey(w http.ResponseWriter, r *http.Request) {
 	if !h.requireLiveKYC(w, r, appID, APIKeyEnvLive) {
 		return
 	}
-	result, err := h.service.CreateAppAPIKey(r.Context(), appID, APIKeyEnvLive)
+	result, err := h.service.CreateAppAPIKey(r.Context(), appID, APIKeyEnvLive, "")
 	if err != nil {
 		h.fail(w, http.StatusInternalServerError, "rotate_failed", "Unable to rotate API key.", err)
 		return
 	}
 	httputil.JSON(w, http.StatusCreated, map[string]any{"data": result})
+}
+
+type merchantUpdateAPIKeyInput struct {
+	Label string `json:"label"`
+}
+
+// MerchantUpdateAPIKeyLabel renames a key's display label (developer+).
+func (h *Handler) MerchantUpdateAPIKeyLabel(w http.ResponseWriter, r *http.Request) {
+	appID := r.PathValue("id")
+	if _, ok := h.requireOrgRole(w, r, appID, orgs.PermDevelop); !ok {
+		return
+	}
+
+	var in merchantUpdateAPIKeyInput
+	r.Body = http.MaxBytesReader(w, r.Body, h.maxBodyBytes)
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil && !errors.Is(err, io.EOF) {
+		httputil.Error(w, http.StatusBadRequest, "invalid_request", "Unable to decode request body.", nil)
+		return
+	}
+	vErrs, err := h.service.UpdateAPIKeyLabel(r.Context(), appID, r.PathValue("keyID"), in.Label)
+	if err != nil {
+		if errors.Is(err, ErrPaymentAPIKeyNotFound) {
+			httputil.Error(w, http.StatusNotFound, "not_found", "API key not found.", nil)
+			return
+		}
+		h.fail(w, http.StatusInternalServerError, "update_failed", "Unable to update API key.", err)
+		return
+	}
+	if vErrs.Any() {
+		httputil.Error(w, http.StatusUnprocessableEntity, "validation_failed", "Please check your API key input.", vErrs)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *Handler) MerchantRevokeAPIKey(w http.ResponseWriter, r *http.Request) {

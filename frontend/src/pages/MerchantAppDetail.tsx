@@ -30,7 +30,9 @@ import {
   revokeMerchantKey,
   rotateMerchantKey,
   testMerchantEndpoint,
+  updateMerchantApp,
   updateMerchantEndpoint,
+  updateMerchantKeyLabel,
   MerchantApiError,
   type MerchantAPIKey,
   type MerchantTestSendResult,
@@ -50,7 +52,13 @@ const MerchantAppDetail = () => {
   const queryClient = useQueryClient();
 
   const appsQuery = useQuery({ queryKey: ["merchant", "my-apps"], queryFn: () => listMyApps(), staleTime: 30_000 });
-  const appName = appsQuery.data?.find((a) => a.id === appId)?.name ?? "App";
+  const app = appsQuery.data?.find((a) => a.id === appId);
+  const appName = app?.name ?? "App";
+
+  const [renameDialogOpen, setRenameDialogOpen] = useState(false);
+  const [renameName, setRenameName] = useState("");
+  const [renameDescription, setRenameDescription] = useState("");
+  const [savingRename, setSavingRename] = useState(false);
 
   const endpointsKey = ["merchant", appId, "endpoints"];
   const keysKey = ["merchant", appId, "keys"];
@@ -72,9 +80,13 @@ const MerchantAppDetail = () => {
 
   const [keyDialogOpen, setKeyDialogOpen] = useState(false);
   const [keyEnv, setKeyEnv] = useState("live");
+  const [keyLabel, setKeyLabel] = useState("");
   const [creatingKey, setCreatingKey] = useState(false);
   const [revealedKey, setRevealedKey] = useState<string | null>(null);
   const [actingKeyId, setActingKeyId] = useState<string | null>(null);
+  const [labelKey, setLabelKey] = useState<MerchantAPIKey | null>(null);
+  const [labelValue, setLabelValue] = useState("");
+  const [savingLabel, setSavingLabel] = useState(false);
 
   const [testingEndpointId, setTestingEndpointId] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<MerchantTestSendResult | null>(null);
@@ -149,14 +161,30 @@ const MerchantAppDetail = () => {
     }
   };
 
+  const handleRename = async (event: FormEvent) => {
+    event.preventDefault();
+    setSavingRename(true);
+    try {
+      await updateMerchantApp(appId, { name: renameName.trim(), description: renameDescription.trim() || undefined });
+      toast.success("App renamed.");
+      setRenameDialogOpen(false);
+      queryClient.invalidateQueries({ queryKey: ["merchant", "my-apps"] });
+    } catch (err) {
+      toast.error(errorMessage(err, "Unable to rename app."));
+    } finally {
+      setSavingRename(false);
+    }
+  };
+
   const handleCreateKey = async (event: FormEvent) => {
     event.preventDefault();
     setCreatingKey(true);
     setRevealedKey(null);
     try {
-      const result = await createMerchantKey(appId, { environment: keyEnv });
+      const result = await createMerchantKey(appId, { environment: keyEnv, label: keyLabel.trim() || undefined });
       setRevealedKey(result.api_key);
       toast.success("API key created — copy it now, it is never shown again.");
+      setKeyLabel("");
       reloadAll();
     } catch (err) {
       toast.error(errorMessage(err, "Unable to create API key."));
@@ -181,8 +209,7 @@ const MerchantAppDetail = () => {
     }
   };
 
-  const handleRevokeKey = async (key: MerchantAPIKey) => {
-    if (!window.confirm(`Revoke key ${key.prefix}… immediately? In-flight traffic with it stops.`)) return;
+  const handleRevokeKey = async (key: MerchantAPIKey) => {    if (!window.confirm(`Revoke key ${key.prefix}… immediately? In-flight traffic with it stops.`)) return;
     setActingKeyId(key.id);
     try {
       await revokeMerchantKey(appId, key.id);
@@ -199,8 +226,28 @@ const MerchantAppDetail = () => {
     }
   };
 
-  const handleReplay = async (deliveryId: string) => {
-    setReplayingId(deliveryId);
+  const openLabelDialog = (key: MerchantAPIKey) => {
+    setLabelKey(key);
+    setLabelValue(key.label ?? "");
+  };
+
+  const handleSaveLabel = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!labelKey) return;
+    setSavingLabel(true);
+    try {
+      await updateMerchantKeyLabel(appId, labelKey.id, labelValue.trim());
+      toast.success("Key label updated.");
+      setLabelKey(null);
+      queryClient.invalidateQueries({ queryKey: keysKey });
+    } catch (err) {
+      toast.error(errorMessage(err, "Unable to update label."));
+    } finally {
+      setSavingLabel(false);
+    }
+  };
+
+  const handleReplay = async (deliveryId: string) => {    setReplayingId(deliveryId);
     try {
       await replayMerchantDelivery(appId, deliveryId);
       toast.success("Delivery re-queued.");
@@ -214,9 +261,40 @@ const MerchantAppDetail = () => {
 
   return (
     <div>
-      <div>
-        <h2 className="text-2xl font-bold text-slate-900">{appName}</h2>
-        <p className="mt-1 text-sm text-slate-500">Merchant self-service — everything here applies to this app only.</p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-2xl font-bold text-slate-900">{appName}</h2>
+          <p className="mt-1 text-sm text-slate-500">
+            Merchant self-service — everything here applies to this app only.
+            {app?.description ? ` ${app.description}` : ""}
+          </p>
+        </div>
+        <Dialog open={renameDialogOpen} onOpenChange={(open) => {
+          setRenameDialogOpen(open);
+          if (open && app) { setRenameName(app.name); setRenameDescription(app.description ?? ""); }
+        }}>
+          <DialogTrigger asChild>
+            <Button size="sm" variant="outline">Rename</Button>
+          </DialogTrigger>
+          <DialogContent className="max-h-[85vh] overflow-y-auto">
+            <DialogHeader>
+              <DialogTitle>Rename app</DialogTitle>
+            </DialogHeader>
+            <form onSubmit={handleRename} className="space-y-4">
+              <div>
+                <label className="text-sm font-medium text-slate-700">Name</label>
+                <Input value={renameName} onChange={(e) => setRenameName(e.target.value)} required maxLength={100} className="mt-1" />
+              </div>
+              <div>
+                <label className="text-sm font-medium text-slate-700">Description</label>
+                <Input value={renameDescription} onChange={(e) => setRenameDescription(e.target.value)} maxLength={500} className="mt-1" />
+              </div>
+              <DialogFooter>
+                <Button type="submit" disabled={savingRename}>{savingRename ? "Saving..." : "Save"}</Button>
+              </DialogFooter>
+            </form>
+          </DialogContent>
+        </Dialog>
       </div>
 
       <Tabs defaultValue="webhooks" className="mt-6">
@@ -338,6 +416,11 @@ const MerchantAppDetail = () => {
                         <option value="live">live</option>
                         <option value="sandbox">sandbox</option>
                       </select>
+                      <p className="mt-1 text-xs text-slate-400">Live keys need a verified organization.</p>
+                    </div>
+                    <div>
+                      <label className="text-sm font-medium text-slate-700">Label <span className="font-normal text-slate-400">(optional, max 60 chars)</span></label>
+                      <Input value={keyLabel} onChange={(e) => setKeyLabel(e.target.value)} maxLength={60} placeholder="production server" className="mt-1" />
                     </div>
                     <DialogFooter>
                       <Button type="submit" disabled={creatingKey}>{creatingKey ? "Creating..." : "Create key"}</Button>
@@ -359,6 +442,7 @@ const MerchantAppDetail = () => {
             <TableHeader>
               <TableRow>
                 <TableHead>Prefix</TableHead>
+                <TableHead>Label</TableHead>
                 <TableHead>Env</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead>Expires</TableHead>
@@ -369,11 +453,15 @@ const MerchantAppDetail = () => {
               {keys.map((key) => (
                 <TableRow key={key.id}>
                   <TableCell className="font-mono text-xs">{key.prefix}…</TableCell>
+                  <TableCell className="max-w-40 truncate text-xs text-slate-600">{key.label || "—"}</TableCell>
                   <TableCell><Badge variant="secondary">{key.environment}</Badge></TableCell>
                   <TableCell><Badge variant="secondary">{key.status}</Badge></TableCell>
                   <TableCell className="text-xs text-slate-500">{formatDate(key.expires_at)}</TableCell>
                   <TableCell className="text-right">
                     <div className="flex justify-end gap-1.5">
+                      <Button size="sm" variant="outline" disabled={actingKeyId === key.id} onClick={() => openLabelDialog(key)}>
+                        Label
+                      </Button>
                       {key.status !== "revoked" && (
                         <Button size="sm" variant="outline" disabled={actingKeyId === key.id} onClick={() => handleRotateKey(key)}>
                           <RotateCcw className="h-3.5 w-3.5 mr-1" /> Rotate
@@ -389,10 +477,26 @@ const MerchantAppDetail = () => {
                 </TableRow>
               ))}
               {!keysQuery.isLoading && keys.length === 0 && (
-                <TableRow><TableCell colSpan={5} className="text-center text-slate-500">No API keys yet.</TableCell></TableRow>
+                <TableRow><TableCell colSpan={6} className="text-center text-slate-500">No API keys yet.</TableCell></TableRow>
               )}
             </TableBody>
           </Table>
+          <Dialog open={labelKey !== null} onOpenChange={(open) => { if (!open) setLabelKey(null); }}>
+            <DialogContent className="max-h-[85vh] overflow-y-auto">
+              <DialogHeader>
+                <DialogTitle>Key label — {labelKey?.prefix}…</DialogTitle>
+              </DialogHeader>
+              <form onSubmit={handleSaveLabel} className="space-y-4">
+                <div>
+                  <label className="text-sm font-medium text-slate-700">Label (max 60 chars, empty clears it)</label>
+                  <Input value={labelValue} onChange={(e) => setLabelValue(e.target.value)} maxLength={60} className="mt-1" />
+                </div>
+                <DialogFooter>
+                  <Button type="submit" disabled={savingLabel}>{savingLabel ? "Saving..." : "Save label"}</Button>
+                </DialogFooter>
+              </form>
+            </DialogContent>
+          </Dialog>
         </TabsContent>
 
         <TabsContent value="deliveries">

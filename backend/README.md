@@ -151,6 +151,23 @@ Org endpoints (all session-authenticated): `POST/GET /api/v1/orgs`,
 Finance/owner members additionally get
 `POST /api/v1/merchant/apps/{id}/withdrawals/{withdrawalID}/approve|reject`.
 
+## Merchant apps & API keys (self-service)
+
+Merchants manage their own apps — no admin ticket needed:
+
+- `POST /api/v1/merchant/apps` `{org_id, name, description?}` creates an
+  app inside one of the caller's orgs. Requires the develop permission
+  (owner/developer); finance/viewer get 403, non-members get 403.
+- The app's first key follows the org's KYC status: verified orgs get a
+  **live** key, everyone else a **sandbox** key — the client never
+  chooses, and the same rule applies to admin-created apps, so no path
+  mints a live key for an unverified org by accident.
+- `PATCH /api/v1/merchant/apps/{id}` renames an app (owner/developer).
+- Keys carry an optional display-only **label** (≤60 chars, never secret):
+  set at creation (`POST .../api-keys` `{environment, label?}`) or
+  renamed later (`PATCH .../api-keys/{keyID}` `{label}`). Listed
+  alongside prefix/env/status everywhere keys appear.
+
 ## Adding a payment provider
 
 Providers implement the interface in

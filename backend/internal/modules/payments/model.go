@@ -275,6 +275,11 @@ type CreatePaymentAppInput struct {
 	// org-less create would die on the constraint — fail fast with a clean
 	// 422 instead.
 	OrgID string `json:"org_id"`
+	// InitialKeyEnvironment is the env of the first key issued with the
+	// app. Callers set it from the org's KYC status (verified → live,
+	// otherwise sandbox); empty or anything else normalizes to sandbox so
+	// no path mints a live key by accident.
+	InitialKeyEnvironment string `json:"initial_key_environment"`
 }
 
 type CreatePaymentAppResult struct {
@@ -322,6 +327,9 @@ type APIKey struct {
 	ID          string     `json:"id"`
 	AppID       string     `json:"app_id"`
 	Prefix      string     `json:"prefix"`
+	// Label is a human-readable tag ("production server"). Display-only:
+	// never secret, never used in auth. Empty when unset.
+	Label       string     `json:"label,omitempty"`
 	Status      string     `json:"status"`
 	Environment string     `json:"environment"`
 	CreatedAt   time.Time  `json:"created_at"`

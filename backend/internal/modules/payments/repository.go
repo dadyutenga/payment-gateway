@@ -29,7 +29,8 @@ type Repository interface {
 	GetAPIKeyContext(ctx context.Context, keyHash string) (PaymentApp, string, error)
 	GetPaymentAppByID(ctx context.Context, appID string) (PaymentApp, error)
 	CreatePaymentApp(ctx context.Context, input CreatePaymentAppInput) (PaymentApp, error)
-	CreatePaymentAPIKey(ctx context.Context, appID, keyHash, prefix, environment string) error
+	CreatePaymentAPIKey(ctx context.Context, appID, keyHash, prefix, environment, label string) error
+	UpdateAPIKeyLabel(ctx context.Context, appID, keyID, label string) error
 	RevokePaymentAPIKeys(ctx context.Context, appID string) error
 	ListAppAPIKeys(ctx context.Context, appID string) ([]APIKey, error)
 	RevokeAppAPIKey(ctx context.Context, appID, keyID string) error
@@ -67,6 +68,7 @@ type Repository interface {
 	GetDefaultProviderAccount(ctx context.Context, provider string) (PaymentProviderAccount, error)
 
 	UpdateAppFees(ctx context.Context, appID string, input UpdateAppFeesInput) (PaymentApp, error)
+	UpdatePaymentApp(ctx context.Context, appID, name, description string) (PaymentApp, error)
 	DeletePaymentApp(ctx context.Context, appID string) (PaymentApp, error)
 	GetAppBalance(ctx context.Context, appID string) (AppBalance, error)
 	ListLedgerEntries(ctx context.Context, filter LedgerEntryListFilter) (LedgerEntryListResult, error)
@@ -258,16 +260,34 @@ func (r *PostgresRepository) GetPaymentAppByID(ctx context.Context, appID string
 	return app, nil
 }
 
-func (r *PostgresRepository) CreatePaymentAPIKey(ctx context.Context, appID, keyHash, prefix, environment string) error {
+func (r *PostgresRepository) CreatePaymentAPIKey(ctx context.Context, appID, keyHash, prefix, environment, label string) error {
 	if environment == "" {
 		environment = APIKeyEnvLive
 	}
 	const query = `
-		INSERT INTO app.payment_api_keys (app_id, key_hash, prefix, environment)
-		VALUES ($1::uuid, $2, $3, $4)
+		INSERT INTO app.payment_api_keys (app_id, key_hash, prefix, environment, label)
+		VALUES ($1::uuid, $2, $3, $4, $5)
 	`
-	if _, err := r.db.ExecEx(ctx, query, nil, appID, keyHash, prefix, environment); err != nil {
+	if _, err := r.db.ExecEx(ctx, query, nil, appID, keyHash, prefix, environment, label); err != nil {
 		return fmt.Errorf("create payment api key: %w", err)
+	}
+	return nil
+}
+
+// UpdateAPIKeyLabel renames a key's display label scoped to its app. No
+// row means not-found (wrong id or another app's key — indistinguishable
+// by design).
+func (r *PostgresRepository) UpdateAPIKeyLabel(ctx context.Context, appID, keyID, label string) error {
+	tag, err := r.db.ExecEx(ctx, `
+		UPDATE app.payment_api_keys
+		SET label = $3
+		WHERE id = $1::uuid AND app_id = $2::uuid
+	`, nil, keyID, appID, label)
+	if err != nil {
+		return fmt.Errorf("update payment api key label: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrPaymentAPIKeyNotFound
 	}
 	return nil
 }
@@ -287,14 +307,16 @@ func (r *PostgresRepository) RevokePaymentAPIKeys(ctx context.Context, appID str
 
 func scanAPIKey(row rowScanner) (APIKey, error) {
 	var key APIKey
+	var label sql.NullString
 	var expiresAt sql.NullTime
 	var lastUsedAt sql.NullTime
 	if err := row.Scan(
-		&key.ID, &key.AppID, &key.Prefix, &key.Status, &key.Environment,
+		&key.ID, &key.AppID, &key.Prefix, &label, &key.Status, &key.Environment,
 		&key.CreatedAt, &expiresAt, &lastUsedAt,
 	); err != nil {
 		return APIKey{}, err
 	}
+	key.Label = label.String
 	if expiresAt.Valid {
 		key.ExpiresAt = &expiresAt.Time
 	}
@@ -305,7 +327,7 @@ func scanAPIKey(row rowScanner) (APIKey, error) {
 }
 
 const apiKeySelect = `
-	SELECT id::text, app_id::text, prefix, status, environment,
+	SELECT id::text, app_id::text, prefix, COALESCE(label, ''), status, environment,
 	       created_at, expires_at, last_used_at
 	FROM app.payment_api_keys
 `
@@ -2096,6 +2118,30 @@ func (r *PostgresRepository) UpdateAppFees(ctx context.Context, appID string, in
 	}
 	if err != nil {
 		return PaymentApp{}, fmt.Errorf("update payment app fees: %w", err)
+	}
+	return app, nil
+}
+
+// UpdatePaymentApp renames an app (name + description only — status, fees,
+// and org linkage change through their own dedicated paths).
+func (r *PostgresRepository) UpdatePaymentApp(ctx context.Context, appID, name, description string) (PaymentApp, error) {
+	const query = `
+		UPDATE app.payment_apps
+		SET name = $2, description = NULLIF($3, ''), updated_at = NOW()
+		WHERE id = $1::uuid
+		RETURNING id::text, name, COALESCE(description, ''), status, org_id::text,
+		          fee_type, fee_percent::text, fee_fixed::text, created_at, updated_at
+	`
+	var app PaymentApp
+	err := r.db.QueryRowEx(ctx, query, nil, appID, name, description).Scan(
+		&app.ID, &app.Name, &app.Description, &app.Status, &app.OrgID,
+		&app.FeeType, &app.FeePercent, &app.FeeFixed, &app.CreatedAt, &app.UpdatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PaymentApp{}, ErrPaymentAppNotFound
+	}
+	if err != nil {
+		return PaymentApp{}, fmt.Errorf("update payment app: %w", err)
 	}
 	return app, nil
 }

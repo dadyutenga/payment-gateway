@@ -187,6 +187,12 @@ type fakePaymentRepository struct {
 	createdKeyAppID         string
 	createdKeyPrefix        string
 	createdKeyEnv           string
+	createdKeyLabel         string
+	updatedLabelAppID       string
+	updatedLabelKeyID       string
+	updatedLabel            string
+	updateLabelErr          error
+	updateAppErr            error
 	rotatedKeys             int64
 	rotateKeysErr           error
 	createdDeliveries       int64
@@ -248,11 +254,29 @@ func (r *fakePaymentRepository) OrganizationExists(_ context.Context, orgID stri
 	return orgID != "" && orgID != "org_missing", nil
 }
 
-func (r *fakePaymentRepository) CreatePaymentAPIKey(_ context.Context, appID, _, prefix, environment string) error {
+func (r *fakePaymentRepository) CreatePaymentAPIKey(_ context.Context, appID, _, prefix, environment, label string) error {
 	r.createdKeyAppID = appID
 	r.createdKeyPrefix = prefix
 	r.createdKeyEnv = environment
+	r.createdKeyLabel = label
 	return nil
+}
+
+func (r *fakePaymentRepository) UpdateAPIKeyLabel(_ context.Context, appID, keyID, label string) error {
+	if r.updateLabelErr != nil {
+		return r.updateLabelErr
+	}
+	r.updatedLabelAppID = appID
+	r.updatedLabelKeyID = keyID
+	r.updatedLabel = label
+	return nil
+}
+
+func (r *fakePaymentRepository) UpdatePaymentApp(_ context.Context, appID, name, description string) (PaymentApp, error) {
+	if r.updateAppErr != nil {
+		return PaymentApp{}, r.updateAppErr
+	}
+	return PaymentApp{ID: appID, Name: name, Description: description, Status: "active", OrgID: "org_test"}, nil
 }
 
 func (r *fakePaymentRepository) RevokePaymentAPIKeys(_ context.Context, _ string) error {
@@ -2187,7 +2211,7 @@ func TestCreateAppAPIKeyRotatesWithGrace(t *testing.T) {
 	repo := &fakePaymentRepository{}
 	service := NewService(repo, nil, testCipher, testServiceOptions(), nil)
 
-	result, err := service.CreateAppAPIKey(context.Background(), "app_test", "live")
+	result, err := service.CreateAppAPIKey(context.Background(), "app_test", "live", "")
 	if err != nil {
 		t.Fatalf("expected nil error, got %v", err)
 	}
@@ -2205,12 +2229,17 @@ func TestCreateAppAPIKeyRotatesWithGrace(t *testing.T) {
 	}
 }
 
-func TestCreateAppAPIKeyRejectsBadEnvironment(t *testing.T) {
+func TestCreateAppAPIKeyNormalizesBadEnvironment(t *testing.T) {
 	repo := &fakePaymentRepository{}
 	service := NewService(repo, nil, testCipher, testServiceOptions(), nil)
 
-	if _, err := service.CreateAppAPIKey(context.Background(), "app_test", "prod"); err == nil {
-		t.Fatal("expected environment validation error")
+	// Unknown environments fail safe to sandbox — no path mints a live
+	// key by accident.
+	if _, err := service.CreateAppAPIKey(context.Background(), "app_test", "prod", ""); err != nil {
+		t.Fatalf("expected normalization, got %v", err)
+	}
+	if repo.createdKeyEnv != "sandbox" {
+		t.Fatalf("expected sandbox fallback, got %q", repo.createdKeyEnv)
 	}
 }
 

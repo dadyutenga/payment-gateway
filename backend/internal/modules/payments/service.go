@@ -374,6 +374,7 @@ func (s *Service) CreateApp(ctx context.Context, input CreatePaymentAppInput) (C
 	input.Name = strings.TrimSpace(input.Name)
 	input.Description = strings.TrimSpace(input.Description)
 	input.OrgID = strings.TrimSpace(input.OrgID)
+	input.InitialKeyEnvironment = normalizeAPIKeyEnvironment(input.InitialKeyEnvironment)
 
 	errs := validation.Errors{}
 	validation.Required(input.Name, "Name is required.", errs, "name")
@@ -401,7 +402,7 @@ func (s *Service) CreateApp(ctx context.Context, input CreatePaymentAppInput) (C
 	if err != nil {
 		return CreatePaymentAppResult{}, nil, err
 	}
-	if err := s.repo.CreatePaymentAPIKey(ctx, app.ID, hashAPIKey(rawKey), apiKeyPrefix(rawKey), APIKeyEnvLive); err != nil {
+	if err := s.repo.CreatePaymentAPIKey(ctx, app.ID, hashAPIKey(rawKey), apiKeyPrefix(rawKey), input.InitialKeyEnvironment, ""); err != nil {
 		return CreatePaymentAppResult{}, nil, err
 	}
 
@@ -427,23 +428,39 @@ func apiKeyPrefix(rawKey string) string {
 // of dying instantly. The raw key is returned exactly once and is never
 // stored — only its hash is.
 func (s *Service) GenerateAPIKey(ctx context.Context, appID string) (string, error) {
-	result, err := s.CreateAppAPIKey(ctx, appID, APIKeyEnvLive)
+	result, err := s.CreateAppAPIKey(ctx, appID, APIKeyEnvLive, "")
 	if err != nil {
 		return "", err
 	}
 	return result.APIKey, nil
 }
 
-// CreateAppAPIKey rotates existing usable keys into their grace period and
-// issues a fresh key of the given environment. The raw secret is in the
-// result exactly once.
-func (s *Service) CreateAppAPIKey(ctx context.Context, appID, environment string) (CreateAPIKeyResult, error) {
-	environment = strings.ToLower(strings.TrimSpace(environment))
-	if environment == "" {
-		environment = APIKeyEnvLive
+// normalizeAPIKeyEnvironment maps anything but "live" to sandbox, so no
+// path mints a live key by accident (empty input included).
+func normalizeAPIKeyEnvironment(environment string) string {
+	if strings.ToLower(strings.TrimSpace(environment)) == APIKeyEnvLive {
+		return APIKeyEnvLive
 	}
-	if environment != APIKeyEnvLive && environment != APIKeyEnvSandbox {
-		return CreateAPIKeyResult{}, errors.New("environment must be live or sandbox")
+	return APIKeyEnvSandbox
+}
+
+// normalizeAPIKeyLabel trims a key label; over-long labels are a
+// validation error, never silently truncated.
+func normalizeAPIKeyLabel(label string) (string, validation.Errors) {
+	label = strings.TrimSpace(label)
+	errs := validation.Errors{}
+	validation.MaxRunes(label, 60, "Label must be 60 characters or fewer.", errs, "label")
+	return label, errs
+}
+
+// CreateAppAPIKey rotates existing usable keys into their grace period and
+// issues a fresh key of the given environment with an optional label. The
+// raw secret is in the result exactly once.
+func (s *Service) CreateAppAPIKey(ctx context.Context, appID, environment, label string) (CreateAPIKeyResult, error) {
+	environment = normalizeAPIKeyEnvironment(environment)
+	label, labelErrs := normalizeAPIKeyLabel(label)
+	if labelErrs.Any() {
+		return CreateAPIKeyResult{}, errors.New(labelErrs["label"])
 	}
 	rawKey, err := randomHex(32)
 	if err != nil {
@@ -452,7 +469,7 @@ func (s *Service) CreateAppAPIKey(ctx context.Context, appID, environment string
 	if _, err := s.repo.RotateAppAPIKeys(ctx, appID, apiKeyRotationGrace); err != nil {
 		return CreateAPIKeyResult{}, err
 	}
-	if err := s.repo.CreatePaymentAPIKey(ctx, appID, hashAPIKey(rawKey), apiKeyPrefix(rawKey), environment); err != nil {
+	if err := s.repo.CreatePaymentAPIKey(ctx, appID, hashAPIKey(rawKey), apiKeyPrefix(rawKey), environment, label); err != nil {
 		return CreateAPIKeyResult{}, err
 	}
 	keys, err := s.repo.ListAppAPIKeys(ctx, appID)
@@ -467,9 +484,41 @@ func (s *Service) CreateAppAPIKey(ctx context.Context, appID, environment string
 	return CreateAPIKeyResult{APIKey: rawKey}, nil
 }
 
+// UpdateAPIKeyLabel renames a key's display label scoped to its app.
+func (s *Service) UpdateAPIKeyLabel(ctx context.Context, appID, keyID, label string) (validation.Errors, error) {
+	label, labelErrs := normalizeAPIKeyLabel(label)
+	if labelErrs.Any() {
+		return labelErrs, nil
+	}
+	if err := s.repo.UpdateAPIKeyLabel(ctx, appID, keyID, label); err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+
 // ListAppAPIKeys lists an app's keys (prefixes only, never secrets).
 func (s *Service) ListAppAPIKeys(ctx context.Context, appID string) ([]APIKey, error) {
 	return s.repo.ListAppAPIKeys(ctx, appID)
+}
+
+// UpdatePaymentApp renames an app. Used by both the admin and merchant
+// paths — authorization happens in the handlers.
+func (s *Service) UpdatePaymentApp(ctx context.Context, appID, name, description string) (PaymentApp, validation.Errors, error) {
+	name = strings.TrimSpace(name)
+	description = strings.TrimSpace(description)
+
+	errs := validation.Errors{}
+	validation.Required(name, "Name is required.", errs, "name")
+	validation.MaxRunes(name, 100, "Name must be 100 characters or fewer.", errs, "name")
+	validation.MaxRunes(description, 500, "Description must be 500 characters or fewer.", errs, "description")
+	if errs.Any() {
+		return PaymentApp{}, errs, nil
+	}
+	app, err := s.repo.UpdatePaymentApp(ctx, appID, name, description)
+	if err != nil {
+		return PaymentApp{}, nil, err
+	}
+	return app, nil, nil
 }
 
 // RevokeAppAPIKey kills one key immediately (no grace). Scoped to the app.

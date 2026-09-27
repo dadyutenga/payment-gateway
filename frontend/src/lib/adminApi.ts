@@ -194,10 +194,10 @@ export async function listPaymentApps(limit = 50, offset = 0) {
   return { items: data.items ?? [], total: data.total ?? 0 };
 }
 
-export function createPaymentApp(name: string, description: string) {
+export function createPaymentApp(name: string, description: string, orgId: string) {
   return request<{ app: PaymentApp; api_key: string }>("/api/v1/admin/payments/apps", {
     method: "POST",
-    body: { name, description },
+    body: { name, description, org_id: orgId },
   }).then((r) => r.data);
 }
 

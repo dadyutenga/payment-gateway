@@ -150,7 +150,14 @@ func (s *Service) OrgKYCStatus(ctx context.Context, appID string) (string, error
 	if err != nil {
 		return "", err
 	}
-	org, err := s.repo.GetOrganization(ctx, orgID)
+	return s.KYCStatusForOrg(ctx, orgID)
+}
+
+// KYCStatusForOrg returns an org's KYC status with no actor check — same
+// contract as OrgKYCStatus, for callers holding the org id directly (app
+// creation's initial-key decision). Unknown orgs error.
+func (s *Service) KYCStatusForOrg(ctx context.Context, orgID string) (string, error) {
+	org, err := s.repo.GetOrganization(ctx, strings.TrimSpace(orgID))
 	if err != nil {
 		return "", err
 	}
