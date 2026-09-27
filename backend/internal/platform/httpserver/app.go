@@ -220,6 +220,7 @@ func New(ctx context.Context) (*App, error) {
 	mux.Handle("PATCH /api/v1/merchant/apps/{id}/webhook-endpoints/{endpointID}", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantUpdateWebhookEndpoint), middleware.RequireAuth(authVerifier)))
 	mux.Handle("DELETE /api/v1/merchant/apps/{id}/webhook-endpoints/{endpointID}", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantDeleteWebhookEndpoint), middleware.RequireAuth(authVerifier)))
 	mux.Handle("POST /api/v1/merchant/apps/{id}/webhook-endpoints/{endpointID}/test-send", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantTestWebhookEndpoint), middleware.RequireAuth(authVerifier)))
+	mux.Handle("POST /api/v1/merchant/apps/{id}/webhook-endpoints/{endpointID}/rotate-secret", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantRotateWebhookEndpointSecret), middleware.RequireAuth(authVerifier)))
 	mux.Handle("/api/v1/merchant/apps/{id}/api-keys", middleware.Chain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:

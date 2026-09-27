@@ -293,8 +293,11 @@ type PaymentWebhookEndpoint struct {
 	URL        string    `json:"url"`
 	EventTypes []string  `json:"event_types"`
 	Status     string    `json:"status"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	// SecretVersion is the signing-secret generation. Bumped by rotation;
+	// deliveries always sign with the current version.
+	SecretVersion int       `json:"secret_version"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 type CreatePaymentWebhookEndpointInput struct {
@@ -373,6 +376,13 @@ type CreatePaymentWebhookEndpointResult struct {
 	SigningSecret string                 `json:"signing_secret"`
 }
 
+// RotateEndpointSecretResult carries a rotated endpoint plus its new raw
+// secret — shown exactly once, like creation.
+type RotateEndpointSecretResult struct {
+	Endpoint      PaymentWebhookEndpoint `json:"endpoint"`
+	SigningSecret string                 `json:"signing_secret"`
+}
+
 type ReplayPaymentEventResult struct {
 	CreatedDeliveries  int64 `json:"created_deliveries"`
 	ReplayedDeliveries int64 `json:"replayed_deliveries"`
@@ -384,6 +394,9 @@ type PaymentWebhookDeliveryJob struct {
 	EventID               string
 	EndpointID            string
 	EndpointURL           string
+	// EndpointSecretVersion is joined at claim time so the send signs with
+	// the version current when the attempt runs (rotation-safe).
+	EndpointSecretVersion int
 	AppID                 string
 	AttemptCount          int
 	EventType             string

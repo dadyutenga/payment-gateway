@@ -179,6 +179,7 @@ type fakePaymentRepository struct {
 	endpointInput           CreatePaymentWebhookEndpointRepositoryInput
 	endpoint                PaymentWebhookEndpoint
 	webhookEndpointErr      error
+	rotateSecretErr         error
 	updatedEndpointInput    UpdateWebhookEndpointInput
 	deliveryAppID           string
 	deliveryAppErr          error
@@ -309,7 +310,7 @@ func (r *fakePaymentRepository) GetWebhookEndpoint(_ context.Context, appID, end
 	if r.endpoint.ID != "" {
 		return r.endpoint, nil
 	}
-	return PaymentWebhookEndpoint{ID: endpointID, AppID: appID, URL: "https://example.com/hook", Status: "active"}, nil
+	return PaymentWebhookEndpoint{ID: endpointID, AppID: appID, URL: "https://example.com/hook", Status: "active", SecretVersion: 1}, nil
 }
 
 func (r *fakePaymentRepository) UpdateWebhookEndpoint(_ context.Context, _, _ string, input UpdateWebhookEndpointInput) (PaymentWebhookEndpoint, error) {
@@ -322,6 +323,20 @@ func (r *fakePaymentRepository) UpdateWebhookEndpoint(_ context.Context, _, _ st
 
 func (r *fakePaymentRepository) DeleteWebhookEndpoint(_ context.Context, _, _ string) error {
 	return r.webhookEndpointErr
+}
+
+func (r *fakePaymentRepository) RotateWebhookEndpointSecret(_ context.Context, appID, endpointID string, expectedVersion int, _ string) (PaymentWebhookEndpoint, error) {
+	if r.rotateSecretErr != nil {
+		return PaymentWebhookEndpoint{}, r.rotateSecretErr
+	}
+	if r.endpoint.ID != "" {
+		if r.endpoint.SecretVersion != expectedVersion {
+			return PaymentWebhookEndpoint{}, ErrSecretVersionConflict
+		}
+		r.endpoint.SecretVersion++
+		return r.endpoint, nil
+	}
+	return PaymentWebhookEndpoint{ID: endpointID, AppID: appID, URL: "https://example.com/hook", Status: "active", SecretVersion: expectedVersion + 1}, nil
 }
 
 func (r *fakePaymentRepository) GetWebhookDeliveryApp(_ context.Context, _ string) (string, error) {

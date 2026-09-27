@@ -168,6 +168,26 @@ Merchants manage their own apps — no admin ticket needed:
   renamed later (`PATCH .../api-keys/{keyID}` `{label}`). Listed
   alongside prefix/env/status everywhere keys appear.
 
+## Webhook signing-secret rotation
+
+Endpoint signing secrets are derived per endpoint
+(`HMAC(delivery_secret, "azsubay-payment-webhook:" + endpoint_id)` for
+version 1 — byte-identical to before, so already-stored secrets keep
+verifying). If a secret leaks, rotate it:
+
+- `POST /api/v1/merchant/apps/{id}/webhook-endpoints/{endpointID}/rotate-secret`
+  (owner/developer) bumps `secret_version` atomically and returns the new
+  raw secret **exactly once**, plus the endpoint (now `secret_version` N+1).
+- Versions ≥ 2 mix `:vN` into the derivation domain, so every rotation
+  actually changes the key. The old secret stops verifying immediately —
+  update the receiver first (or accept a short gap).
+- Deliveries always sign with the version joined at claim time, so
+  rotation takes effect on the next attempt; test-sends use the current
+  version too. Concurrent rotations of one endpoint get `409
+  rotation_conflict` (retry); unknown endpoints 404.
+- The frontend webhooks tab shows `vN` per endpoint with a Rotate-secret
+  button and a copy-once reveal.
+
 ## Adding a payment provider
 
 Providers implement the interface in

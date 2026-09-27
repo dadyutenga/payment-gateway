@@ -108,6 +108,7 @@ export type MerchantWebhookEndpoint = {
   url: string;
   event_types: string[];
   status: string;
+  secret_version: number;
   created_at: string;
   updated_at: string;
 };
@@ -219,6 +220,14 @@ export async function deleteMerchantEndpoint(appId: string, endpointId: string) 
 export async function testMerchantEndpoint(appId: string, endpointId: string) {
   return (
     await request<MerchantTestSendResult>(`/api/v1/merchant/apps/${appId}/webhook-endpoints/${endpointId}/test-send`, {
+      method: "POST",
+    })
+  ).data;
+}
+
+export async function rotateMerchantEndpointSecret(appId: string, endpointId: string) {
+  return (
+    await request<MerchantWebhookEndpointResult>(`/api/v1/merchant/apps/${appId}/webhook-endpoints/${endpointId}/rotate-secret`, {
       method: "POST",
     })
   ).data;

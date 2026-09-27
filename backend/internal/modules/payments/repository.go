@@ -21,6 +21,7 @@ var ErrPaymentAppNotFound = errors.New("payment app not found")
 var ErrPaymentAPIKeyNotFound = errors.New("payment api key not found")
 var ErrPaymentEventNotFound = errors.New("payment event not found")
 var ErrPaymentWebhookEndpointNotFound = errors.New("payment webhook endpoint not found")
+var ErrSecretVersionConflict = errors.New("endpoint secret was rotated concurrently")
 var ErrPaymentWebhookDeliveryNotFound = errors.New("payment webhook delivery not found")
 var ErrPaymentProviderAccountNotFound = errors.New("payment provider account not found")
 
@@ -49,6 +50,12 @@ type Repository interface {
 	ApplyWebhookEvent(ctx context.Context, input ApplyWebhookEventInput) (PaymentOrder, error)
 	MarkEventProcessed(ctx context.Context, eventID, paymentOrderID, processingError string) error
 	CreatePaymentWebhookEndpoint(ctx context.Context, input CreatePaymentWebhookEndpointRepositoryInput) (PaymentWebhookEndpoint, error)
+	// RotateWebhookEndpointSecret compare-and-swaps the secret version
+	// (expectedVersion must match) and stores the new hash. A version
+	// mismatch means a concurrent rotation won — the caller retries.
+	// Missing endpoints surface as ErrPaymentWebhookEndpointNotFound,
+	// lost races as ErrSecretVersionConflict.
+	RotateWebhookEndpointSecret(ctx context.Context, appID, endpointID string, expectedVersion int, newSecretHash string) (PaymentWebhookEndpoint, error)
 	ListWebhookEndpoints(ctx context.Context, appID string) ([]PaymentWebhookEndpoint, error)
 	CreateWebhookDeliveriesForEvent(ctx context.Context, eventID, eventType string) (int64, error)
 	ReplayFailedWebhookDeliveriesForEvent(ctx context.Context, eventID string) (int64, error)
@@ -893,7 +900,7 @@ func (r *PostgresRepository) CreatePaymentWebhookEndpoint(ctx context.Context, i
 	const query = `
 		INSERT INTO app.payment_webhook_endpoints (id, app_id, url, event_types, secret_hash)
 		VALUES ($1::uuid,$2::uuid,$3,$4,$5)
-		RETURNING id::text, app_id::text, url, event_types, status, created_at, updated_at
+		RETURNING id::text, app_id::text, url, event_types, status, secret_version, created_at, updated_at
 	`
 
 	var endpoint PaymentWebhookEndpoint
@@ -903,6 +910,7 @@ func (r *PostgresRepository) CreatePaymentWebhookEndpoint(ctx context.Context, i
 		&endpoint.URL,
 		&endpoint.EventTypes,
 		&endpoint.Status,
+		&endpoint.SecretVersion,
 		&endpoint.CreatedAt,
 		&endpoint.UpdatedAt,
 	)
@@ -913,7 +921,7 @@ func (r *PostgresRepository) CreatePaymentWebhookEndpoint(ctx context.Context, i
 }
 
 const webhookEndpointSelect = `
-	SELECT id::text, app_id::text, url, event_types, status, created_at, updated_at
+	SELECT id::text, app_id::text, url, event_types, status, secret_version, created_at, updated_at
 	FROM app.payment_webhook_endpoints
 `
 
@@ -921,9 +929,35 @@ func scanWebhookEndpoint(row rowScanner) (PaymentWebhookEndpoint, error) {
 	var endpoint PaymentWebhookEndpoint
 	if err := row.Scan(
 		&endpoint.ID, &endpoint.AppID, &endpoint.URL, &endpoint.EventTypes,
-		&endpoint.Status, &endpoint.CreatedAt, &endpoint.UpdatedAt,
+		&endpoint.Status, &endpoint.SecretVersion, &endpoint.CreatedAt, &endpoint.UpdatedAt,
 	); err != nil {
 		return PaymentWebhookEndpoint{}, err
+	}
+	return endpoint, nil
+}
+
+// RotateWebhookEndpointSecret atomically bumps an endpoint's secret
+// version (scoped to its app) and refreshes the stored hash. The raw new
+// secret is derived by the caller from the returned version — the DB only
+// ever sees the hash.
+func (r *PostgresRepository) RotateWebhookEndpointSecret(ctx context.Context, appID, endpointID string, expectedVersion int, newSecretHash string) (PaymentWebhookEndpoint, error) {
+	const query = `
+		UPDATE app.payment_webhook_endpoints
+		SET secret_version = secret_version + 1, secret_hash = $4, updated_at = NOW()
+		WHERE id = $1::uuid AND app_id = $2::uuid AND secret_version = $3
+		RETURNING id::text, app_id::text, url, event_types, status, secret_version, created_at, updated_at
+	`
+	endpoint, err := scanWebhookEndpoint(r.db.QueryRowEx(ctx, query, nil, endpointID, appID, expectedVersion, newSecretHash))
+	if errors.Is(err, pgx.ErrNoRows) {
+		// Distinguish "no such endpoint" from "lost a concurrent race"
+		// so callers map each to the right status code.
+		if _, getErr := r.GetWebhookEndpoint(ctx, appID, endpointID); getErr != nil {
+			return PaymentWebhookEndpoint{}, ErrPaymentWebhookEndpointNotFound
+		}
+		return PaymentWebhookEndpoint{}, ErrSecretVersionConflict
+	}
+	if err != nil {
+		return PaymentWebhookEndpoint{}, fmt.Errorf("rotate payment webhook endpoint secret: %w", err)
 	}
 	return endpoint, nil
 }
@@ -961,7 +995,7 @@ func (r *PostgresRepository) UpdateWebhookEndpoint(ctx context.Context, appID, e
 	args = append(args, endpointID, appID)
 	query := `UPDATE app.payment_webhook_endpoints SET ` + strings.Join(sets, ", ") +
 		fmt.Sprintf(` WHERE id = $%d::uuid AND app_id = $%d::uuid
-		RETURNING id::text, app_id::text, url, event_types, status, created_at, updated_at`, len(args)-1, len(args))
+		RETURNING id::text, app_id::text, url, event_types, status, secret_version, created_at, updated_at`, len(args)-1, len(args))
 	endpoint, err := scanWebhookEndpoint(r.db.QueryRowEx(ctx, query, nil, args...))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return PaymentWebhookEndpoint{}, ErrPaymentWebhookEndpointNotFound
@@ -1012,7 +1046,7 @@ func (r *PostgresRepository) ListWebhookEndpoints(ctx context.Context, appID str
 	}
 
 	query := fmt.Sprintf(`
-		SELECT id::text, app_id::text, url, event_types, status, created_at, updated_at
+		SELECT id::text, app_id::text, url, event_types, status, secret_version, created_at, updated_at
 		FROM app.payment_webhook_endpoints
 		WHERE %s
 		ORDER BY created_at DESC
@@ -1029,7 +1063,7 @@ func (r *PostgresRepository) ListWebhookEndpoints(ctx context.Context, appID str
 		var endpoint PaymentWebhookEndpoint
 		if err := rows.Scan(
 			&endpoint.ID, &endpoint.AppID, &endpoint.URL, &endpoint.EventTypes,
-			&endpoint.Status, &endpoint.CreatedAt, &endpoint.UpdatedAt,
+			&endpoint.Status, &endpoint.SecretVersion, &endpoint.CreatedAt, &endpoint.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan payment webhook endpoint: %w", err)
 		}
@@ -1115,6 +1149,7 @@ func (r *PostgresRepository) ClaimDueWebhookDeliveries(ctx context.Context, limi
 			c.endpoint_id::text,
 			c.attempt_count,
 			ep.url,
+			ep.secret_version,
 			ep.app_id::text,
 			COALESCE(e.event_type, 'payment.updated'),
 			e.provider,
@@ -1884,6 +1919,7 @@ func scanPaymentWebhookDeliveryJob(row rowScanner) (PaymentWebhookDeliveryJob, e
 		&job.EndpointID,
 		&job.AttemptCount,
 		&job.EndpointURL,
+		&job.EndpointSecretVersion,
 		&job.AppID,
 		&job.EventType,
 		&job.Provider,

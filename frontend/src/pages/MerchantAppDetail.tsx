@@ -1,7 +1,7 @@
 import { FormEvent, useState } from "react";
 import { useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Globe, KeyRound, RotateCcw, Send, Trash2, Ban, Truck } from "lucide-react";
+import { Globe, KeyRound, RotateCcw, Send, Trash2, Ban, Truck, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -28,6 +28,7 @@ import {
   listMyApps,
   replayMerchantDelivery,
   revokeMerchantKey,
+  rotateMerchantEndpointSecret,
   rotateMerchantKey,
   testMerchantEndpoint,
   updateMerchantApp,
@@ -90,6 +91,8 @@ const MerchantAppDetail = () => {
 
   const [testingEndpointId, setTestingEndpointId] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<MerchantTestSendResult | null>(null);
+  const [rotatingSecretId, setRotatingSecretId] = useState<string | null>(null);
+  const [revealedEndpointSecret, setRevealedEndpointSecret] = useState<string | null>(null);
   const [replayingId, setReplayingId] = useState<string | null>(null);
   const [togglingId, setTogglingId] = useState<string | null>(null);
 
@@ -247,6 +250,22 @@ const MerchantAppDetail = () => {
     }
   };
 
+  const handleRotateEndpointSecret = async (endpoint: MerchantWebhookEndpoint) => {
+    if (!window.confirm(`Rotate the signing secret for ${endpoint.url}? The old secret stops verifying immediately — update your receiver first.`)) return;
+    setRotatingSecretId(endpoint.id);
+    setRevealedEndpointSecret(null);
+    try {
+      const result = await rotateMerchantEndpointSecret(appId, endpoint.id);
+      setRevealedEndpointSecret(result.signing_secret);
+      toast.success(`Signing secret rotated (now v${result.endpoint.secret_version}) — copy it now.`);
+      queryClient.invalidateQueries({ queryKey: endpointsKey });
+    } catch (err) {
+      toast.error(errorMessage(err, "Unable to rotate signing secret."));
+    } finally {
+      setRotatingSecretId(null);
+    }
+  };
+
   const handleReplay = async (deliveryId: string) => {    setReplayingId(deliveryId);
     try {
       await replayMerchantDelivery(appId, deliveryId);
@@ -349,12 +368,22 @@ const MerchantAppDetail = () => {
               </CardContent>
             </Card>
           )}
+          {revealedEndpointSecret && (
+            <Card className="mb-3">
+              <CardContent className="p-4">
+                <p className="text-sm font-medium text-slate-700">New signing secret (copy now — shown once, old secret already invalid):</p>
+                <code className="mt-1 block break-all rounded-md bg-slate-100 p-3 font-mono text-xs">{revealedEndpointSecret}</code>
+                <Button size="sm" variant="outline" className="mt-2" onClick={() => setRevealedEndpointSecret(null)}>Dismiss</Button>
+              </CardContent>
+            </Card>
+          )}
           <Table>
             <TableHeader>
               <TableRow>
                 <TableHead>URL</TableHead>
                 <TableHead>Events</TableHead>
                 <TableHead>Status</TableHead>
+                <TableHead>Secret</TableHead>
                 <TableHead className="text-right">Actions</TableHead>
               </TableRow>
             </TableHeader>
@@ -364,10 +393,14 @@ const MerchantAppDetail = () => {
                   <TableCell className="max-w-xs truncate font-mono text-xs">{endpoint.url}</TableCell>
                   <TableCell className="text-xs text-slate-500">{endpoint.event_types.join(", ")}</TableCell>
                   <TableCell><Badge variant="secondary">{endpoint.status}</Badge></TableCell>
+                  <TableCell className="text-xs text-slate-500">v{endpoint.secret_version ?? 1}</TableCell>
                   <TableCell className="text-right">
                     <div className="flex justify-end gap-1.5">
                       <Button size="sm" variant="outline" disabled={testingEndpointId === endpoint.id} onClick={() => handleTestEndpoint(endpoint)}>
                         <Send className="h-3.5 w-3.5 mr-1" /> {testingEndpointId === endpoint.id ? "Testing..." : "Test"}
+                      </Button>
+                      <Button size="sm" variant="outline" disabled={rotatingSecretId === endpoint.id} onClick={() => handleRotateEndpointSecret(endpoint)}>
+                        <RefreshCw className="h-3.5 w-3.5 mr-1" /> {rotatingSecretId === endpoint.id ? "Rotating..." : "Rotate secret"}
                       </Button>
                       <Button size="sm" variant="outline" disabled={togglingId === endpoint.id} onClick={() => handleToggleEndpoint(endpoint)}>
                         {endpoint.status === "active" ? "Disable" : "Enable"}
@@ -380,7 +413,7 @@ const MerchantAppDetail = () => {
                 </TableRow>
               ))}
               {!endpointsQuery.isLoading && endpoints.length === 0 && (
-                <TableRow><TableCell colSpan={4} className="text-center text-slate-500">No webhook endpoints yet.</TableCell></TableRow>
+                <TableRow><TableCell colSpan={5} className="text-center text-slate-500">No webhook endpoints yet.</TableCell></TableRow>
               )}
             </TableBody>
           </Table>

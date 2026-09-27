@@ -1644,6 +1644,31 @@ func (h *Handler) MerchantTestWebhookEndpoint(w http.ResponseWriter, r *http.Req
 	httputil.JSON(w, http.StatusOK, map[string]any{"data": result})
 }
 
+// MerchantRotateWebhookEndpointSecret rotates an endpoint's signing
+// secret (developer+). The new raw secret is in this response exactly
+// once — the old one stops verifying immediately, so update the
+// receiver before rotating (or right after, accepting a short gap).
+func (h *Handler) MerchantRotateWebhookEndpointSecret(w http.ResponseWriter, r *http.Request) {
+	appID := r.PathValue("id")
+	if _, ok := h.requireOrgRole(w, r, appID, orgs.PermDevelop); !ok {
+		return
+	}
+
+	result, err := h.service.RotateWebhookEndpointSecret(r.Context(), appID, r.PathValue("endpointID"))
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrPaymentWebhookEndpointNotFound):
+			httputil.Error(w, http.StatusNotFound, "not_found", "Webhook endpoint not found.", nil)
+		case errors.Is(err, ErrSecretVersionConflict):
+			httputil.Error(w, http.StatusConflict, "rotation_conflict", "The secret was just rotated — please retry.", nil)
+		default:
+			h.fail(w, http.StatusInternalServerError, "rotate_failed", "Unable to rotate signing secret.", err)
+		}
+		return
+	}
+	httputil.JSON(w, http.StatusOK, map[string]any{"data": result})
+}
+
 func (h *Handler) MerchantListAPIKeys(w http.ResponseWriter, r *http.Request) {
 	appID := r.PathValue("id")
 	if _, ok := h.requireOrgRole(w, r, appID, orgs.PermRead); !ok {

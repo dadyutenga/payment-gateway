@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1449,7 +1450,7 @@ func (s *Service) CreateWebhookEndpoint(ctx context.Context, input CreatePayment
 	}
 
 	endpointID := uuid.NewString()
-	signingSecret := s.endpointSigningSecret(endpointID)
+	signingSecret := s.endpointSigningSecret(endpointID, 1)
 	endpoint, err := s.repo.CreatePaymentWebhookEndpoint(ctx, CreatePaymentWebhookEndpointRepositoryInput{
 		ID:         endpointID,
 		AppID:      input.AppID,
@@ -1509,6 +1510,28 @@ func (s *Service) DeleteWebhookEndpoint(ctx context.Context, appID, endpointID s
 	return s.repo.DeleteWebhookEndpoint(ctx, appID, endpointID)
 }
 
+// RotateWebhookEndpointSecret bumps an endpoint's secret version and
+// returns the new raw secret exactly once. The old secret stops verifying
+// immediately — in-flight deliveries already signed keep their signature,
+// but every new attempt signs with the new version. Concurrent rotations
+// of the same endpoint surface as ErrSecretVersionConflict (retry).
+func (s *Service) RotateWebhookEndpointSecret(ctx context.Context, appID, endpointID string) (RotateEndpointSecretResult, error) {
+	current, err := s.repo.GetWebhookEndpoint(ctx, appID, endpointID)
+	if err != nil {
+		return RotateEndpointSecretResult{}, err
+	}
+	newVersion := current.SecretVersion + 1
+	if newVersion <= 1 {
+		newVersion = 2
+	}
+	secret := s.endpointSigningSecret(strings.TrimSpace(endpointID), newVersion)
+	rotated, err := s.repo.RotateWebhookEndpointSecret(ctx, appID, endpointID, current.SecretVersion, hashAPIKey(secret))
+	if err != nil {
+		return RotateEndpointSecretResult{}, err
+	}
+	return RotateEndpointSecretResult{Endpoint: rotated, SigningSecret: secret}, nil
+}
+
 // TestWebhookEndpoint POSTs a signed webhook.test probe to the endpoint URL
 // and reports the outcome. Nothing is stored and no ledger moves — it only
 // proves reachability plus signature verification on the merchant side.
@@ -1526,7 +1549,7 @@ func (s *Service) TestWebhookEndpoint(ctx context.Context, appID, endpointID str
 		"occurred_at": time.Now().UTC(),
 	})
 	timestamp := time.Now().UTC().Format(time.RFC3339)
-	signature := signDeliveryPayload(s.endpointSigningSecret(endpoint.ID), timestamp, body)
+	signature := signDeliveryPayload(s.endpointSigningSecret(endpoint.ID, endpoint.SecretVersion), timestamp, body)
 
 	client := s.http
 	if client == nil {
@@ -2243,7 +2266,14 @@ func (s *Service) deliverWebhook(ctx context.Context, job PaymentWebhookDelivery
 	}
 
 	timestamp := time.Now().UTC().Format(time.RFC3339)
-	signature := signDeliveryPayload(s.endpointSigningSecret(job.EndpointID), timestamp, body)
+	// The version rides the claimed job, so a rotation between claim and
+	// send still signs with the version current at claim time. Versions
+	// <= 0 only occur in unit fakes — normalize to the legacy v1.
+	version := job.EndpointSecretVersion
+	if version <= 0 {
+		version = 1
+	}
+	signature := signDeliveryPayload(s.endpointSigningSecret(job.EndpointID, version), timestamp, body)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, job.EndpointURL, bytes.NewReader(body))
 	if err != nil {
@@ -2303,10 +2333,17 @@ func buildWebhookDeliveryPayload(job PaymentWebhookDeliveryJob) WebhookDeliveryP
 	}
 }
 
-func (s *Service) endpointSigningSecret(endpointID string) string {
+func (s *Service) endpointSigningSecret(endpointID string, version int) string {
 	mac := hmac.New(sha256.New, []byte(s.deliverySigningSecret))
 	_, _ = mac.Write([]byte("azsubay-payment-webhook:"))
 	_, _ = mac.Write([]byte(endpointID))
+	// Version 1 keeps the original derivation byte-for-byte so secrets
+	// merchants already stored keep verifying. Versions >= 2 mix the
+	// version into a separate domain — rotation actually changes the key.
+	if version > 1 {
+		_, _ = mac.Write([]byte(":v"))
+		_, _ = mac.Write([]byte(strconv.Itoa(version)))
+	}
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
