@@ -10,6 +10,7 @@ import AdminPaymentApps from "@/pages/AdminPaymentApps";
 import AdminPaymentAppDetail from "@/pages/AdminPaymentAppDetail";
 import AdminPaymentWithdrawals from "@/pages/AdminPaymentWithdrawals";
 import AdminPaymentProviders from "@/pages/AdminPaymentProviders";
+import AdminKYCReview from "@/pages/AdminKYCReview";
 import MerchantApps from "@/pages/MerchantApps";
 import MerchantAppDetail from "@/pages/MerchantAppDetail";
 import CreateOrg from "@/pages/CreateOrg";
@@ -41,6 +42,7 @@ const App = () => (
             <Route path="payments/apps/:id" element={<AdminPaymentAppDetail />} />
               <Route path="payments/withdrawals" element={<AdminPaymentWithdrawals />} />
             <Route path="payments/providers" element={<AdminPaymentProviders />} />
+            <Route path="kyc" element={<AdminKYCReview />} />
           </Route>
           <Route
             path="/merchant"

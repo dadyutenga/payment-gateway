@@ -81,8 +81,12 @@ type Organization struct {
 	KYCStatus    string    `json:"kyc_status"`
 	BusinessName string    `json:"business_name,omitempty"`
 	TIN          string    `json:"tin,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	// LiveMaxTxnAmount / LiveDailyVolumeCap are per-org live guardrail
+	// overrides (positive decimals). Empty means platform default.
+	LiveMaxTxnAmount   string    `json:"live_max_txn_amount,omitempty"`
+	LiveDailyVolumeCap string    `json:"live_daily_volume_cap,omitempty"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
 }
 
 // OrganizationWithRole pairs an org with the caller's role in it — what
@@ -128,7 +132,23 @@ var (
 	ErrUserNotFound     = errors.New("no account found for that email")
 	ErrLastOwner        = errors.New("organization must keep at least one owner")
 	ErrOrgNotEmpty      = errors.New("organization still has apps — delete or move them first")
-	ErrInviteNotFound   = errors.New("no pending invite for this user")
-	ErrCannotRemoveSelf = errors.New("use leave instead of removing yourself")
-	ErrKYCNotSubmitted  = errors.New("no kyc submission for this organization")
+	ErrInviteNotFound       = errors.New("no pending invite for this user")
+	ErrCannotRemoveSelf     = errors.New("use leave instead of removing yourself")
+	ErrKYCNotSubmitted      = errors.New("no kyc submission for this organization")
+	ErrKYCNotInReview       = errors.New("organization has no submission awaiting review")
+	ErrKYCQueueStatusUnknown = errors.New("unknown kyc queue status")
 )
+
+// KYCQueueItem is one row of the admin review queue: the org plus its
+// current submission evidence.
+type KYCQueueItem struct {
+	OrgID           string    `json:"org_id"`
+	OrgName         string    `json:"org_name"`
+	Slug            string    `json:"slug"`
+	KYCStatus       string    `json:"kyc_status"`
+	BusinessName    string    `json:"business_name"`
+	TIN             string    `json:"tin"`
+	HasDocument     bool      `json:"has_document"`
+	SubmittedAt     time.Time `json:"submitted_at"`
+	RejectionReason string    `json:"rejection_reason,omitempty"`
+}

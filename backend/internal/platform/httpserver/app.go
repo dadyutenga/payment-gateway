@@ -261,6 +261,13 @@ func New(ctx context.Context) (*App, error) {
 	mux.Handle("POST /api/v1/orgs/{orgID}/kyc/document", middleware.Chain(http.HandlerFunc(orgHandler.UploadKYCDocument), middleware.RequireAuth(authVerifier)))
 	mux.Handle("GET /api/v1/orgs/{orgID}/kyc/document", middleware.Chain(http.HandlerFunc(orgHandler.ServeKYCDocument), middleware.RequireAuth(authVerifier)))
 
+	// ---- Admin: KYC review queue, decisions, per-org live limits ----
+	mux.Handle("GET /api/v1/admin/orgs/kyc-queue", middleware.Chain(http.HandlerFunc(orgHandler.ListKYCQueue), middleware.RequireAuth(authVerifier), middleware.RequireAdmin(adminCheck)))
+	mux.Handle("POST /api/v1/admin/orgs/{orgID}/kyc/approve", middleware.Chain(http.HandlerFunc(orgHandler.ApproveKYC), middleware.RequireAuth(authVerifier), middleware.RequireAdmin(adminCheck)))
+	mux.Handle("POST /api/v1/admin/orgs/{orgID}/kyc/reject", middleware.Chain(http.HandlerFunc(orgHandler.RejectKYC), middleware.RequireAuth(authVerifier), middleware.RequireAdmin(adminCheck)))
+	mux.Handle("GET /api/v1/admin/orgs/{orgID}/kyc/document", middleware.Chain(http.HandlerFunc(orgHandler.AdminServeKYCDocument), middleware.RequireAuth(authVerifier), middleware.RequireAdmin(adminCheck)))
+	mux.Handle("PATCH /api/v1/admin/orgs/{orgID}/limits", middleware.Chain(http.HandlerFunc(orgHandler.UpdateOrgLiveLimits), middleware.RequireAuth(authVerifier), middleware.RequireAdmin(adminCheck)))
+
 	// ---- Admin: withdrawals ----
 	mux.Handle("/api/v1/admin/payments/withdrawals", middleware.Chain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {

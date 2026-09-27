@@ -35,6 +35,16 @@ type Repository interface {
 	CountActiveMembers(ctx context.Context, orgID string) (int64, error)
 	SubmitKYC(ctx context.Context, orgID, businessName, tin, docURL string) (KYCSubmission, error)
 	GetKYCSubmission(ctx context.Context, orgID string) (KYCSubmission, bool, error)
+	// ReviewKYC flips kyc_status (verified|rejected) and records the
+	// review on the submission. Only submitted orgs are reviewable.
+	ReviewKYC(ctx context.Context, orgID, status, reviewedBy, reason string) (Organization, error)
+	// ListKYCQueue returns orgs with submissions, newest first. Empty
+	// status means submitted (the actionable queue); verified/rejected
+	// give history.
+	ListKYCQueue(ctx context.Context, status string) ([]KYCQueueItem, error)
+	// UpdateOrgLiveLimits sets per-org live caps (empty clears to
+	// platform default).
+	UpdateOrgLiveLimits(ctx context.Context, orgID, maxTxn, dailyCap string) (Organization, error)
 }
 
 type PostgresRepository struct {
@@ -49,21 +59,24 @@ func scanOrganization(row interface {
 	Scan(dest ...interface{}) error
 }) (Organization, error) {
 	var org Organization
-	var businessName, tin sql.NullString
+	var businessName, tin, maxTxn, dailyCap sql.NullString
 	if err := row.Scan(
 		&org.ID, &org.Name, &org.Slug, &org.KYCStatus,
-		&businessName, &tin, &org.CreatedAt, &org.UpdatedAt,
+		&businessName, &tin, &maxTxn, &dailyCap, &org.CreatedAt, &org.UpdatedAt,
 	); err != nil {
 		return Organization{}, err
 	}
 	org.BusinessName = businessName.String
 	org.TIN = tin.String
+	org.LiveMaxTxnAmount = maxTxn.String
+	org.LiveDailyVolumeCap = dailyCap.String
 	return org, nil
 }
 
 const organizationSelect = `
 	SELECT id::text, name, slug, kyc_status,
-	       business_name, tin, created_at, updated_at
+	       business_name, tin, live_max_txn_amount, live_daily_volume_cap,
+	       created_at, updated_at
 	FROM app.organizations
 `
 
@@ -126,7 +139,8 @@ func (r *PostgresRepository) CreateOrganization(ctx context.Context, name, slug,
 	org, err = scanOrganization(tx.QueryRowEx(ctx, `
 		INSERT INTO app.organizations (name, slug, business_name)
 		VALUES ($1, $2, $3)
-		RETURNING id::text, name, slug, kyc_status, business_name, tin, created_at, updated_at
+		RETURNING id::text, name, slug, kyc_status, business_name, tin,
+		          live_max_txn_amount, live_daily_volume_cap, created_at, updated_at
 	`, nil, name, slug, valueOrNil(businessName)))
 	if err != nil {
 		return Organization{}, fmt.Errorf("insert organization: %w", err)
@@ -164,7 +178,8 @@ func (r *PostgresRepository) GetOrganization(ctx context.Context, orgID string) 
 func (r *PostgresRepository) ListOrganizationsForUser(ctx context.Context, userID string) ([]OrganizationWithRole, error) {
 	rows, err := r.db.QueryEx(ctx, `
 		SELECT o.id::text, o.name, o.slug, o.kyc_status,
-		       o.business_name, o.tin, o.created_at, o.updated_at,
+		       o.business_name, o.tin, o.live_max_txn_amount, o.live_daily_volume_cap,
+		       o.created_at, o.updated_at,
 		       m.role, m.status
 		FROM app.org_members m
 		JOIN app.organizations o ON o.id = m.org_id
@@ -179,17 +194,19 @@ func (r *PostgresRepository) ListOrganizationsForUser(ctx context.Context, userI
 	orgs := []OrganizationWithRole{}
 	for rows.Next() {
 		var item OrganizationWithRole
-		var businessName, tin sql.NullString
+		var businessName, tin, maxTxn, dailyCap sql.NullString
 		var role, status string
 		if err := rows.Scan(
 			&item.ID, &item.Name, &item.Slug, &item.KYCStatus,
-			&businessName, &tin, &item.CreatedAt, &item.UpdatedAt,
+			&businessName, &tin, &maxTxn, &dailyCap, &item.CreatedAt, &item.UpdatedAt,
 			&role, &status,
 		); err != nil {
 			return nil, fmt.Errorf("scan organization: %w", err)
 		}
 		item.BusinessName = businessName.String
 		item.TIN = tin.String
+		item.LiveMaxTxnAmount = maxTxn.String
+		item.LiveDailyVolumeCap = dailyCap.String
 		item.Role = Role(role)
 		item.Status = MemberStatus(status)
 		orgs = append(orgs, item)
@@ -204,7 +221,8 @@ func (r *PostgresRepository) UpdateOrganization(ctx context.Context, orgID, name
 	org, err := scanOrganization(r.db.QueryRowEx(ctx, `
 		UPDATE app.organizations SET name = $2, business_name = $3, updated_at = NOW()
 		WHERE id = $1::uuid
-		RETURNING id::text, name, slug, kyc_status, business_name, tin, created_at, updated_at
+		RETURNING id::text, name, slug, kyc_status, business_name, tin,
+		          live_max_txn_amount, live_daily_volume_cap, created_at, updated_at
 	`, nil, orgID, name, valueOrNil(businessName)))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Organization{}, ErrOrgNotFound
@@ -496,4 +514,128 @@ func (r *PostgresRepository) GetKYCSubmission(ctx context.Context, orgID string)
 		return KYCSubmission{}, false, fmt.Errorf("get kyc submission: %w", err)
 	}
 	return sub, true, nil
+}
+
+// ReviewKYC records an admin decision. Only orgs sitting in submitted
+// with a live submission row are reviewable — approving thin air (or
+// re-deciding a closed file) is refused so the queue can't be bypassed.
+func (r *PostgresRepository) ReviewKYC(ctx context.Context, orgID, status, reviewedBy, reason string) (Organization, error) {
+	tx, err := r.db.BeginEx(ctx, nil)
+	if err != nil {
+		return Organization{}, fmt.Errorf("begin review kyc transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.RollbackEx(ctx)
+		}
+	}()
+
+	var current string
+	err = tx.QueryRowEx(ctx, `SELECT kyc_status FROM app.organizations WHERE id = $1::uuid`, nil, orgID).Scan(&current)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Organization{}, ErrOrgNotFound
+	}
+	if err != nil {
+		return Organization{}, fmt.Errorf("load org kyc status: %w", err)
+	}
+	if current != "submitted" {
+		return Organization{}, ErrKYCNotInReview
+	}
+	var hasSubmission bool
+	err = tx.QueryRowEx(ctx, `SELECT EXISTS (SELECT 1 FROM app.kyc_submissions WHERE org_id = $1::uuid)`, nil, orgID).Scan(&hasSubmission)
+	if err != nil {
+		return Organization{}, fmt.Errorf("check kyc submission: %w", err)
+	}
+	if !hasSubmission {
+		return Organization{}, ErrKYCNotInReview
+	}
+
+	if _, err = tx.ExecEx(ctx, `
+		UPDATE app.kyc_submissions
+		SET reviewed_by = $2, reviewed_at = NOW(), rejection_reason = $3
+		WHERE org_id = $1::uuid
+	`, nil, orgID, valueOrNil(reviewedBy), reason); err != nil {
+		return Organization{}, fmt.Errorf("record kyc review: %w", err)
+	}
+	var org Organization
+	org, err = scanOrganization(tx.QueryRowEx(ctx, `
+		UPDATE app.organizations SET kyc_status = $2, updated_at = NOW()
+		WHERE id = $1::uuid
+		RETURNING id::text, name, slug, kyc_status, business_name, tin,
+		          live_max_txn_amount, live_daily_volume_cap, created_at, updated_at
+	`, nil, orgID, status))
+	if err != nil {
+		return Organization{}, fmt.Errorf("mark org kyc reviewed: %w", err)
+	}
+	if err = tx.CommitEx(ctx); err != nil {
+		return Organization{}, fmt.Errorf("commit review kyc transaction: %w", err)
+	}
+	return org, nil
+}
+
+// ListKYCQueue returns orgs holding submissions, newest first. Empty
+// status selects submitted (the actionable queue).
+func (r *PostgresRepository) ListKYCQueue(ctx context.Context, status string) ([]KYCQueueItem, error) {
+	status = strings.TrimSpace(status)
+	args := []any{}
+	condition := ""
+	if status == "" {
+		status = "submitted"
+	}
+	if status != "all" {
+		condition = "WHERE o.kyc_status = $1"
+		args = append(args, status)
+	}
+	rows, err := r.db.QueryEx(ctx, fmt.Sprintf(`
+		SELECT o.id::text, o.name, o.slug, o.kyc_status,
+		       COALESCE(s.business_name, ''), COALESCE(s.tin, ''),
+		       COALESCE(s.id_document_url, '') <> '',
+		       s.submitted_at, COALESCE(s.rejection_reason, '')
+		FROM app.organizations o
+		JOIN app.kyc_submissions s ON s.org_id = o.id
+		%s
+		ORDER BY s.submitted_at DESC
+	`, condition), nil, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list kyc queue: %w", err)
+	}
+	defer rows.Close()
+
+	items := []KYCQueueItem{}
+	for rows.Next() {
+		var item KYCQueueItem
+		if err := rows.Scan(
+			&item.OrgID, &item.OrgName, &item.Slug, &item.KYCStatus,
+			&item.BusinessName, &item.TIN, &item.HasDocument,
+			&item.SubmittedAt, &item.RejectionReason,
+		); err != nil {
+			return nil, fmt.Errorf("scan kyc queue item: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate kyc queue: %w", err)
+	}
+	return items, nil
+}
+
+// UpdateOrgLiveLimits sets per-org live caps; empty clears to platform
+// default (stored NULL, not zero — zero would forbid all live volume).
+func (r *PostgresRepository) UpdateOrgLiveLimits(ctx context.Context, orgID, maxTxn, dailyCap string) (Organization, error) {
+	org, err := scanOrganization(r.db.QueryRowEx(ctx, `
+		UPDATE app.organizations
+		SET live_max_txn_amount = NULLIF($2, ''),
+		    live_daily_volume_cap = NULLIF($3, ''),
+		    updated_at = NOW()
+		WHERE id = $1::uuid
+		RETURNING id::text, name, slug, kyc_status, business_name, tin,
+		          live_max_txn_amount, live_daily_volume_cap, created_at, updated_at
+	`, nil, orgID, strings.TrimSpace(maxTxn), strings.TrimSpace(dailyCap)))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Organization{}, ErrOrgNotFound
+	}
+	if err != nil {
+		return Organization{}, fmt.Errorf("update org live limits: %w", err)
+	}
+	return org, nil
 }

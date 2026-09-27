@@ -3,6 +3,7 @@ package orgs
 import (
 	"context"
 	"log/slog"
+	"math/big"
 	"strings"
 
 	"lipago/internal/shared/validation"
@@ -141,6 +142,89 @@ func (s *Service) DeleteOrganization(ctx context.Context, userID, orgID string) 
 // bypass — the RequireAdmin gate replaces the membership check).
 func (s *Service) AdminListMembers(ctx context.Context, orgID string) ([]OrgMember, error) {
 	return s.repo.ListMembers(ctx, strings.TrimSpace(orgID))
+}
+
+// ReviewKYC records an admin approve/reject decision. No actor check —
+// the RequireAdmin route gate replaces membership (mirrors
+// AdminAddMember). Rejections require a reason; approvals ignore it.
+func (s *Service) ReviewKYC(ctx context.Context, reviewerEmail, orgID string, approve bool, reason string) (Organization, validation.Errors, error) {
+	orgID = strings.TrimSpace(orgID)
+	reason = strings.TrimSpace(reason)
+	if !approve {
+		errs := validation.Errors{}
+		validation.Required(reason, "A rejection reason is required.", errs, "reason")
+		validation.MaxRunes(reason, 500, "Reason must be 500 characters or fewer.", errs, "reason")
+		if errs.Any() {
+			return Organization{}, errs, nil
+		}
+		org, err := s.repo.ReviewKYC(ctx, orgID, "rejected", reviewerEmail, reason)
+		return org, nil, err
+	}
+	org, err := s.repo.ReviewKYC(ctx, orgID, "verified", reviewerEmail, "")
+	return org, nil, err
+}
+
+// ListKYCQueue returns the admin review queue. Empty status selects the
+// actionable submitted queue; verified/rejected give history; all lists
+// every submitted file. No actor check — route-gated.
+func (s *Service) ListKYCQueue(ctx context.Context, status string) ([]KYCQueueItem, error) {
+	status = strings.ToLower(strings.TrimSpace(status))
+	switch status {
+	case "", "submitted", "verified", "rejected", "pending", "all":
+		if status == "" {
+			status = "submitted"
+		}
+		return s.repo.ListKYCQueue(ctx, status)
+	default:
+		return nil, ErrKYCQueueStatusUnknown
+	}
+}
+
+// validPositiveDecimal reports whether value is a positive decimal number
+// (empty is allowed — it means "platform default").
+func validPositiveDecimal(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return true
+	}
+	amount, ok := new(big.Rat).SetString(value)
+	if !ok || amount.Sign() <= 0 {
+		return false
+	}
+	return true
+}
+
+// AdminGetKYCSubmission loads the evidence row with no actor check —
+// the RequireAdmin route gate replaces membership (document review).
+func (s *Service) AdminGetKYCSubmission(ctx context.Context, orgID string) (KYCSubmission, error) {
+	sub, found, err := s.repo.GetKYCSubmission(ctx, strings.TrimSpace(orgID))
+	if err != nil {
+		return KYCSubmission{}, err
+	}
+	if !found {
+		return KYCSubmission{}, ErrKYCNotSubmitted
+	}
+	return sub, nil
+}
+
+// UpdateOrgLiveLimits sets per-org live guardrail overrides. Empty clears
+// a side back to the platform default. No actor check — route-gated.
+func (s *Service) UpdateOrgLiveLimits(ctx context.Context, orgID, maxTxn, dailyCap string) (Organization, validation.Errors, error) {
+	maxTxn = strings.TrimSpace(maxTxn)
+	dailyCap = strings.TrimSpace(dailyCap)
+
+	errs := validation.Errors{}
+	if !validPositiveDecimal(maxTxn) {
+		errs.Add("live_max_txn_amount", "Must be a positive number, or empty for the platform default.")
+	}
+	if !validPositiveDecimal(dailyCap) {
+		errs.Add("live_daily_volume_cap", "Must be a positive number, or empty for the platform default.")
+	}
+	if errs.Any() {
+		return Organization{}, errs, nil
+	}
+	org, err := s.repo.UpdateOrgLiveLimits(ctx, orgID, maxTxn, dailyCap)
+	return org, nil, err
 }
 
 // OrgKYCStatus returns an app's org KYC status with no actor check —

@@ -2,6 +2,7 @@ import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { LogOut, Wallet } from "lucide-react";
 import { signOut } from "@/lib/auth";
+import { getAdminMe } from "@/lib/adminApi";
 import { listMyOrgs } from "@/lib/orgApi";
 import SandboxModeBanner from "@/components/SandboxModeBanner";
 
@@ -11,6 +12,10 @@ const NAV_ITEMS = [
   { to: "/admin/payments/withdrawals", label: "Withdrawals" },
   { to: "/admin/payments/providers", label: "Providers" },
   { to: "/merchant/apps", label: "Merchant" },
+];
+
+const ADMIN_NAV_ITEMS = [
+  { to: "/admin/kyc", label: "KYC review" },
 ];
 
 function currentOrgId(): string {
@@ -25,6 +30,10 @@ const AdminLayout = () => {
   const navigate = useNavigate();
   const orgsQuery = useQuery({ queryKey: ["orgs", "mine"], queryFn: () => listMyOrgs(), staleTime: 60_000, retry: false });
   const orgs = orgsQuery.data ?? [];
+  // Admin-only links (KYC review) stay hidden from merchants sharing this
+  // layout — the backend re-checks admin on every request regardless.
+  const meQuery = useQuery({ queryKey: ["admin", "me"], queryFn: () => getAdminMe(), staleTime: 60_000, retry: false });
+  const navItems = [...NAV_ITEMS, ...((meQuery.data?.is_admin ?? false) ? ADMIN_NAV_ITEMS : [])];
 
   const handleOrgChange = (orgId: string) => {
     try {
@@ -63,7 +72,7 @@ const AdminLayout = () => {
                 ))}
               </select>
             )}
-            {NAV_ITEMS.map((item) => (
+            {navItems.map((item) => (
               <NavLink
                 key={item.to}
                 to={item.to}

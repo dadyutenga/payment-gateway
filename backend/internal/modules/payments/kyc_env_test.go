@@ -117,8 +117,7 @@ func TestCreateOrderLiveCaps(t *testing.T) {
 	}
 }
 
-func TestCreateOrderRejectsLiveSandboxProvider(t *testing.T) {
-	repo := &fakePaymentRepository{}
+func TestCreateOrderRejectsLiveSandboxProvider(t *testing.T) {	repo := &fakePaymentRepository{}
 	registry := registryFor(&fakePaymentProvider{name: "sandbox"})
 	svc := NewService(repo, registry, testCipher, ServiceOptions{}, nil)
 	app := PaymentApp{ID: "app_test", Name: "Test", Status: "active"}

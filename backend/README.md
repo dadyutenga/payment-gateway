@@ -124,6 +124,29 @@ until `AUTH_TOKEN_TTL` expires.
   (business name, TIN, document upload), and a sandbox-mode banner while
   the active org is unverified.
 
+## Admin: KYC review & per-org live limits
+
+- `GET /api/v1/admin/orgs/kyc-queue[?status=submitted|all|verified|rejected|pending]`
+  lists orgs holding verification files, newest first (default: the
+  actionable `submitted` queue).
+- `POST /api/v1/admin/orgs/{orgID}/kyc/approve` verifies (unlocks live
+  keys/payments immediately);
+  `POST .../kyc/reject` `{reason}` rejects (reason required, shown to
+  the org). Only `submitted` files are decidable — re-deciding a closed
+  file is `409 not_in_review`. The reviewer's email is recorded.
+- `GET /api/v1/admin/orgs/{orgID}/kyc/document` streams the ID file for
+  review (reviewers are rarely members, so no membership check).
+- `PATCH /api/v1/admin/orgs/{orgID}/limits`
+  `{live_max_txn_amount?, live_daily_volume_cap?}` sets per-org live
+  guardrail overrides (positive decimals; empty clears back to the
+  platform default). Overrides win over
+  `PAYMENTS_LIVE_MAX_TXN_AMOUNT` / `PAYMENTS_LIVE_DAILY_VOLUME_CAP`
+  per side; unparsable stored values fall back to the default with a
+  warning, never to zero.
+- Frontend: `/admin/kyc` (admin-only nav) with queue tabs, document
+  viewer, approve/reject, and a limits editor. Owners see their org's
+  effective limits in org settings.
+
 ## Organizations & roles
 
 Apps belong to organizations (`payment_apps.org_id`, NOT NULL).

@@ -144,8 +144,9 @@ type ServiceOptions struct {
 	OrderExpiryTTL time.Duration
 	// LiveMaxTxnAmount caps a single live order (in the order's currency).
 	// LiveDailyVolumeCap caps confirmed live volume per app per currency
-	// per UTC day. Empty disables the check; Block 6 adds per-org
-	// overrides on top of these platform defaults.
+	// per UTC day. Empty disables the check. Per-org overrides (admin-set
+	// on the organization) take precedence when present — see
+	// effectiveLiveCaps.
 	LiveMaxTxnAmount    string
 	LiveDailyVolumeCap  string
 	HTTPClient          *http.Client
@@ -1049,8 +1050,14 @@ func (s *Service) CreateOrder(ctx context.Context, app PaymentApp, input CreateP
 	// Live guardrails for verified orgs (unverified orgs never reach here —
 	// the handler rejects live operations at the KYC gate). Sandbox orders
 	// skip caps entirely. All figures come from the ledger, per currency.
+	// Caps resolve per-org first (admin-set overrides), platform default
+	// second — see effectiveLiveCaps.
 	if input.Environment == "live" {
-		if over, err := decimalOver(input.Amount, s.liveMaxTxnAmount); err != nil {
+		maxTxn, dailyCap, err := s.effectiveLiveCaps(ctx, app)
+		if err != nil {
+			return PaymentOrder{}, nil, err
+		}
+		if over, err := decimalOver(input.Amount, maxTxn); err != nil {
 			return PaymentOrder{}, nil, err
 		} else if over {
 			return PaymentOrder{}, nil, ErrLiveTxnCapExceeded
@@ -1059,7 +1066,7 @@ func (s *Service) CreateOrder(ctx context.Context, app PaymentApp, input CreateP
 		if err != nil {
 			return PaymentOrder{}, nil, err
 		}
-		if over, err := decimalSumOver(volume, input.Amount, s.liveDailyVolumeCap); err != nil {
+		if over, err := decimalSumOver(volume, input.Amount, dailyCap); err != nil {
 			return PaymentOrder{}, nil, err
 		} else if over {
 			return PaymentOrder{}, nil, ErrLiveDailyCapExceeded
@@ -2548,6 +2555,37 @@ func normalizeAmount(value string) (string, error) {
 	}
 
 	return amount.FloatString(2), nil
+}
+
+// effectiveLiveCaps resolves the live guardrails for an order: per-org
+// overrides win when set to a positive decimal, otherwise the platform
+// defaults apply. Unparseable stored values fall back to the default with
+// a warning (admin writes are validated, so this is theoretical) —
+// failing open to zero would forbid all live volume over a typo.
+func (s *Service) effectiveLiveCaps(ctx context.Context, app PaymentApp) (maxTxn, dailyCap string, err error) {
+	maxTxn, dailyCap = s.liveMaxTxnAmount, s.liveDailyVolumeCap
+	if strings.TrimSpace(app.OrgID) == "" {
+		return maxTxn, dailyCap, nil
+	}
+	orgMax, orgDaily, err := s.repo.GetOrgLiveLimits(ctx, app.OrgID)
+	if err != nil {
+		return "", "", err
+	}
+	if trimmed := strings.TrimSpace(orgMax); trimmed != "" {
+		if rat, ok := new(big.Rat).SetString(trimmed); !ok || rat.Sign() <= 0 {
+			s.log.Warn("ignoring invalid org live_max_txn_amount override", "app_id", app.ID, "org_id", app.OrgID)
+		} else {
+			maxTxn = trimmed
+		}
+	}
+	if trimmed := strings.TrimSpace(orgDaily); trimmed != "" {
+		if rat, ok := new(big.Rat).SetString(trimmed); !ok || rat.Sign() <= 0 {
+			s.log.Warn("ignoring invalid org live_daily_volume_cap override", "app_id", app.ID, "org_id", app.OrgID)
+		} else {
+			dailyCap = trimmed
+		}
+	}
+	return maxTxn, dailyCap, nil
 }
 
 // decimalOver reports whether value exceeds a cap ("5000000"). An empty

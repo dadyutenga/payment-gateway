@@ -57,6 +57,14 @@ type fakeOrgRepository struct {
 	invited      []OrgMember
 	org          Organization
 	kycFound     bool
+	reviewErr    error
+	reviewedStatus string
+	reviewedBy   string
+	reviewReason string
+	queue        []KYCQueueItem
+	queueErr     error
+	limitsMaxTxn string
+	limitsDailyCap string
 }
 
 func orgKey(orgID, userID string) string { return orgID + "\x00" + userID }
@@ -182,12 +190,37 @@ func (r *fakeOrgRepository) FindUserIDByEmail(_ context.Context, email string) (
 func (r *fakeOrgRepository) SubmitKYC(_ context.Context, orgID, businessName, tin, docURL string) (KYCSubmission, error) {
 	return KYCSubmission{OrgID: orgID, BusinessName: businessName, TIN: tin, IDDocumentURL: docURL}, nil
 }
-
 func (r *fakeOrgRepository) GetKYCSubmission(_ context.Context, orgID string) (KYCSubmission, bool, error) {
 	if r.kycFound {
 		return KYCSubmission{OrgID: orgID, BusinessName: "Acme", TIN: "123456789"}, true, nil
 	}
 	return KYCSubmission{}, false, nil
+}
+
+func (r *fakeOrgRepository) ReviewKYC(_ context.Context, orgID, status, reviewedBy, reason string) (Organization, error) {
+	if r.reviewErr != nil {
+		return Organization{}, r.reviewErr
+	}
+	r.reviewedStatus = status
+	r.reviewedBy = reviewedBy
+	r.reviewReason = reason
+	return Organization{ID: orgID, Name: "Test Org", KYCStatus: status}, nil
+}
+
+func (r *fakeOrgRepository) ListKYCQueue(_ context.Context, status string) ([]KYCQueueItem, error) {
+	if r.queueErr != nil {
+		return nil, r.queueErr
+	}
+	if r.queue != nil {
+		return r.queue, nil
+	}
+	return []KYCQueueItem{}, nil
+}
+
+func (r *fakeOrgRepository) UpdateOrgLiveLimits(_ context.Context, orgID, maxTxn, dailyCap string) (Organization, error) {
+	r.limitsMaxTxn = maxTxn
+	r.limitsDailyCap = dailyCap
+	return Organization{ID: orgID, Name: "Test Org", LiveMaxTxnAmount: maxTxn, LiveDailyVolumeCap: dailyCap}, nil
 }
 
 func ownerRepo() *fakeOrgRepository {

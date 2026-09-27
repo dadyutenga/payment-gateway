@@ -44,6 +44,17 @@ func claimsUserID(w http.ResponseWriter, r *http.Request) (string, bool) {
 	return claims.Subject, true
 }
 
+// claimsIdentity returns user id + email for admin actions that record
+// who decided (KYC review). Route-level RequireAdmin gates access.
+func claimsIdentity(w http.ResponseWriter, r *http.Request) (userID, email string, ok bool) {
+	claims, ok := middleware.ClaimsFromContext(r.Context())
+	if !ok || strings.TrimSpace(claims.Subject) == "" {
+		httputil.Error(w, http.StatusUnauthorized, "unauthorized", "Missing authenticated user.", nil)
+		return "", "", false
+	}
+	return claims.Subject, claims.Email, true
+}
+
 // orgError maps domain errors to JSON responses — always a clear body,
 // never a raw Go error.
 func (h *Handler) orgError(w http.ResponseWriter, err error, action string) {
@@ -416,10 +427,143 @@ func (h *Handler) ServeKYCDocument(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = kycStatus
-	clean := filepath.Clean(sub.IDDocumentURL)
+	h.serveKYCDocumentPath(w, r, sub.IDDocumentURL)
+}
+
+func (h *Handler) serveKYCDocumentPath(w http.ResponseWriter, r *http.Request, docURL string) {
+	clean := filepath.Clean(docURL)
 	if strings.Contains(clean, "..") || !strings.HasPrefix(filepath.ToSlash(clean), "uploads/kyc/") {
 		h.fail(w, http.StatusInternalServerError, "internal_error", "Stored document path is invalid.", errors.New("kyc path escape"))
 		return
 	}
 	http.ServeFile(w, r, clean)
+}
+
+// ---------- Admin: KYC review queue, decisions, live limits ----------
+// All routes carry RequireAdmin; handlers use claimsIdentity (no org
+// membership needed) and record the reviewer's email on decisions.
+
+func (h *Handler) ListKYCQueue(w http.ResponseWriter, r *http.Request) {
+	if _, _, ok := claimsIdentity(w, r); !ok {
+		return
+	}
+	items, err := h.service.ListKYCQueue(r.Context(), r.URL.Query().Get("status"))
+	if err != nil {
+		if errors.Is(err, ErrKYCQueueStatusUnknown) {
+			httputil.Error(w, http.StatusBadRequest, "invalid_request", "Status must be submitted, verified, rejected, pending, or all.", nil)
+			return
+		}
+		h.fail(w, http.StatusInternalServerError, "internal_error", "Unable to load review queue.", err)
+		return
+	}
+	httputil.JSON(w, http.StatusOK, map[string]any{"data": items})
+}
+
+func (h *Handler) ApproveKYC(w http.ResponseWriter, r *http.Request) {
+	_, email, ok := claimsIdentity(w, r)
+	if !ok {
+		return
+	}
+	org, vErrs, err := h.service.ReviewKYC(r.Context(), email, r.PathValue("orgID"), true, "")
+	if err != nil {
+		h.reviewError(w, err, "approve verification")
+		return
+	}
+	if vErrs.Any() {
+		httputil.Error(w, http.StatusUnprocessableEntity, "validation_failed", "Please check your review.", vErrs)
+		return
+	}
+	httputil.JSON(w, http.StatusOK, map[string]any{"data": org})
+}
+
+type rejectKYCHTTPInput struct {
+	Reason string `json:"reason"`
+}
+
+func (h *Handler) RejectKYC(w http.ResponseWriter, r *http.Request) {
+	_, email, ok := claimsIdentity(w, r)
+	if !ok {
+		return
+	}
+	var in rejectKYCHTTPInput
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil && !errors.Is(err, io.EOF) {
+		httputil.Error(w, http.StatusBadRequest, "invalid_request", "Unable to decode request body.", nil)
+		return
+	}
+	org, vErrs, err := h.service.ReviewKYC(r.Context(), email, r.PathValue("orgID"), false, in.Reason)
+	if err != nil {
+		h.reviewError(w, err, "reject verification")
+		return
+	}
+	if vErrs.Any() {
+		httputil.Error(w, http.StatusUnprocessableEntity, "validation_failed", "A rejection reason is required.", vErrs)
+		return
+	}
+	httputil.JSON(w, http.StatusOK, map[string]any{"data": org})
+}
+
+func (h *Handler) reviewError(w http.ResponseWriter, err error, action string) {
+	switch {
+	case errors.Is(err, ErrOrgNotFound):
+		httputil.Error(w, http.StatusNotFound, "not_found", "Organization not found.", nil)
+	case errors.Is(err, ErrKYCNotInReview):
+		httputil.Error(w, http.StatusConflict, "not_in_review", "Only organizations with a submission awaiting review can be decided.", nil)
+	default:
+		h.fail(w, http.StatusInternalServerError, "internal_error", "Unable to "+action+".", err)
+	}
+}
+
+type updateOrgLimitsHTTPInput struct {
+	LiveMaxTxnAmount   string `json:"live_max_txn_amount"`
+	LiveDailyVolumeCap string `json:"live_daily_volume_cap"`
+}
+
+func (h *Handler) UpdateOrgLiveLimits(w http.ResponseWriter, r *http.Request) {
+	if _, _, ok := claimsIdentity(w, r); !ok {
+		return
+	}
+	var in updateOrgLimitsHTTPInput
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil && !errors.Is(err, io.EOF) {
+		httputil.Error(w, http.StatusBadRequest, "invalid_request", "Unable to decode request body.", nil)
+		return
+	}
+	org, vErrs, err := h.service.UpdateOrgLiveLimits(r.Context(), r.PathValue("orgID"), in.LiveMaxTxnAmount, in.LiveDailyVolumeCap)
+	if err != nil {
+		if errors.Is(err, ErrOrgNotFound) {
+			httputil.Error(w, http.StatusNotFound, "not_found", "Organization not found.", nil)
+			return
+		}
+		h.fail(w, http.StatusInternalServerError, "internal_error", "Unable to update limits.", err)
+		return
+	}
+	if vErrs.Any() {
+		httputil.Error(w, http.StatusUnprocessableEntity, "validation_failed", "Limits must be positive numbers, or empty for the platform default.", vErrs)
+		return
+	}
+	httputil.JSON(w, http.StatusOK, map[string]any{"data": org})
+}
+
+// AdminServeKYCDocument streams an org's ID document without a membership
+// check (reviewers are rarely members). Path confinement identical to the
+// member route.
+func (h *Handler) AdminServeKYCDocument(w http.ResponseWriter, r *http.Request) {
+	if _, _, ok := claimsIdentity(w, r); !ok {
+		return
+	}
+	sub, err := h.service.AdminGetKYCSubmission(r.Context(), r.PathValue("orgID"))
+	if err != nil {
+		if errors.Is(err, ErrKYCNotSubmitted) {
+			httputil.Error(w, http.StatusNotFound, "not_found", "No verification document.", nil)
+			return
+		}
+		h.fail(w, http.StatusInternalServerError, "internal_error", "Unable to load document.", err)
+		return
+	}
+	if sub.IDDocumentURL == "" {
+		httputil.Error(w, http.StatusNotFound, "not_found", "No verification document.", nil)
+		return
+	}
+	h.serveKYCDocumentPath(w, r, sub.IDDocumentURL)
 }

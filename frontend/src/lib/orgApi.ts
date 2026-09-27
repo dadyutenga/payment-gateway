@@ -89,6 +89,8 @@ export type Organization = {
   kyc_status: "pending" | "submitted" | "verified" | "rejected";
   business_name?: string;
   tin?: string;
+  live_max_txn_amount?: string;
+  live_daily_volume_cap?: string;
   created_at: string;
   updated_at: string;
 };
@@ -165,4 +167,56 @@ export async function removeOrgMember(orgId: string, userId: string) {
 
 export async function leaveOrg(orgId: string) {
   await request<unknown>(`/api/v1/orgs/${orgId}/leave`, { method: "POST" });
+}
+
+// ---------- Admin: KYC review queue, decisions, live limits ----------
+
+export type KYCQueueItem = {
+  org_id: string;
+  org_name: string;
+  slug: string;
+  kyc_status: string;
+  business_name: string;
+  tin: string;
+  has_document: boolean;
+  submitted_at: string;
+  rejection_reason?: string;
+};
+
+export async function listKYCQueue(status?: string) {
+  const query = status ? `?status=${encodeURIComponent(status)}` : "";
+  return (await request<KYCQueueItem[]>(`/api/v1/admin/orgs/kyc-queue${query}`)).data;
+}
+
+export async function approveKYC(orgId: string) {
+  return (await request<Organization>(`/api/v1/admin/orgs/${orgId}/kyc/approve`, { method: "POST" })).data;
+}
+
+export async function rejectKYC(orgId: string, reason: string) {
+  return (
+    await request<Organization>(`/api/v1/admin/orgs/${orgId}/kyc/reject`, { method: "POST", body: { reason } })
+  ).data;
+}
+
+export async function updateOrgLimits(orgId: string, input: { live_max_txn_amount?: string; live_daily_volume_cap?: string }) {
+  return (
+    await request<Organization>(`/api/v1/admin/orgs/${orgId}/limits`, { method: "PATCH", body: input })
+  ).data;
+}
+
+// fetchKYCDocument downloads an org's ID document as a blob (admin review
+// path — the member route requires org membership reviewers don't have).
+export async function fetchKYCDocument(orgId: string): Promise<{ blob: Blob; contentType: string }> {
+  const token = readAccessToken();
+  if (!token) {
+    throw new OrgApiError(401, "You need to sign in to continue.", "unauthorized");
+  }
+  const response = await fetch(`${apiBaseUrl}/api/v1/admin/orgs/${orgId}/kyc/document`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!response.ok) {
+    throw new OrgApiError(response.status, "Unable to load the verification document.");
+  }
+  const blob = await response.blob();
+  return { blob, contentType: response.headers.get("content-type") ?? "application/octet-stream" };
 }

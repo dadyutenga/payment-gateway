@@ -99,6 +99,9 @@ type Repository interface {
 	// NULL, so an unknown org must fail fast with a clean 422 rather than
 	// a foreign-key 500.
 	OrganizationExists(ctx context.Context, orgID string) (bool, error)
+	// GetOrgLiveLimits returns an org's per-org live caps; empty strings
+	// mean "platform default". Unknown orgs error.
+	GetOrgLiveLimits(ctx context.Context, orgID string) (maxTxn, dailyCap string, err error)
 
 	GetPaymentOrderByID(ctx context.Context, paymentOrderID string) (PaymentOrder, error)
 	GetPaymentEventByID(ctx context.Context, eventID string) (PaymentEvent, error)
@@ -126,6 +129,7 @@ func NewPostgresRepository(db *pgx.ConnPool) *PostgresRepository {
 func (r *PostgresRepository) GetAppByAPIKeyHash(ctx context.Context, keyHash string) (PaymentApp, error) {
 	const query = `
 		SELECT a.id::text, a.name, COALESCE(a.description, ''), a.status,
+		       a.org_id::text,
 		       a.fee_type, a.fee_percent::text, a.fee_fixed::text, a.created_at, a.updated_at
 		FROM app.payment_api_keys k
 		JOIN app.payment_apps a ON a.id = k.app_id
@@ -143,6 +147,7 @@ func (r *PostgresRepository) GetAppByAPIKeyHash(ctx context.Context, keyHash str
 		&app.Name,
 		&app.Description,
 		&app.Status,
+		&app.OrgID,
 		&app.FeeType,
 		&app.FeePercent,
 		&app.FeeFixed,
@@ -170,6 +175,7 @@ func (r *PostgresRepository) GetAppByAPIKeyHash(ctx context.Context, keyHash str
 func (r *PostgresRepository) GetAPIKeyContext(ctx context.Context, keyHash string) (PaymentApp, string, error) {
 	const query = `
 		SELECT a.id::text, a.name, COALESCE(a.description, ''), a.status,
+		       a.org_id::text,
 		       a.fee_type, a.fee_percent::text, a.fee_fixed::text, a.created_at, a.updated_at,
 		       k.environment
 		FROM app.payment_api_keys k
@@ -189,6 +195,7 @@ func (r *PostgresRepository) GetAPIKeyContext(ctx context.Context, keyHash strin
 		&app.Name,
 		&app.Description,
 		&app.Status,
+		&app.OrgID,
 		&app.FeeType,
 		&app.FeePercent,
 		&app.FeeFixed,
@@ -245,6 +252,21 @@ func (r *PostgresRepository) OrganizationExists(ctx context.Context, orgID strin
 		return false, fmt.Errorf("check organization exists: %w", err)
 	}
 	return exists, nil
+}
+
+// GetOrgLiveLimits returns an org's per-org live caps (empty = platform
+// default). Unknown orgs error — callers propagate it (apps always carry
+// an org, so a miss is data inconsistency, not a default).
+func (r *PostgresRepository) GetOrgLiveLimits(ctx context.Context, orgID string) (string, string, error) {
+	var maxTxn, dailyCap sql.NullString
+	err := r.db.QueryRowEx(ctx, `
+		SELECT live_max_txn_amount, live_daily_volume_cap
+		FROM app.organizations WHERE id = $1::uuid
+	`, nil, orgID).Scan(&maxTxn, &dailyCap)
+	if err != nil {
+		return "", "", fmt.Errorf("get org live limits: %w", err)
+	}
+	return maxTxn.String, dailyCap.String, nil
 }
 
 func (r *PostgresRepository) GetPaymentAppByID(ctx context.Context, appID string) (PaymentApp, error) {

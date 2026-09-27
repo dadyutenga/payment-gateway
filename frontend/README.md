@@ -42,6 +42,7 @@ npm run preview    # preview the production build locally
 | `/admin/payments/apps/:id` | single app detail — orders, ledger, webhook endpoints |
 | `/admin/payments/withdrawals` | review and act on withdrawal requests |
 | `/admin/payments/providers` | configure payment provider credentials |
+| `/admin/kyc` | verification review queue (approve/reject, per-org live limits) |
 | `/merchant/apps` | merchant app list (org-scoped) + self-service app creation |
 | `/merchant/apps/:id` | app detail — rename, webhooks, labeled API keys, deliveries |
 | `/onboarding/create-org` | create an organization |

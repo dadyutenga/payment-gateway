@@ -95,6 +95,12 @@ const OrgSettings = () => {
                     Verification: {org.kyc_status}
                   </p>
                   <p className="mt-0.5 text-slate-500">{KYC_COPY[org.kyc_status] ?? org.kyc_status}</p>
+                  <p className="mt-1 text-xs text-slate-400">
+                    Live limits: {org.live_max_txn_amount ? `max ${org.live_max_txn_amount} per transaction` : "platform default per transaction"}
+                    {" · "}
+                    {org.live_daily_volume_cap ? `max ${org.live_daily_volume_cap} daily volume` : "platform default daily volume"}
+                    . Ask an admin to adjust them.
+                  </p>
                 </div>
               </div>
               {isOwner && org.kyc_status !== "verified" && (

@@ -189,6 +189,9 @@ type fakePaymentRepository struct {
 	createdKeyPrefix        string
 	createdKeyEnv           string
 	createdKeyLabel         string
+	orgLiveMaxTxn           string
+	orgLiveDailyCap         string
+	orgLimitsErr            error
 	updatedLabelAppID       string
 	updatedLabelKeyID       string
 	updatedLabel            string
@@ -253,6 +256,13 @@ func (r *fakePaymentRepository) CreatePaymentApp(_ context.Context, input Create
 
 func (r *fakePaymentRepository) OrganizationExists(_ context.Context, orgID string) (bool, error) {
 	return orgID != "" && orgID != "org_missing", nil
+}
+
+func (r *fakePaymentRepository) GetOrgLiveLimits(_ context.Context, _ string) (string, string, error) {
+	if r.orgLimitsErr != nil {
+		return "", "", r.orgLimitsErr
+	}
+	return r.orgLiveMaxTxn, r.orgLiveDailyCap, nil
 }
 
 func (r *fakePaymentRepository) CreatePaymentAPIKey(_ context.Context, appID, _, prefix, environment, label string) error {
