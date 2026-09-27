@@ -1,21 +1,19 @@
-# AZSUBAY Payments Gateway (standalone)
+# LipaGO payment system
 
-A self-contained copy of AZSUBAY's Payments Gateway — the module that lets
-an app accept payments through multiple providers (SonicPesa today, more
-addable), tracks a real ledger balance per app, and handles withdrawals —
-extracted from the main AZSUBAY monorepo so it can be deployed and run on
-its own.
+LipaGO lets an app accept payments through multiple providers (SonicPesa
+today, more addable), tracks a real ledger balance per app, and handles
+withdrawals — with multi-tenant organizations, roles, and a merchant
+self-service frontend on top.
 
-This is **not connected to AZSUBAY's production database or accounts in
-any way**. It's your own copy: your own database, your own Supabase auth
-project, your own admin list, your own provider credentials. Nothing here
-talks to azsubay.com.
+This is **your own copy**: your own database, your own user accounts,
+your own admin list, your own provider credentials. Nothing here talks
+to anyone else's systems.
 
 ## What's inside
 
 ```
 backend/    Go API + background worker + migrations
-frontend/   React admin panel — Apps, Withdrawals, Providers, Orders/Ledger/Events
+frontend/   React panel — signup, orgs, apps, withdrawals, providers, orders/ledger/events
 ```
 
 ## Quick start
@@ -51,8 +49,8 @@ frontend/   React admin panel — Apps, Withdrawals, Providers, Orders/Ledger/Ev
 
 ## Handing this to someone else
 
-Everything above is env-var driven — there's no AZSUBAY-specific
+Everything above is env-var driven — there's no deployment-specific
 configuration baked into the code. Zip this folder (or push it to its own
 git repo) and hand it over; whoever receives it fills in their own `.env`
-files and it's a fully working, independent Payments Gateway. See each
+files and it's a fully working, independent payment system. See each
 package's README for the full environment variable reference.

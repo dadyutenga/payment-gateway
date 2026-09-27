@@ -14,12 +14,12 @@ import (
 	"syscall"
 	"time"
 
-	"azsubay-payments-gateway/internal/modules/payments"
-	"azsubay-payments-gateway/internal/modules/payments/providers"
-	"azsubay-payments-gateway/internal/platform/config"
-	azcrypto "azsubay-payments-gateway/internal/platform/crypto"
-	"azsubay-payments-gateway/internal/platform/database"
-	"azsubay-payments-gateway/internal/platform/observability"
+	"lipago/internal/modules/payments"
+	"lipago/internal/modules/payments/providers"
+	"lipago/internal/platform/config"
+	azcrypto "lipago/internal/platform/crypto"
+	"lipago/internal/platform/database"
+	"lipago/internal/platform/observability"
 )
 
 func main() {
@@ -37,7 +37,7 @@ func main() {
 
 	logger := observability.NewLogger(cfg.App)
 	slog.SetDefault(logger)
-	logger.Info("starting azsubay payments gateway worker", "env", cfg.App.Env)
+	logger.Info("starting lipago payment system worker", "env", cfg.App.Env)
 
 	db, err := database.NewPool(ctx, cfg.Database)
 	if err != nil {

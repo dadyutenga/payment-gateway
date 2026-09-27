@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"azsubay-payments-gateway/internal/platform/httpserver"
+	"lipago/internal/platform/httpserver"
 )
 
 func main() {
@@ -19,7 +19,7 @@ func main() {
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
-	logger.Info("starting azsubay payments gateway", "env", os.Getenv("APP_ENV"))
+	logger.Info("starting lipago payment system", "env", os.Getenv("APP_ENV"))
 
 	app, err := httpserver.New(ctx)
 	if err != nil {

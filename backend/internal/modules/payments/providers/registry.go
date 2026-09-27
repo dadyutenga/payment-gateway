@@ -10,9 +10,9 @@
 package providers
 
 import (
-	"azsubay-payments-gateway/internal/modules/payments/provider"
-	"azsubay-payments-gateway/internal/modules/payments/providers/sandbox"
-	"azsubay-payments-gateway/internal/modules/payments/providers/sonicpesa"
+	"lipago/internal/modules/payments/provider"
+	"lipago/internal/modules/payments/providers/sandbox"
+	"lipago/internal/modules/payments/providers/sonicpesa"
 )
 
 var Registry = map[string]provider.Constructor{

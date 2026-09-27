@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"azsubay-payments-gateway/internal/modules/payments/provider"
-	azcrypto "azsubay-payments-gateway/internal/platform/crypto"
+	"lipago/internal/modules/payments/provider"
+	azcrypto "lipago/internal/platform/crypto"
 
 	"github.com/jackc/pgx"
 )
@@ -1649,9 +1649,9 @@ func TestProcessDueDeliveriesSignsAndPostsWebhook(t *testing.T) {
 	var receivedEventID string
 	var receivedPayload WebhookDeliveryPayload
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		receivedSignature = r.Header.Get("X-AZsubay-Signature")
-		receivedTimestamp = r.Header.Get("X-AZsubay-Timestamp")
-		receivedEventID = r.Header.Get("X-AZsubay-Event-ID")
+		receivedSignature = r.Header.Get("X-LipaGO-Signature")
+		receivedTimestamp = r.Header.Get("X-LipaGO-Timestamp")
+		receivedEventID = r.Header.Get("X-LipaGO-Event-ID")
 		if err := json.NewDecoder(r.Body).Decode(&receivedPayload); err != nil {
 			t.Fatalf("decode delivery payload: %v", err)
 		}
@@ -2296,8 +2296,8 @@ func TestUpdateWebhookEndpointRejectsPrivateURL(t *testing.T) {
 func TestTestWebhookEndpointPostsSignedProbe(t *testing.T) {
 	var gotSignature, gotEventID string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotSignature = r.Header.Get("X-AZsubay-Signature")
-		gotEventID = r.Header.Get("X-AZsubay-Event-ID")
+		gotSignature = r.Header.Get("X-LipaGO-Signature")
+		gotEventID = r.Header.Get("X-LipaGO-Event-ID")
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()

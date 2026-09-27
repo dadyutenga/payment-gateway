@@ -1,4 +1,4 @@
-module azsubay-payments-gateway
+module lipago
 
 go 1.25.0
 

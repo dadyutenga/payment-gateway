@@ -1,8 +1,8 @@
-# Payments Gateway — backend
+# LipaGO payment system — backend
 
-Go API + background jobs + migrations for the Payments Gateway. Talks to
+Go API + background jobs + migrations for LipaGO. Talks to
 its own Postgres database and local Go-managed authentication — nothing
-here depends on AZSUBAY's production systems.
+here depends on anyone else's production systems.
 
 ## Requirements
 
@@ -171,9 +171,8 @@ Merchants manage their own apps — no admin ticket needed:
 ## Webhook signing-secret rotation
 
 Endpoint signing secrets are derived per endpoint
-(`HMAC(delivery_secret, "azsubay-payment-webhook:" + endpoint_id)` for
-version 1 — byte-identical to before, so already-stored secrets keep
-verifying). If a secret leaks, rotate it:
+(`HMAC(delivery_secret, "lipago-payment-webhook:" + endpoint_id)` for
+version 1). If a secret leaks, rotate it:
 
 - `POST /api/v1/merchant/apps/{id}/webhook-endpoints/{endpointID}/rotate-secret`
   (owner/developer) bumps `secret_version` atomically and returns the new
@@ -187,6 +186,10 @@ verifying). If a secret leaks, rotate it:
   rotation_conflict` (retry); unknown endpoints 404.
 - The frontend webhooks tab shows `vN` per endpoint with a Rotate-secret
   button and a copy-once reveal.
+- Note: the v1 derivation domain was renamed during the LipaGO rebrand
+  (was `azsubay-payment-webhook:`), which changes every v1 secret.
+  After upgrading past the rebrand, rotate each endpoint once so both
+  sides agree on the new domain.
 
 ## Sandbox testing (simulator provider)
 

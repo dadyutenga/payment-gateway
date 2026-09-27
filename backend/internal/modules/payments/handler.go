@@ -12,10 +12,10 @@ import (
 	"strconv"
 	"strings"
 
-	"azsubay-payments-gateway/internal/modules/orgs"
-	"azsubay-payments-gateway/internal/modules/payments/provider"
-	"azsubay-payments-gateway/internal/platform/middleware"
-	"azsubay-payments-gateway/internal/shared/httputil"
+	"lipago/internal/modules/orgs"
+	"lipago/internal/modules/payments/provider"
+	"lipago/internal/platform/middleware"
+	"lipago/internal/shared/httputil"
 )
 
 type Handler struct {

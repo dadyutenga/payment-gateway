@@ -53,7 +53,7 @@ function formatMoney(value: string | undefined, currency: string) {
 }
 
 // A negative available balance is a real, meaningful state (a refund
-// reversed more than was ever withdrawn — the app now owes AZsubay) rather
+// reversed more than was ever withdrawn — the app now owes LipaGO) rather
 // than an error, so it's never blocked, just called out visually.
 function isNegativeBalance(value: string | undefined) {
   return typeof value === "string" && Number(value) < 0;
@@ -297,7 +297,7 @@ const AdminPaymentApps = () => {
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h2 className="text-2xl font-bold text-slate-900">Payment Apps</h2>
-          <p className="mt-1 text-sm text-slate-500">Every app registered against the AZsubay Payments Gateway.</p>
+          <p className="mt-1 text-sm text-slate-500">Every app registered against LipaGO.</p>
         </div>
         <div className="flex items-center gap-2">
           <Button variant="outline" asChild>
@@ -685,7 +685,7 @@ const AdminPaymentApps = () => {
             <Button type="submit" disabled={addingMember}>{addingMember ? "Adding..." : "Add"}</Button>
           </form>
           <p className="text-xs text-slate-500">
-            The email must already have an AZsubay account. If it doesn't, ask them to sign up first.
+            The email must already have a LipaGO account. If it doesn't, ask them to sign up first.
           </p>
         </DialogContent>
       </Dialog>
@@ -697,7 +697,7 @@ const AdminPaymentApps = () => {
           </DialogHeader>
           <div className="space-y-4">
             <p className="text-sm text-slate-600">
-              This key authenticates <strong>{apiKeyApp?.name}</strong> against the AZSUBAY Payments Gateway
+              This key authenticates <strong>{apiKeyApp?.name}</strong> against LipaGO
               (order creation, status checks — sent as the <code className="text-xs">X-Api-Key</code> header). See
               README_PAYMENTS.md for the full integration guide. Generating a new key moves usable keys
               into a 24h grace period instead of revoking them instantly.

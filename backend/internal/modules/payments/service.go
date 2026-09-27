@@ -20,11 +20,11 @@ import (
 	"strings"
 	"time"
 
-	"azsubay-payments-gateway/internal/modules/payments/provider"
-	azcrypto "azsubay-payments-gateway/internal/platform/crypto"
-	"azsubay-payments-gateway/internal/shared/audit"
-	"azsubay-payments-gateway/internal/shared/notify"
-	"azsubay-payments-gateway/internal/shared/validation"
+	"lipago/internal/modules/payments/provider"
+	azcrypto "lipago/internal/platform/crypto"
+	"lipago/internal/shared/audit"
+	"lipago/internal/shared/notify"
+	"lipago/internal/shared/validation"
 
 	"github.com/google/uuid"
 )
@@ -989,7 +989,7 @@ func (s *Service) emitRefundEvent(ctx context.Context, order PaymentOrder, refun
 		SignatureValid:        true,
 		PayloadHash:           sha256Hex(raw),
 		DedupeKey:             "refund-local-" + refund.ID,
-		Headers:               http.Header{"X-AZsubay-Source": []string{"refund"}},
+		Headers:               http.Header{"X-LipaGO-Source": []string{"refund"}},
 		RawBody:               string(raw),
 		NormalizedStatus:      order.Status,
 	})
@@ -1294,7 +1294,7 @@ func (s *Service) ExpireOrders(ctx context.Context, limit int) (ExpireOrdersResu
 			SignatureValid:   true,
 			PayloadHash:      sha256Hex(raw),
 			DedupeKey:        "expiry-" + order.ID,
-			Headers:          http.Header{"X-AZsubay-Source": []string{"expiry"}},
+			Headers:          http.Header{"X-LipaGO-Source": []string{"expiry"}},
 			RawBody:          string(raw),
 			NormalizedStatus: provider.StatusExpired,
 		})
@@ -1566,9 +1566,9 @@ func (s *Service) TestWebhookEndpoint(ctx context.Context, appID, endpointID str
 		return TestWebhookEndpointResult{}, fmt.Errorf("build webhook test request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-AZsubay-Event-ID", "webhook-test-"+endpoint.ID)
-	req.Header.Set("X-AZsubay-Timestamp", timestamp)
-	req.Header.Set("X-AZsubay-Signature", signature)
+	req.Header.Set("X-LipaGO-Event-ID", "webhook-test-"+endpoint.ID)
+	req.Header.Set("X-LipaGO-Timestamp", timestamp)
+	req.Header.Set("X-LipaGO-Signature", signature)
 
 	result := TestWebhookEndpointResult{EndpointURL: endpoint.URL, DeliveredAt: time.Now().UTC()}
 	resp, err := client.Do(req)
@@ -2084,7 +2084,7 @@ func (s *Service) sendPaymentSuccessSMS(ctx context.Context, order PaymentOrder,
 	}
 
 	message := fmt.Sprintf(
-		"AZSUBAY Payments: Confirmed. You've received %s %s from %s for %s. Ref: %s. New balance: %s %s.",
+		"LipaGO: Confirmed. You've received %s %s from %s for %s. Ref: %s. New balance: %s %s.",
 		order.Currency, order.Amount, payer, appName, reference, balance.Currency, balance.AvailableBalance,
 	)
 
@@ -2166,7 +2166,7 @@ func (s *Service) applyProviderStatusUpdate(ctx context.Context, order PaymentOr
 			SignatureValid:        true,
 			PayloadHash:           sha256Hex(rawBody),
 			DedupeKey:             dedupeKey(order.Provider, source, "", order.ProviderOrderID, sha256Hex(rawBody)),
-			Headers:               http.Header{"X-AZsubay-Source": []string{source}},
+			Headers:               http.Header{"X-LipaGO-Source": []string{source}},
 			RawBody:               string(rawBody),
 			NormalizedStatus:      nextStatus,
 		})
@@ -2286,9 +2286,9 @@ func (s *Service) deliverWebhook(ctx context.Context, job PaymentWebhookDelivery
 		return 0, fmt.Errorf("build payment webhook delivery request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-AZsubay-Event-ID", job.EventID)
-	req.Header.Set("X-AZsubay-Timestamp", timestamp)
-	req.Header.Set("X-AZsubay-Signature", signature)
+	req.Header.Set("X-LipaGO-Event-ID", job.EventID)
+	req.Header.Set("X-LipaGO-Timestamp", timestamp)
+	req.Header.Set("X-LipaGO-Signature", signature)
 
 	resp, err := s.http.Do(req)
 	if err != nil {
@@ -2341,7 +2341,7 @@ func buildWebhookDeliveryPayload(job PaymentWebhookDeliveryJob) WebhookDeliveryP
 
 func (s *Service) endpointSigningSecret(endpointID string, version int) string {
 	mac := hmac.New(sha256.New, []byte(s.deliverySigningSecret))
-	_, _ = mac.Write([]byte("azsubay-payment-webhook:"))
+	_, _ = mac.Write([]byte("lipago-payment-webhook:"))
 	_, _ = mac.Write([]byte(endpointID))
 	// Version 1 keeps the original derivation byte-for-byte so secrets
 	// merchants already stored keep verifying. Versions >= 2 mix the

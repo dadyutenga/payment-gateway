@@ -11,7 +11,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"azsubay-payments-gateway/internal/modules/payments/provider"
+	"lipago/internal/modules/payments/provider"
 )
 
 func TestVerifyWebhookSignature(t *testing.T) {

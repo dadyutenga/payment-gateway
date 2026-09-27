@@ -27,7 +27,7 @@ import (
 	"strings"
 	"time"
 
-	"azsubay-payments-gateway/internal/modules/payments/provider"
+	"lipago/internal/modules/payments/provider"
 )
 
 // Config tunes the simulator. Both fields come from the admin-managed

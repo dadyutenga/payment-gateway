@@ -47,7 +47,7 @@ const AdminLayout = () => {
         <div className="mx-auto flex h-14 max-w-6xl items-center justify-between gap-2 px-4 sm:px-6">
           <div className="flex items-center gap-2 font-bold text-slate-900">
             <Wallet className="h-5 w-5" />
-            Payments Gateway
+            LipaGO
           </div>
           <nav className="flex items-center gap-1">
             {orgs.length > 0 && (

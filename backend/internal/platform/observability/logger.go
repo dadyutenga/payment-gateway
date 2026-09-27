@@ -5,7 +5,7 @@ import (
 	"os"
 	"strings"
 
-	"azsubay-payments-gateway/internal/platform/config"
+	"lipago/internal/platform/config"
 )
 
 // NewLogger builds a JSON logger so application logs stay structured and

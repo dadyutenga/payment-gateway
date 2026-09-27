@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"azsubay-payments-gateway/internal/platform/middleware"
-	"azsubay-payments-gateway/internal/shared/httputil"
+	"lipago/internal/platform/middleware"
+	"lipago/internal/shared/httputil"
 )
 
 type Handler struct {

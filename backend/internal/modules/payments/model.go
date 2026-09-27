@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"time"
 
-	"azsubay-payments-gateway/internal/modules/payments/provider"
+	"lipago/internal/modules/payments/provider"
 )
 
 type PaymentApp struct {
@@ -536,7 +536,7 @@ type UpdateProviderAccountInput struct {
 }
 
 // ---------- Ledger, balances, fees, withdrawals ----------
-// Phase 1 of the AZSUBAY Gateway ledger: balance is always derived from
+// Phase 1 of the LipaGO ledger: balance is always derived from
 // summing ledger entries, never stored as a mutable column. See
 // PAYMENTS_GATEWAY_ARCHITECTURE.md for the full design rationale.
 

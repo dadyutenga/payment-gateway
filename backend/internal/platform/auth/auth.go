@@ -16,8 +16,8 @@ import (
 	"strings"
 	"time"
 
-	"azsubay-payments-gateway/internal/platform/config"
-	"azsubay-payments-gateway/internal/shared/httputil"
+	"lipago/internal/platform/config"
+	"lipago/internal/shared/httputil"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx"
@@ -413,14 +413,14 @@ func (s *Service) RequestOTP(ctx context.Context, userID, channel, purpose, phon
 		if s.mailer == nil {
 			return OTPRequest{}, ErrOTPNotConfigured
 		}
-		if err := s.mailer.SendEmail(ctx, destination, "Your verification code", "Your AZSUBAY verification code is "+code+". It expires in 10 minutes."); err != nil {
+		if err := s.mailer.SendEmail(ctx, destination, "Your verification code", "Your LipaGO verification code is "+code+". It expires in 10 minutes."); err != nil {
 			return OTPRequest{}, fmt.Errorf("%w: %v", ErrOTPSendFailed, err)
 		}
 	} else {
 		if s.sms == nil {
 			return OTPRequest{}, ErrOTPNotConfigured
 		}
-		if err := s.sms.SendSMS(ctx, destination, "Your AZSUBAY verification code is "+code+". It expires in 10 minutes."); err != nil {
+		if err := s.sms.SendSMS(ctx, destination, "Your LipaGO verification code is "+code+". It expires in 10 minutes."); err != nil {
 			return OTPRequest{}, fmt.Errorf("%w: %v", ErrOTPSendFailed, err)
 		}
 	}

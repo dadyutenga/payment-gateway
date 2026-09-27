@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"azsubay-payments-gateway/internal/platform/config"
+	"lipago/internal/platform/config"
 
 	"github.com/jackc/pgx"
 )

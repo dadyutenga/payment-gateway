@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"azsubay-payments-gateway/internal/modules/payments/provider"
+	"lipago/internal/modules/payments/provider"
 )
 
 func TestConfigFromCredentials(t *testing.T) {

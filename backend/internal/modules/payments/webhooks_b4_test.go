@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"azsubay-payments-gateway/internal/modules/payments/provider"
+	"lipago/internal/modules/payments/provider"
 )
 
 func TestEndpointSigningSecretVersions(t *testing.T) {
@@ -84,8 +84,8 @@ func TestProcessDueDeliveriesSignsWithJobVersion(t *testing.T) {
 	var receivedTimestamp string
 	var receivedBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		receivedSignature = r.Header.Get("X-AZsubay-Signature")
-		receivedTimestamp = r.Header.Get("X-AZsubay-Timestamp")
+		receivedSignature = r.Header.Get("X-LipaGO-Signature")
+		receivedTimestamp = r.Header.Get("X-LipaGO-Timestamp")
 		receivedBody, _ = io.ReadAll(r.Body)
 		w.WriteHeader(http.StatusNoContent)
 	}))

@@ -7,24 +7,22 @@ import (
 	"net/http"
 	"time"
 
-	"azsubay-payments-gateway/internal/modules/orgs"
-	"azsubay-payments-gateway/internal/modules/payments"
-	"azsubay-payments-gateway/internal/modules/payments/providers"
-	"azsubay-payments-gateway/internal/platform/auth"
-	"azsubay-payments-gateway/internal/platform/config"
-	azcrypto "azsubay-payments-gateway/internal/platform/crypto"
-	"azsubay-payments-gateway/internal/platform/database"
-	"azsubay-payments-gateway/internal/platform/middleware"
-	"azsubay-payments-gateway/internal/platform/observability"
-	"azsubay-payments-gateway/internal/shared/httputil"
+	"lipago/internal/modules/orgs"
+	"lipago/internal/modules/payments"
+	"lipago/internal/modules/payments/providers"
+	"lipago/internal/platform/auth"
+	"lipago/internal/platform/config"
+	azcrypto "lipago/internal/platform/crypto"
+	"lipago/internal/platform/database"
+	"lipago/internal/platform/middleware"
+	"lipago/internal/platform/observability"
+	"lipago/internal/shared/httputil"
 
 	"github.com/jackc/pgx"
 )
 
-// This mirrors azsubayec-backend/internal/platform/httpserver, trimmed to
-// only what the standalone Payments Gateway needs: the payments module,
-// health, and a minimal admin identity check. See that repo for the full
-// multi-module version (products, SMS, users, OAuth-provider, ...).
+// This mirrors the internal httpserver layout this project was extracted
+// with: the payments module, health, and a minimal admin identity check.
 
 type App struct {
 	cfg    config.Config
@@ -88,10 +86,10 @@ func New(ctx context.Context) (*App, error) {
 		LiveDailyVolumeCap:             cfg.Payments.LiveDailyVolumeCap,
 	}, logger)
 	// SMS success notifications, admin alerts, and an audit trail are all
-	// optional integrations in the full AZSUBAY backend (SetSMSSender,
-	// SetNotifier, SetAuditWriter) — none are wired here, so those features
-	// simply no-op. Wire your own if you want them; the Service methods are
-	// narrow interfaces, not concrete AZSUBAY types.
+	// optional integrations (SetSMSSender, SetNotifier, SetAuditWriter) —
+	// none are wired here, so those features simply no-op. Wire your own
+	// if you want them; the Service methods are narrow interfaces, not
+	// concrete types.
 	paymentHandler := payments.NewHandler(paymentService, cfg.Payments.WebhookMaxBodyBytes)
 	paymentHandler.SetLogger(logger)
 
@@ -122,7 +120,7 @@ func New(ctx context.Context) (*App, error) {
 			dbStatus = "down"
 		}
 		httputil.JSON(w, http.StatusOK, map[string]any{
-			"service":         "azsubay-payments-gateway",
+			"service":         "lipago-payment-system",
 			"status":          "ok",
 			"env":             cfg.App.Env,
 			"time":            time.Now().UTC(),

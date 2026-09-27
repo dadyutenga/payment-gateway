@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"azsubay-payments-gateway/internal/platform/auth"
-	"azsubay-payments-gateway/internal/platform/config"
-	"azsubay-payments-gateway/internal/shared/httputil"
+	"lipago/internal/platform/auth"
+	"lipago/internal/platform/config"
+	"lipago/internal/shared/httputil"
 )
 
 type contextKey string

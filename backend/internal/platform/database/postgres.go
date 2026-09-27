@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"azsubay-payments-gateway/internal/platform/config"
+	"lipago/internal/platform/config"
 	"github.com/jackc/pgx"
 )
 

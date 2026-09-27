@@ -1,6 +1,6 @@
-# Payments Gateway — admin frontend
+# LipaGO — frontend
 
-React admin panel for the Payments Gateway: apps, API keys, providers,
+React panel for LipaGO: signup, organizations, apps, API keys, providers,
 withdrawals, orders/ledger/events. It talks only to the Go backend via
 `VITE_API_BASE_URL`.
 

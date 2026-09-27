@@ -19,8 +19,8 @@ import (
 	"strings"
 	"time"
 
-	"azsubay-payments-gateway/internal/platform/config"
-	"azsubay-payments-gateway/internal/platform/database"
+	"lipago/internal/platform/config"
+	"lipago/internal/platform/database"
 
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"

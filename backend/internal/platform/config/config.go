@@ -11,10 +11,9 @@ import (
 )
 
 // Config holds all runtime configuration required to boot the standalone
-// AZSUBAY Payments Gateway. This is a trimmed copy of the full AZSUBAY
-// backend's config — only what the Payments module actually needs (see
-// that repo's internal/platform/config for the full version). No Redis,
-// no OAuth-provider config: this package doesn't include those modules.
+// LipaGO payment system — only what the Payments module actually needs.
+// No Redis, no OAuth-provider config: this package doesn't include those
+// modules.
 type Config struct {
 	App      AppConfig
 	HTTP     HTTPConfig
@@ -116,7 +115,7 @@ func Load() (Config, error) {
 	LoadDotEnv(".env")
 	cfg := Config{
 		App: AppConfig{
-			Name:            getEnv("APP_NAME", "azsubay-payments-gateway"),
+			Name:            getEnv("APP_NAME", "lipago"),
 			Env:             getEnv("APP_ENV", "development"),
 			LogLevel:        slogLevel(getEnv("LOG_LEVEL", "INFO")),
 			ShutdownTimeout: mustDuration("APP_SHUTDOWN_TIMEOUT", "15s"),

@@ -31,7 +31,7 @@ const SignIn = () => {
   return (
     <div className="flex min-h-screen items-center justify-center bg-slate-50 px-4">
       <div className="w-full max-w-sm rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
-        <h1 className="text-lg font-bold text-slate-900">Payments Gateway Admin</h1>
+          <h1 className="text-lg font-bold text-slate-900">LipaGO</h1>
 
           <form onSubmit={handleSignIn} className="mt-5 space-y-4">
             <div>

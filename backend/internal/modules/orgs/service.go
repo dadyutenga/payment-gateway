@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"strings"
 
-	"azsubay-payments-gateway/internal/shared/validation"
+	"lipago/internal/shared/validation"
 )
 
 // Service owns organization membership rules. Role enforcement for
