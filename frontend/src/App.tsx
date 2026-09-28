@@ -19,6 +19,7 @@ import OrgMembers from "@/pages/OrgMembers";
 import OrgSettings from "@/pages/OrgSettings";
 import SignUp from "@/pages/SignUp";
 import OnboardingKYC from "@/pages/OnboardingKYC";
+import Welcome from "@/pages/Welcome";
 
 const queryClient = new QueryClient();
 
@@ -93,8 +94,8 @@ const App = () => (
           >
             <Route index element={<OnboardingKYC />} />
           </Route>
-          <Route path="/" element={<Navigate to="/admin/payments" replace />} />
-          <Route path="*" element={<Navigate to="/admin/payments" replace />} />
+          <Route path="/" element={<Welcome />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </BrowserRouter>
     </>
