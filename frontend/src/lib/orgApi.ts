@@ -89,6 +89,11 @@ export type Organization = {
   kyc_status: "pending" | "submitted" | "verified" | "rejected";
   business_name?: string;
   tin?: string;
+  address?: string;
+  phone?: string;
+  contact_email?: string;
+  logo_url?: string;
+  primary_color?: string;
   live_max_txn_amount?: string;
   live_daily_volume_cap?: string;
   created_at: string;
@@ -133,7 +138,16 @@ export async function getOrg(orgId: string) {
   return (await request<OrganizationWithRole>(`/api/v1/orgs/${orgId}`)).data;
 }
 
-export async function updateOrg(orgId: string, input: { name: string; business_name?: string }) {
+export async function updateOrg(orgId: string, input: {
+  name: string;
+  business_name?: string;
+  tin?: string;
+  address?: string;
+  phone?: string;
+  contact_email?: string;
+  logo_url?: string;
+  primary_color?: string;
+}) {
   return (await request<Organization>(`/api/v1/orgs/${orgId}`, { method: "PATCH", body: input })).data;
 }
 
@@ -167,6 +181,73 @@ export async function removeOrgMember(orgId: string, userId: string) {
 
 export async function leaveOrg(orgId: string) {
   await request<unknown>(`/api/v1/orgs/${orgId}/leave`, { method: "POST" });
+}
+
+// ---------- KYC history (immutable submit/decide trail) ----------
+
+export type KYCAttempt = {
+  id: string;
+  org_id: string;
+  business_name: string;
+  tin: string;
+  id_document_url: string;
+  status: "submitted" | "verified" | "rejected";
+  rejection_reason?: string;
+  reviewed_by?: string;
+  reviewed_at?: string;
+  created_at: string;
+};
+
+export async function listKYCAttempts(orgId: string) {
+  return (await request<KYCAttempt[]>(`/api/v1/orgs/${orgId}/kyc/attempts`)).data;
+}
+
+// ---------- Limits usage (effective caps + today's live volume + fees) ----------
+
+export type OrgAppUsage = {
+  app_id: string;
+  name: string;
+  fee_type: string;
+  fee_percent: string;
+  fee_fixed: string;
+  max_txn: string;
+  max_txn_source: "org_override" | "platform";
+  daily_cap: string;
+  daily_cap_source: "org_override" | "platform";
+  today_volume: Record<string, string>;
+};
+
+export type OrgLimitsUsage = {
+  max_txn: string;
+  max_txn_source: "org_override" | "platform";
+  daily_cap: string;
+  daily_cap_source: "org_override" | "platform";
+  apps: OrgAppUsage[];
+};
+
+export async function getLimitsUsage(orgId: string) {
+  return (await request<OrgLimitsUsage>(`/api/v1/merchant/orgs/${orgId}/limits-usage`)).data;
+}
+
+// ---------- Notification preferences ----------
+
+export type NotificationPrefs = {
+  org_id: string;
+  payment_updated: boolean;
+  payment_refunded: boolean;
+  payment_expired: boolean;
+  withdrawal_updates: boolean;
+  kyc_decisions: boolean;
+};
+
+export async function getNotificationPrefs(orgId: string) {
+  return (await request<NotificationPrefs>(`/api/v1/orgs/${orgId}/notification-prefs`)).data;
+}
+
+export async function updateNotificationPrefs(orgId: string, input: Omit<NotificationPrefs, "org_id">) {
+  return (
+    await request<NotificationPrefs>(`/api/v1/orgs/${orgId}/notification-prefs`, { method: "PATCH", body: input })
+  ).data;
 }
 
 // ---------- Admin: KYC review queue, decisions, live limits ----------

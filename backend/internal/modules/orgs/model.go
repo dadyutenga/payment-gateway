@@ -85,8 +85,27 @@ type Organization struct {
 	// overrides (positive decimals). Empty means platform default.
 	LiveMaxTxnAmount   string    `json:"live_max_txn_amount,omitempty"`
 	LiveDailyVolumeCap string    `json:"live_daily_volume_cap,omitempty"`
-	CreatedAt          time.Time `json:"created_at"`
-	UpdatedAt          time.Time `json:"updated_at"`
+	// Extended profile (Settings > General / Branding). All optional.
+	Address       string    `json:"address,omitempty"`
+	Phone         string    `json:"phone,omitempty"`
+	ContactEmail  string    `json:"contact_email,omitempty"`
+	LogoURL       string    `json:"logo_url,omitempty"`
+	PrimaryColor  string    `json:"primary_color,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+}
+
+// OrgProfileUpdate carries the editable Settings fields. Empty TIN /
+// business name handling matches the old behavior (NULL-able columns).
+type OrgProfileUpdate struct {
+	Name         string
+	BusinessName string
+	TIN          string
+	Address      string
+	Phone        string
+	ContactEmail string
+	LogoURL      string
+	PrimaryColor string
 }
 
 // OrganizationWithRole pairs an org with the caller's role in it — what
@@ -138,7 +157,36 @@ var (
 	ErrKYCNotSubmitted      = errors.New("no kyc submission for this organization")
 	ErrKYCNotInReview       = errors.New("organization has no submission awaiting review")
 	ErrKYCQueueStatusUnknown = errors.New("unknown kyc queue status")
+	ErrReverificationRequired = errors.New("business name and TIN are locked after verification — resubmit verification to change them")
 )
+
+// KYCAttempt is one immutable history row: every submit and every admin
+// decision appends one. The live kyc_submissions row stays the enforced
+// source of truth.
+type KYCAttempt struct {
+	ID             string     `json:"id"`
+	OrgID          string     `json:"org_id"`
+	BusinessName   string     `json:"business_name"`
+	TIN            string     `json:"tin"`
+	IDDocumentURL  string     `json:"id_document_url"`
+	Status         string     `json:"status"`
+	RejectionReason string    `json:"rejection_reason,omitempty"`
+	ReviewedBy     string     `json:"reviewed_by,omitempty"`
+	ReviewedAt     *time.Time `json:"reviewed_at,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
+}
+
+// NotificationPrefs gates per-org event notifications. Absent row == all
+// enabled. Delivery itself is still the log-only mailer/SMS stub until a
+// real provider is wired.
+type NotificationPrefs struct {
+	OrgID             string `json:"org_id"`
+	PaymentUpdated    bool   `json:"payment_updated"`
+	PaymentRefunded   bool   `json:"payment_refunded"`
+	PaymentExpired    bool   `json:"payment_expired"`
+	WithdrawalUpdates bool   `json:"withdrawal_updates"`
+	KYCDecisions      bool   `json:"kyc_decisions"`
+}
 
 // KYCQueueItem is one row of the admin review queue: the org plus its
 // current submission evidence.

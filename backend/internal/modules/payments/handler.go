@@ -1683,6 +1683,28 @@ func (h *Handler) MerchantListAPIKeys(w http.ResponseWriter, r *http.Request) {
 	httputil.JSON(w, http.StatusOK, map[string]any{"data": keys})
 }
 
+// MerchantOrgLimitsUsage serves the Settings Limits & Fees tab: effective
+// caps, per-app fees, and today's live volume. Any active org member may
+// read (route carries customer auth; membership is checked here).
+func (h *Handler) MerchantOrgLimitsUsage(w http.ResponseWriter, r *http.Request) {
+	claims, ok := middleware.ClaimsFromContext(r.Context())
+	if !ok {
+		httputil.Error(w, http.StatusUnauthorized, "unauthorized", "Missing authenticated user.", nil)
+		return
+	}
+	orgID := r.PathValue("orgID")
+	if _, err := h.orgs.CheckOrgPermission(r.Context(), claims.Subject, orgID, orgs.PermRead); err != nil {
+		httputil.Error(w, http.StatusForbidden, "forbidden", "You don't have access to this organization.", nil)
+		return
+	}
+	usage, err := h.service.OrgLimitsUsage(r.Context(), orgID)
+	if err != nil {
+		h.fail(w, http.StatusInternalServerError, "internal_error", "Unable to load limits usage.", err)
+		return
+	}
+	httputil.JSON(w, http.StatusOK, map[string]any{"data": usage})
+}
+
 type merchantCreateAPIKeyInput struct {
 	Environment string `json:"environment"`
 	Label       string `json:"label"`

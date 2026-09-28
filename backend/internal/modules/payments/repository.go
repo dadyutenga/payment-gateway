@@ -95,6 +95,7 @@ type Repository interface {
 	ListAppMembers(ctx context.Context, appID string) ([]AppMember, error)
 	ListAppsForUser(ctx context.Context, userID string) ([]PaymentApp, error)
 	TodayLiveVolume(ctx context.Context, appID, currency string) (string, error)
+	ListAppsByOrg(ctx context.Context, orgID string) ([]PaymentApp, error)
 	// OrganizationExists gates app creation: payment_apps.org_id is NOT
 	// NULL, so an unknown org must fail fast with a clean 422 rather than
 	// a foreign-key 500.
@@ -2840,6 +2841,35 @@ func (r *PostgresRepository) ListAppsForUser(ctx context.Context, userID string)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate apps for user: %w", err)
+	}
+	return apps, nil
+}
+
+// ListAppsByOrg lists an org's non-deleted apps (Settings Limits & Fees).
+func (r *PostgresRepository) ListAppsByOrg(ctx context.Context, orgID string) ([]PaymentApp, error) {
+	rows, err := r.db.QueryEx(ctx, `
+		SELECT id::text, name, COALESCE(description, ''), status,
+		       fee_type, fee_percent::text, fee_fixed::text, created_at, updated_at,
+		       org_id::text
+		FROM app.payment_apps
+		WHERE org_id = $1::uuid AND status != 'deleted'
+		ORDER BY name ASC
+	`, nil, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("list apps by org: %w", err)
+	}
+	defer rows.Close()
+
+	apps := []PaymentApp{}
+	for rows.Next() {
+		var app PaymentApp
+		if err := rows.Scan(&app.ID, &app.Name, &app.Description, &app.Status, &app.FeeType, &app.FeePercent, &app.FeeFixed, &app.CreatedAt, &app.UpdatedAt, &app.OrgID); err != nil {
+			return nil, fmt.Errorf("scan app by org: %w", err)
+		}
+		apps = append(apps, app)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate apps by org: %w", err)
 	}
 	return apps, nil
 }

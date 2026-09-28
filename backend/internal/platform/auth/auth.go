@@ -960,6 +960,68 @@ func (s *Service) HandleAdminMe(w http.ResponseWriter, r *http.Request) {
 	httputil.JSON(w, http.StatusOK, map[string]any{"data": profile})
 }
 
+// ChangePassword verifies the current password and sets a new one
+// (customer space; admins have no password-change self-service — an
+// existing admin rotates operator credentials via invite/re-seed).
+func (s *Service) ChangePassword(ctx context.Context, userID, current, next string) error {
+	if len(next) < 12 {
+		return errors.New("use a password with at least 12 characters")
+	}
+	var hash string
+	err := s.db.QueryRowEx(ctx, `SELECT password_hash FROM app.users WHERE id = $1::uuid`, nil, userID).Scan(&hash)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return errors.New("account not found")
+	}
+	if err != nil {
+		return fmt.Errorf("load password: %w", err)
+	}
+	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(current)) != nil {
+		return errors.New("current password is incorrect")
+	}
+	newHash, err := bcrypt.GenerateFromPassword([]byte(next), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("hash password: %w", err)
+	}
+	if _, err := s.db.ExecEx(ctx, `UPDATE app.users SET password_hash = $2, updated_at = NOW() WHERE id = $1::uuid`, nil, userID, string(newHash)); err != nil {
+		return fmt.Errorf("save password: %w", err)
+	}
+	return nil
+}
+
+type passwordChangeHTTPInput struct {
+	CurrentPassword string `json:"current_password"`
+	NewPassword     string `json:"new_password"`
+}
+
+// HandlePasswordChange serves POST /api/v1/auth/password (customer space,
+// reachable before email verification so nobody is locked out).
+func (s *Service) HandlePasswordChange(w http.ResponseWriter, r *http.Request) {
+	claims, ok := ClaimsFromContext(r.Context())
+	if !ok {
+		httputil.Error(w, http.StatusUnauthorized, "unauthorized", "Missing authenticated user.", nil)
+		return
+	}
+	var in passwordChangeHTTPInput
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		httputil.Error(w, http.StatusBadRequest, "invalid_request", "Current and new passwords are required.", nil)
+		return
+	}
+	if err := s.ChangePassword(r.Context(), claims.Subject, in.CurrentPassword, in.NewPassword); err != nil {
+		switch err.Error() {
+		case "use a password with at least 12 characters",
+			"current password is incorrect":
+			httputil.Error(w, http.StatusUnprocessableEntity, "validation_failed", err.Error(), nil)
+		case "account not found":
+			httputil.Error(w, http.StatusUnauthorized, "unauthorized", "Account not found.", nil)
+		default:
+			httputil.Error(w, http.StatusInternalServerError, "internal_error", "Unable to change password.", nil)
+		}
+		return
+	}
+	httputil.JSON(w, http.StatusOK, map[string]any{"data": map[string]any{"changed": true}})
+}
+
 // LogMailer is the development-only Mailer: it logs metadata, never the
 // code (codes are retrievable from app.otp_codes for local testing).
 type LogMailer struct{ logger *slog.Logger }

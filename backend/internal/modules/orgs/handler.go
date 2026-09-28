@@ -101,6 +101,10 @@ func (h *Handler) CreateOrganization(w http.ResponseWriter, r *http.Request) {
 	}
 	org, vErrs, err := h.service.CreateOrganization(r.Context(), userID, in.Name, in.BusinessName)
 	if err != nil {
+		if errors.Is(err, ErrSingleOrg) {
+			httputil.Error(w, http.StatusConflict, "single_org", "Each account belongs to a single organization.", nil)
+			return
+		}
 		h.fail(w, http.StatusInternalServerError, "create_failed", "Unable to create organization.", err)
 		return
 	}
@@ -145,6 +149,12 @@ func (h *Handler) GetOrganization(w http.ResponseWriter, r *http.Request) {
 type updateOrgHTTPInput struct {
 	Name         string `json:"name"`
 	BusinessName string `json:"business_name"`
+	TIN          string `json:"tin"`
+	Address      string `json:"address"`
+	Phone        string `json:"phone"`
+	ContactEmail string `json:"contact_email"`
+	LogoURL      string `json:"logo_url"`
+	PrimaryColor string `json:"primary_color"`
 }
 
 func (h *Handler) UpdateOrganization(w http.ResponseWriter, r *http.Request) {
@@ -157,8 +167,16 @@ func (h *Handler) UpdateOrganization(w http.ResponseWriter, r *http.Request) {
 		httputil.Error(w, http.StatusBadRequest, "invalid_request", "Unable to decode request body.", nil)
 		return
 	}
-	org, vErrs, err := h.service.UpdateOrganization(r.Context(), userID, r.PathValue("orgID"), in.Name, in.BusinessName)
+	org, vErrs, err := h.service.UpdateOrganization(r.Context(), userID, r.PathValue("orgID"), OrgProfileUpdate{
+		Name: in.Name, BusinessName: in.BusinessName, TIN: in.TIN,
+		Address: in.Address, Phone: in.Phone, ContactEmail: in.ContactEmail,
+		LogoURL: in.LogoURL, PrimaryColor: in.PrimaryColor,
+	})
 	if err != nil {
+		if errors.Is(err, ErrReverificationRequired) {
+			httputil.Error(w, http.StatusConflict, "reverification_required", "Business name and TIN are locked after verification — resubmit verification to change them.", nil)
+			return
+		}
 		h.orgError(w, err, "manage this organization")
 		return
 	}
@@ -335,6 +353,64 @@ func (h *Handler) SubmitKYC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httputil.JSON(w, http.StatusOK, map[string]any{"data": sub})
+}
+
+// ListKYCAttempts returns the submit/decide history for the Settings
+// verification tab (any active member).
+func (h *Handler) ListKYCAttempts(w http.ResponseWriter, r *http.Request) {
+	userID, ok := claimsUserID(w, r)
+	if !ok {
+		return
+	}
+	attempts, err := h.service.ListKYCAttempts(r.Context(), userID, r.PathValue("orgID"))
+	if err != nil {
+		h.orgError(w, err, "view verification history")
+		return
+	}
+	httputil.JSON(w, http.StatusOK, map[string]any{"data": attempts})
+}
+
+type notificationPrefsHTTPInput struct {
+	PaymentUpdated    bool `json:"payment_updated"`
+	PaymentRefunded   bool `json:"payment_refunded"`
+	PaymentExpired    bool `json:"payment_expired"`
+	WithdrawalUpdates bool `json:"withdrawal_updates"`
+	KYCDecisions      bool `json:"kyc_decisions"`
+}
+
+func (h *Handler) GetNotificationPrefs(w http.ResponseWriter, r *http.Request) {
+	userID, ok := claimsUserID(w, r)
+	if !ok {
+		return
+	}
+	prefs, err := h.service.GetNotificationPrefs(r.Context(), userID, r.PathValue("orgID"))
+	if err != nil {
+		h.orgError(w, err, "view notification settings")
+		return
+	}
+	httputil.JSON(w, http.StatusOK, map[string]any{"data": prefs})
+}
+
+func (h *Handler) UpdateNotificationPrefs(w http.ResponseWriter, r *http.Request) {
+	userID, ok := claimsUserID(w, r)
+	if !ok {
+		return
+	}
+	var in notificationPrefsHTTPInput
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		httputil.Error(w, http.StatusBadRequest, "invalid_request", "Unable to decode request body.", nil)
+		return
+	}
+	prefs, err := h.service.UpdateNotificationPrefs(r.Context(), userID, r.PathValue("orgID"), NotificationPrefs{
+		PaymentUpdated: in.PaymentUpdated, PaymentRefunded: in.PaymentRefunded,
+		PaymentExpired: in.PaymentExpired, WithdrawalUpdates: in.WithdrawalUpdates,
+		KYCDecisions: in.KYCDecisions,
+	})
+	if err != nil {
+		h.orgError(w, err, "change notification settings")
+		return
+	}
+	httputil.JSON(w, http.StatusOK, map[string]any{"data": prefs})
 }
 
 func (h *Handler) GetKYCSubmission(w http.ResponseWriter, r *http.Request) {

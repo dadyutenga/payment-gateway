@@ -573,6 +573,54 @@ func (s *Service) GetAppBalance(ctx context.Context, appID string) (AppBalance, 
 	return s.repo.GetAppBalance(ctx, appID)
 }
 
+// OrgLimitsUsage assembles the Settings Limits & Fees tab: effective live
+// caps (per-org override else platform default, with the source labeled),
+// per-app fees, and today's confirmed live volume per currency each app
+// actually holds (ledger-sourced, never cached).
+func (s *Service) OrgLimitsUsage(ctx context.Context, orgID string) (OrgLimitsUsage, error) {
+	apps, err := s.repo.ListAppsByOrg(ctx, orgID)
+	if err != nil {
+		return OrgLimitsUsage{}, err
+	}
+	orgMaxTxn, orgDailyCap, err := s.repo.GetOrgLiveLimits(ctx, orgID)
+	if err != nil {
+		return OrgLimitsUsage{}, err
+	}
+	out := OrgLimitsUsage{Apps: []OrgAppUsage{}}
+	if orgMaxTxn != "" {
+		out.MaxTxn, out.MaxTxnSource = orgMaxTxn, "org_override"
+	} else {
+		out.MaxTxn, out.MaxTxnSource = s.liveMaxTxnAmount, "platform"
+	}
+	if orgDailyCap != "" {
+		out.DailyCap, out.DailyCapSource = orgDailyCap, "org_override"
+	} else {
+		out.DailyCap, out.DailyCapSource = s.liveDailyVolumeCap, "platform"
+	}
+	for _, app := range apps {
+		usage := OrgAppUsage{
+			AppID: app.ID, Name: app.Name,
+			FeeType: app.FeeType, FeePercent: app.FeePercent, FeeFixed: app.FeeFixed,
+			MaxTxn: out.MaxTxn, MaxTxnSource: out.MaxTxnSource,
+			DailyCap: out.DailyCap, DailyCapSource: out.DailyCapSource,
+			TodayVolume: map[string]string{},
+		}
+		balance, err := s.repo.GetAppBalance(ctx, app.ID)
+		if err != nil {
+			return OrgLimitsUsage{}, err
+		}
+		for _, b := range balance.Balances {
+			today, err := s.repo.TodayLiveVolume(ctx, app.ID, b.Currency)
+			if err != nil {
+				return OrgLimitsUsage{}, err
+			}
+			usage.TodayVolume[b.Currency] = today
+		}
+		out.Apps = append(out.Apps, usage)
+	}
+	return out, nil
+}
+
 func (s *Service) ListLedgerEntries(ctx context.Context, filter LedgerEntryListFilter) (LedgerEntryListResult, error) {
 	return s.repo.ListLedgerEntries(ctx, filter)
 }

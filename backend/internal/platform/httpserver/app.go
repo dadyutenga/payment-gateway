@@ -126,6 +126,7 @@ func New(ctx context.Context) (*App, error) {
 	// OTP stays reachable before email verification so users can finish it.
 	mux.Handle("POST /api/v1/auth/otp/request", middleware.Chain(http.HandlerFunc(authService.HandleOTPRequest), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, false)))
 	mux.Handle("POST /api/v1/auth/otp/verify", middleware.Chain(http.HandlerFunc(authService.HandleOTPVerify), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, false)))
+	mux.Handle("POST /api/v1/auth/password", middleware.Chain(http.HandlerFunc(authService.HandlePasswordChange), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, false)))
 	// Canonical identity endpoints per space.
 	mux.Handle("GET /api/v1/auth/me", middleware.Chain(http.HandlerFunc(authService.HandleCustomerMe), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, false)))
 	mux.Handle("GET /api/v1/admin/auth/me", middleware.Chain(http.HandlerFunc(authService.HandleAdminMe), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))
@@ -266,6 +267,7 @@ func New(ctx context.Context) (*App, error) {
 	mux.Handle("POST /api/v1/merchant/apps/{id}/api-keys/{keyID}/revoke", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantRevokeAPIKey), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
 	mux.Handle("GET /api/v1/merchant/apps/{id}/deliveries", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantListDeliveries), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
 	mux.Handle("POST /api/v1/merchant/apps/{id}/deliveries/{deliveryID}/replay", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantReplayDelivery), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("GET /api/v1/merchant/orgs/{orgID}/limits-usage", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantOrgLimitsUsage), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
 
 	// ---- Organizations & roles (session-authenticated; role checks run
 	// inside the handlers/services against the member's own row) ----
@@ -290,6 +292,9 @@ func New(ctx context.Context) (*App, error) {
 	mux.Handle("POST /api/v1/orgs/{orgID}/leave", middleware.Chain(http.HandlerFunc(orgHandler.LeaveOrganization), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
 	mux.Handle("POST /api/v1/orgs/{orgID}/kyc", middleware.Chain(http.HandlerFunc(orgHandler.SubmitKYC), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
 	mux.Handle("GET /api/v1/orgs/{orgID}/kyc", middleware.Chain(http.HandlerFunc(orgHandler.GetKYCSubmission), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("GET /api/v1/orgs/{orgID}/kyc/attempts", middleware.Chain(http.HandlerFunc(orgHandler.ListKYCAttempts), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("GET /api/v1/orgs/{orgID}/notification-prefs", middleware.Chain(http.HandlerFunc(orgHandler.GetNotificationPrefs), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("PATCH /api/v1/orgs/{orgID}/notification-prefs", middleware.Chain(http.HandlerFunc(orgHandler.UpdateNotificationPrefs), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
 	mux.Handle("POST /api/v1/orgs/{orgID}/kyc/document", middleware.Chain(http.HandlerFunc(orgHandler.UploadKYCDocument), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
 	mux.Handle("GET /api/v1/orgs/{orgID}/kyc/document", middleware.Chain(http.HandlerFunc(orgHandler.ServeKYCDocument), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
 

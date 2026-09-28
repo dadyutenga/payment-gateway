@@ -108,3 +108,7 @@ export async function uploadKYCDocument(orgId: string, file: File) {
   formData.append("document", file);
   return request<{ id_document_url: string }>(`/api/v1/orgs/${orgId}/kyc/document`, { method: "POST", formData });
 }
+
+export async function changePassword(input: { current_password: string; new_password: string }) {
+  return request<{ changed: boolean }>("/api/v1/auth/password", { method: "POST", body: input });
+}

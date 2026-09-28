@@ -596,6 +596,32 @@ type CurrencyBalance struct {
 	AvailableBalanceSevenDaysAgo string `json:"available_balance_seven_days_ago"`
 }
 
+// OrgAppUsage is one app's slice of the Settings Limits & Fees tab:
+// effective caps (org override else platform default), today's confirmed
+// live volume per currency (ledger-sourced, uncached), and the fee that
+// applies to the app.
+type OrgAppUsage struct {
+	AppID         string            `json:"app_id"`
+	Name          string            `json:"name"`
+	FeeType       string            `json:"fee_type"`
+	FeePercent    string            `json:"fee_percent"`
+	FeeFixed      string            `json:"fee_fixed"`
+	MaxTxn        string            `json:"max_txn"`
+	MaxTxnSource  string            `json:"max_txn_source"`
+	DailyCap      string            `json:"daily_cap"`
+	DailyCapSource string           `json:"daily_cap_source"`
+	TodayVolume   map[string]string `json:"today_volume"`
+}
+
+// OrgLimitsUsage powers the merchant Settings Limits & Fees tab.
+type OrgLimitsUsage struct {
+	MaxTxn         string        `json:"max_txn"`
+	MaxTxnSource   string        `json:"max_txn_source"`
+	DailyCap       string        `json:"daily_cap"`
+	DailyCapSource string        `json:"daily_cap_source"`
+	Apps           []OrgAppUsage `json:"apps"`
+}
+
 type LedgerEntry struct {
 	ID             string    `json:"id"`
 	AppID          string    `json:"app_id"`

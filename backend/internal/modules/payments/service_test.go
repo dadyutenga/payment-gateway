@@ -250,6 +250,10 @@ func (r *fakePaymentRepository) TodayLiveVolume(_ context.Context, _, _ string) 
 	return "0", nil
 }
 
+func (r *fakePaymentRepository) ListAppsByOrg(_ context.Context, _ string) ([]PaymentApp, error) {
+	return []PaymentApp{}, nil
+}
+
 func (r *fakePaymentRepository) CreatePaymentApp(_ context.Context, input CreatePaymentAppInput) (PaymentApp, error) {
 	return PaymentApp{ID: "app_test", Name: input.Name, Description: input.Description, Status: "active", OrgID: input.OrgID}, nil
 }

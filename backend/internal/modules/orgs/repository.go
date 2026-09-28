@@ -18,7 +18,7 @@ type Repository interface {
 	CreateOrganization(ctx context.Context, name, slug, businessName, ownerUserID string) (Organization, error)
 	GetOrganization(ctx context.Context, orgID string) (Organization, error)
 	ListOrganizationsForUser(ctx context.Context, userID string) ([]OrganizationWithRole, error)
-	UpdateOrganization(ctx context.Context, orgID, name, businessName string) (Organization, error)
+	UpdateOrganization(ctx context.Context, orgID string, upd OrgProfileUpdate) (Organization, error)
 	DeleteOrganization(ctx context.Context, orgID string) error
 	CountApps(ctx context.Context, orgID string) (int64, error)
 	GetAppOrgID(ctx context.Context, appID string) (string, error)
@@ -49,6 +49,14 @@ type Repository interface {
 	// UpdateOrgLiveLimits sets per-org live caps (empty clears to
 	// platform default).
 	UpdateOrgLiveLimits(ctx context.Context, orgID, maxTxn, dailyCap string) (Organization, error)
+	// ListKYCAttempts returns the immutable submit/decide history, newest
+	// first (Settings verification tab).
+	ListKYCAttempts(ctx context.Context, orgID string) ([]KYCAttempt, error)
+	// GetNotificationPrefs returns the org's toggles (all-enabled when no
+	// row was ever saved).
+	GetNotificationPrefs(ctx context.Context, orgID string) (NotificationPrefs, error)
+	// UpsertNotificationPrefs replaces the org's toggles.
+	UpsertNotificationPrefs(ctx context.Context, prefs NotificationPrefs) (NotificationPrefs, error)
 }
 
 type PostgresRepository struct {
@@ -64,9 +72,12 @@ func scanOrganization(row interface {
 }) (Organization, error) {
 	var org Organization
 	var businessName, tin, maxTxn, dailyCap sql.NullString
+	var address, phone, contactEmail, logoURL, primaryColor sql.NullString
 	if err := row.Scan(
 		&org.ID, &org.Name, &org.Slug, &org.KYCStatus,
-		&businessName, &tin, &maxTxn, &dailyCap, &org.CreatedAt, &org.UpdatedAt,
+		&businessName, &tin, &maxTxn, &dailyCap,
+		&address, &phone, &contactEmail, &logoURL, &primaryColor,
+		&org.CreatedAt, &org.UpdatedAt,
 	); err != nil {
 		return Organization{}, err
 	}
@@ -74,12 +85,18 @@ func scanOrganization(row interface {
 	org.TIN = tin.String
 	org.LiveMaxTxnAmount = maxTxn.String
 	org.LiveDailyVolumeCap = dailyCap.String
+	org.Address = address.String
+	org.Phone = phone.String
+	org.ContactEmail = contactEmail.String
+	org.LogoURL = logoURL.String
+	org.PrimaryColor = primaryColor.String
 	return org, nil
 }
 
 const organizationSelect = `
 	SELECT id::text, name, slug, kyc_status,
 	       business_name, tin, live_max_txn_amount, live_daily_volume_cap,
+	       address, phone, contact_email, logo_url, primary_color,
 	       created_at, updated_at
 	FROM app.organizations
 `
@@ -144,7 +161,9 @@ func (r *PostgresRepository) CreateOrganization(ctx context.Context, name, slug,
 		INSERT INTO app.organizations (name, slug, business_name)
 		VALUES ($1, $2, $3)
 		RETURNING id::text, name, slug, kyc_status, business_name, tin,
-		          live_max_txn_amount, live_daily_volume_cap, created_at, updated_at
+		          live_max_txn_amount, live_daily_volume_cap,
+		          address, phone, contact_email, logo_url, primary_color,
+		          created_at, updated_at
 	`, nil, name, slug, valueOrNil(businessName)))
 	if err != nil {
 		return Organization{}, fmt.Errorf("insert organization: %w", err)
@@ -183,6 +202,7 @@ func (r *PostgresRepository) ListOrganizationsForUser(ctx context.Context, userI
 	rows, err := r.db.QueryEx(ctx, `
 		SELECT o.id::text, o.name, o.slug, o.kyc_status,
 		       o.business_name, o.tin, o.live_max_txn_amount, o.live_daily_volume_cap,
+		       o.address, o.phone, o.contact_email, o.logo_url, o.primary_color,
 		       o.created_at, o.updated_at,
 		       m.role, m.status
 		FROM app.org_members m
@@ -199,10 +219,13 @@ func (r *PostgresRepository) ListOrganizationsForUser(ctx context.Context, userI
 	for rows.Next() {
 		var item OrganizationWithRole
 		var businessName, tin, maxTxn, dailyCap sql.NullString
+		var address, phone, contactEmail, logoURL, primaryColor sql.NullString
 		var role, status string
 		if err := rows.Scan(
 			&item.ID, &item.Name, &item.Slug, &item.KYCStatus,
-			&businessName, &tin, &maxTxn, &dailyCap, &item.CreatedAt, &item.UpdatedAt,
+			&businessName, &tin, &maxTxn, &dailyCap,
+			&address, &phone, &contactEmail, &logoURL, &primaryColor,
+			&item.CreatedAt, &item.UpdatedAt,
 			&role, &status,
 		); err != nil {
 			return nil, fmt.Errorf("scan organization: %w", err)
@@ -211,6 +234,11 @@ func (r *PostgresRepository) ListOrganizationsForUser(ctx context.Context, userI
 		item.TIN = tin.String
 		item.LiveMaxTxnAmount = maxTxn.String
 		item.LiveDailyVolumeCap = dailyCap.String
+		item.Address = address.String
+		item.Phone = phone.String
+		item.ContactEmail = contactEmail.String
+		item.LogoURL = logoURL.String
+		item.PrimaryColor = primaryColor.String
 		item.Role = Role(role)
 		item.Status = MemberStatus(status)
 		orgs = append(orgs, item)
@@ -221,13 +249,19 @@ func (r *PostgresRepository) ListOrganizationsForUser(ctx context.Context, userI
 	return orgs, nil
 }
 
-func (r *PostgresRepository) UpdateOrganization(ctx context.Context, orgID, name, businessName string) (Organization, error) {
+func (r *PostgresRepository) UpdateOrganization(ctx context.Context, orgID string, upd OrgProfileUpdate) (Organization, error) {
 	org, err := scanOrganization(r.db.QueryRowEx(ctx, `
-		UPDATE app.organizations SET name = $2, business_name = $3, updated_at = NOW()
+		UPDATE app.organizations
+		SET name = $2, business_name = $3, tin = $4, address = $5, phone = $6,
+		    contact_email = $7, logo_url = $8, primary_color = $9, updated_at = NOW()
 		WHERE id = $1::uuid
 		RETURNING id::text, name, slug, kyc_status, business_name, tin,
-		          live_max_txn_amount, live_daily_volume_cap, created_at, updated_at
-	`, nil, orgID, name, valueOrNil(businessName)))
+		          live_max_txn_amount, live_daily_volume_cap,
+		          address, phone, contact_email, logo_url, primary_color,
+		          created_at, updated_at
+	`, nil, orgID, upd.Name, valueOrNil(upd.BusinessName), valueOrNil(upd.TIN),
+		valueOrNil(upd.Address), valueOrNil(upd.Phone), valueOrNil(upd.ContactEmail),
+		valueOrNil(upd.LogoURL), valueOrNil(upd.PrimaryColor)))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Organization{}, ErrOrgNotFound
 	}
@@ -505,6 +539,13 @@ func (r *PostgresRepository) SubmitKYC(ctx context.Context, orgID, businessName,
 	`, nil, orgID, valueOrNil(businessName), valueOrNil(tin)); err != nil {
 		return KYCSubmission{}, fmt.Errorf("mark org kyc submitted: %w", err)
 	}
+	// History: every (re)submission appends an immutable attempt row.
+	if _, err = tx.ExecEx(ctx, `
+		INSERT INTO app.kyc_submission_attempts (org_id, business_name, tin, id_document_url, status)
+		VALUES ($1::uuid, $2, $3, $4, 'submitted')
+	`, nil, orgID, businessName, tin, docURL); err != nil {
+		return KYCSubmission{}, fmt.Errorf("record kyc attempt: %w", err)
+	}
 	var sub KYCSubmission
 	sub, err = scanKYCSubmission(tx.QueryRowEx(ctx, kycSubmissionSelect+` WHERE org_id = $1::uuid`, nil, orgID))
 	if err != nil {
@@ -574,10 +615,21 @@ func (r *PostgresRepository) ReviewKYC(ctx context.Context, orgID, status, revie
 		UPDATE app.organizations SET kyc_status = $2, updated_at = NOW()
 		WHERE id = $1::uuid
 		RETURNING id::text, name, slug, kyc_status, business_name, tin,
-		          live_max_txn_amount, live_daily_volume_cap, created_at, updated_at
+		          live_max_txn_amount, live_daily_volume_cap,
+		          address, phone, contact_email, logo_url, primary_color,
+		          created_at, updated_at
 	`, nil, orgID, status))
 	if err != nil {
 		return Organization{}, fmt.Errorf("mark org kyc reviewed: %w", err)
+	}
+	// History: every decision appends an immutable attempt row.
+	if _, err = tx.ExecEx(ctx, `
+		INSERT INTO app.kyc_submission_attempts
+		  (org_id, business_name, tin, id_document_url, status, rejection_reason, reviewed_by, reviewed_at)
+		SELECT org_id, business_name, tin, id_document_url, $2, $3, $4, NOW()
+		FROM app.kyc_submissions WHERE org_id = $1::uuid
+	`, nil, orgID, status, reason, valueOrNil(reviewedBy)); err != nil {
+		return Organization{}, fmt.Errorf("record kyc attempt: %w", err)
 	}
 	if err = tx.CommitEx(ctx); err != nil {
 		return Organization{}, fmt.Errorf("commit review kyc transaction: %w", err)
@@ -629,6 +681,95 @@ func (r *PostgresRepository) ListKYCQueue(ctx context.Context, status string) ([
 		return nil, fmt.Errorf("iterate kyc queue: %w", err)
 	}
 	return items, nil
+}
+
+// ListKYCAttempts returns the immutable submit/decide history, newest
+// first. Empty (not an error) when nothing was ever submitted.
+func (r *PostgresRepository) ListKYCAttempts(ctx context.Context, orgID string) ([]KYCAttempt, error) {
+	rows, err := r.db.QueryEx(ctx, `
+		SELECT id::text, org_id::text, business_name, tin, id_document_url,
+		       status, COALESCE(rejection_reason, ''), reviewed_by, reviewed_at, created_at
+		FROM app.kyc_submission_attempts
+		WHERE org_id = $1::uuid
+		ORDER BY created_at DESC
+	`, nil, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("list kyc attempts: %w", err)
+	}
+	defer rows.Close()
+
+	attempts := []KYCAttempt{}
+	for rows.Next() {
+		var a KYCAttempt
+		var reviewedBy sql.NullString
+		var reviewedAt sql.NullTime
+		if err := rows.Scan(
+			&a.ID, &a.OrgID, &a.BusinessName, &a.TIN, &a.IDDocumentURL,
+			&a.Status, &a.RejectionReason, &reviewedBy, &reviewedAt, &a.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan kyc attempt: %w", err)
+		}
+		a.ReviewedBy = reviewedBy.String
+		if reviewedAt.Valid {
+			a.ReviewedAt = &reviewedAt.Time
+		}
+		attempts = append(attempts, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate kyc attempts: %w", err)
+	}
+	return attempts, nil
+}
+
+// GetNotificationPrefs returns the org's toggles; a never-saved org reads
+// as all-enabled.
+func (r *PostgresRepository) GetNotificationPrefs(ctx context.Context, orgID string) (NotificationPrefs, error) {
+	var prefs NotificationPrefs
+	err := r.db.QueryRowEx(ctx, `
+		SELECT org_id::text, payment_updated, payment_refunded, payment_expired,
+		       withdrawal_updates, kyc_decisions
+		FROM app.notification_prefs WHERE org_id = $1::uuid
+	`, nil, orgID).Scan(
+		&prefs.OrgID, &prefs.PaymentUpdated, &prefs.PaymentRefunded,
+		&prefs.PaymentExpired, &prefs.WithdrawalUpdates, &prefs.KYCDecisions,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return NotificationPrefs{
+			OrgID: orgID, PaymentUpdated: true, PaymentRefunded: true,
+			PaymentExpired: true, WithdrawalUpdates: true, KYCDecisions: true,
+		}, nil
+	}
+	if err != nil {
+		return NotificationPrefs{}, fmt.Errorf("get notification prefs: %w", err)
+	}
+	return prefs, nil
+}
+
+// UpsertNotificationPrefs replaces the org's toggles.
+func (r *PostgresRepository) UpsertNotificationPrefs(ctx context.Context, prefs NotificationPrefs) (NotificationPrefs, error) {
+	var out NotificationPrefs
+	err := r.db.QueryRowEx(ctx, `
+		INSERT INTO app.notification_prefs
+		  (org_id, payment_updated, payment_refunded, payment_expired, withdrawal_updates, kyc_decisions, updated_at)
+		VALUES ($1::uuid, $2, $3, $4, $5, $6, NOW())
+		ON CONFLICT (org_id) DO UPDATE SET
+		  payment_updated = EXCLUDED.payment_updated,
+		  payment_refunded = EXCLUDED.payment_refunded,
+		  payment_expired = EXCLUDED.payment_expired,
+		  withdrawal_updates = EXCLUDED.withdrawal_updates,
+		  kyc_decisions = EXCLUDED.kyc_decisions,
+		  updated_at = NOW()
+		RETURNING org_id::text, payment_updated, payment_refunded, payment_expired,
+		          withdrawal_updates, kyc_decisions
+	`, nil, prefs.OrgID, prefs.PaymentUpdated, prefs.PaymentRefunded,
+		prefs.PaymentExpired, prefs.WithdrawalUpdates, prefs.KYCDecisions).Scan(
+		&out.OrgID, &out.PaymentUpdated, &out.PaymentRefunded,
+		&out.PaymentExpired, &out.WithdrawalUpdates, &out.KYCDecisions,
+	)
+	if err != nil {
+		return NotificationPrefs{}, fmt.Errorf("upsert notification prefs: %w", err)
+	}
+	return out, nil
 }
 
 // UpdateOrgLiveLimits sets per-org live caps; empty clears to platform

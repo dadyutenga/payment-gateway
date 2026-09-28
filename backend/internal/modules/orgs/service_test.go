@@ -89,8 +89,20 @@ func (r *fakeOrgRepository) ListOrganizationsForUser(_ context.Context, _ string
 	return nil, nil
 }
 
-func (r *fakeOrgRepository) UpdateOrganization(_ context.Context, orgID, name, businessName string) (Organization, error) {
-	return Organization{ID: orgID, Name: name, BusinessName: businessName}, nil
+func (r *fakeOrgRepository) UpdateOrganization(_ context.Context, orgID string, upd OrgProfileUpdate) (Organization, error) {
+	return Organization{ID: orgID, Name: upd.Name, BusinessName: upd.BusinessName, TIN: upd.TIN}, nil
+}
+
+func (r *fakeOrgRepository) ListKYCAttempts(_ context.Context, _ string) ([]KYCAttempt, error) {
+	return []KYCAttempt{}, nil
+}
+
+func (r *fakeOrgRepository) GetNotificationPrefs(_ context.Context, orgID string) (NotificationPrefs, error) {
+	return NotificationPrefs{OrgID: orgID, PaymentUpdated: true, PaymentRefunded: true, PaymentExpired: true, WithdrawalUpdates: true, KYCDecisions: true}, nil
+}
+
+func (r *fakeOrgRepository) UpsertNotificationPrefs(_ context.Context, prefs NotificationPrefs) (NotificationPrefs, error) {
+	return prefs, nil
 }
 
 func (r *fakeOrgRepository) DeleteOrganization(_ context.Context, _ string) error { return nil }

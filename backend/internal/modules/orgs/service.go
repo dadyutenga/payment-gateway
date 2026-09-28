@@ -113,22 +113,65 @@ func (s *Service) GetOrganization(ctx context.Context, userID, orgID string) (Or
 	return OrganizationWithRole{Organization: org, Role: member.Role, Status: member.Status}, nil
 }
 
-func (s *Service) UpdateOrganization(ctx context.Context, userID, orgID, name, businessName string) (Organization, validation.Errors, error) {
+func (s *Service) UpdateOrganization(ctx context.Context, userID, orgID string, upd OrgProfileUpdate) (Organization, validation.Errors, error) {
 	if _, err := s.CheckOrgPermission(ctx, userID, orgID, PermManageOrg); err != nil {
 		return Organization{}, nil, err
 	}
-	name = strings.TrimSpace(name)
-	businessName = strings.TrimSpace(businessName)
+	upd.Name = strings.TrimSpace(upd.Name)
+	upd.BusinessName = strings.TrimSpace(upd.BusinessName)
+	upd.TIN = strings.TrimSpace(upd.TIN)
+	upd.Address = strings.TrimSpace(upd.Address)
+	upd.Phone = strings.TrimSpace(upd.Phone)
+	upd.ContactEmail = strings.ToLower(strings.TrimSpace(upd.ContactEmail))
+	upd.LogoURL = strings.TrimSpace(upd.LogoURL)
+	upd.PrimaryColor = strings.TrimSpace(upd.PrimaryColor)
 
 	errs := validation.Errors{}
-	validation.Required(name, "Name is required.", errs, "name")
-	validation.MaxRunes(name, 100, "Name must be 100 characters or fewer.", errs, "name")
-	validation.MaxRunes(businessName, 200, "Business name must be 200 characters or fewer.", errs, "business_name")
+	validation.Required(upd.Name, "Name is required.", errs, "name")
+	validation.MaxRunes(upd.Name, 100, "Name must be 100 characters or fewer.", errs, "name")
+	validation.MaxRunes(upd.BusinessName, 200, "Business name must be 200 characters or fewer.", errs, "business_name")
+	validation.MaxRunes(upd.Address, 500, "Address must be 500 characters or fewer.", errs, "address")
+	validation.MaxRunes(upd.Phone, 30, "Phone must be 30 characters or fewer.", errs, "phone")
+	if upd.ContactEmail != "" && !strings.Contains(upd.ContactEmail, "@") {
+		errs.Add("contact_email", "Contact email must be a valid address.")
+	}
+	validation.MaxRunes(upd.LogoURL, 500, "Logo URL must be 500 characters or fewer.", errs, "logo_url")
+	if upd.PrimaryColor != "" && !validHexColor(upd.PrimaryColor) {
+		errs.Add("primary_color", "Primary color must be a hex color like #0ea5e9.")
+	}
 	if errs.Any() {
 		return Organization{}, errs, nil
 	}
-	org, err := s.repo.UpdateOrganization(ctx, strings.TrimSpace(orgID), name, businessName)
+
+	// Verified orgs lock business name + TIN: changing them requires
+	// re-verification (resubmit KYC, which flips status back to submitted).
+	current, err := s.repo.GetOrganization(ctx, strings.TrimSpace(orgID))
+	if err != nil {
+		return Organization{}, nil, err
+	}
+	if current.KYCStatus == "verified" &&
+		(upd.BusinessName != current.BusinessName || upd.TIN != current.TIN) {
+		return Organization{}, nil, ErrReverificationRequired
+	}
+
+	org, err := s.repo.UpdateOrganization(ctx, strings.TrimSpace(orgID), upd)
 	return org, nil, err
+}
+
+// validHexColor accepts #rgb or #rrggbb.
+func validHexColor(value string) bool {
+	if len(value) != 4 && len(value) != 7 {
+		return false
+	}
+	if value[0] != '#' {
+		return false
+	}
+	for _, r := range value[1:] {
+		if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f' || r >= 'A' && r <= 'F') {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Service) DeleteOrganization(ctx context.Context, userID, orgID string) error {
@@ -232,6 +275,32 @@ func (s *Service) UpdateOrgLiveLimits(ctx context.Context, orgID, maxTxn, dailyC
 	}
 	org, err := s.repo.UpdateOrgLiveLimits(ctx, orgID, maxTxn, dailyCap)
 	return org, nil, err
+}
+
+// ListKYCAttempts returns the submit/decide history for the Settings
+// verification tab (any active member may read).
+func (s *Service) ListKYCAttempts(ctx context.Context, userID, orgID string) ([]KYCAttempt, error) {
+	if _, err := s.CheckOrgPermission(ctx, userID, orgID, PermRead); err != nil {
+		return nil, err
+	}
+	return s.repo.ListKYCAttempts(ctx, strings.TrimSpace(orgID))
+}
+
+// GetNotificationPrefs returns the org's toggles (any active member).
+func (s *Service) GetNotificationPrefs(ctx context.Context, userID, orgID string) (NotificationPrefs, error) {
+	if _, err := s.CheckOrgPermission(ctx, userID, orgID, PermRead); err != nil {
+		return NotificationPrefs{}, err
+	}
+	return s.repo.GetNotificationPrefs(ctx, strings.TrimSpace(orgID))
+}
+
+// UpdateNotificationPrefs replaces the org's toggles (owner/manage_org).
+func (s *Service) UpdateNotificationPrefs(ctx context.Context, userID, orgID string, prefs NotificationPrefs) (NotificationPrefs, error) {
+	if _, err := s.CheckOrgPermission(ctx, userID, orgID, PermManageOrg); err != nil {
+		return NotificationPrefs{}, err
+	}
+	prefs.OrgID = strings.TrimSpace(orgID)
+	return s.repo.UpsertNotificationPrefs(ctx, prefs)
 }
 
 // OrgKYCStatus returns an app's org KYC status with no actor check —
