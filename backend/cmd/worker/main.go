@@ -64,6 +64,7 @@ func main() {
 		PayoutReconciliationStaleAfter: cfg.Payments.PayoutReconciliationStaleAfter,
 		ProviderTimeout:                positiveDuration(cfg.HTTP.RequestTimeout-5*time.Second, 10*time.Second),
 		OrderExpiryTTL:                 cfg.Payments.OrderTTL,
+		PayerHashSecret:                cfg.Payments.PayerHashSecret,
 	}, logger)
 
 	deliveryTicker := time.NewTicker(positiveDuration(cfg.Payments.DeliveryPollInterval, 30*time.Second))
@@ -123,11 +124,22 @@ func main() {
 			logger.Info("idempotency cleanup completed", "deleted", swept)
 		}
 	}
+	// Analytics rollups are a rebuildable cache (see docs/ANALYTICS.md):
+	// refresh yesterday (late webhooks can still land) and today on every
+	// reconciliation tick. Safe to run in api+worker simultaneously —
+	// each day refreshes in one delete+insert transaction.
+	refreshAnalytics := func() {
+		now := time.Now().UTC()
+		if err := paymentService.RefreshAnalyticsRollups(ctx, now.Add(-24*time.Hour), now); err != nil {
+			logger.Error("analytics rollup refresh failed", "error", err)
+		}
+	}
 
 	processDeliveries()
 	reconcilePayments()
 	reconcilePayouts()
 	expireOrders()
+	refreshAnalytics()
 
 	for {
 		select {
@@ -138,6 +150,7 @@ func main() {
 			processDeliveries()
 		case <-reconciliationTicker.C:
 			reconcilePayments()
+			refreshAnalytics()
 		case <-payoutTicker.C:
 			reconcilePayouts()
 		case <-expiryTicker.C:

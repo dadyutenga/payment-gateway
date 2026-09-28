@@ -254,6 +254,18 @@ func (r *fakePaymentRepository) ListAppsByOrg(_ context.Context, _ string) ([]Pa
 	return []PaymentApp{}, nil
 }
 
+func (r *fakePaymentRepository) UpdateOrderAnalytics(_ context.Context, _ string, _ OrderAnalyticsUpdate) error {
+	return nil
+}
+
+func (r *fakePaymentRepository) BackfillPayerHashes(_ context.Context, _ string, _ int) (int64, error) {
+	return 0, nil
+}
+
+func (r *fakePaymentRepository) RefreshAnalyticsRollups(_ context.Context, _, _ time.Time) error {
+	return nil
+}
+
 func (r *fakePaymentRepository) CreatePaymentApp(_ context.Context, input CreatePaymentAppInput) (PaymentApp, error) {
 	return PaymentApp{ID: "app_test", Name: input.Name, Description: input.Description, Status: "active", OrgID: input.OrgID}, nil
 }

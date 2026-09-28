@@ -115,6 +115,10 @@ type PaymentConfig struct {
 	// disables the respective check (defaults applied in payments.NewService).
 	LiveMaxTxnAmount   string
 	LiveDailyVolumeCap string
+	// PayerHashSecret keys analytics payer hashing. Empty falls back to
+	// the delivery signing secret (dev convenience); production should
+	// set a distinct ANALYTICS_PAYER_SECRET.
+	PayerHashSecret string
 }
 
 type slogLevel string
@@ -182,6 +186,7 @@ func Load() (Config, error) {
 			ExpiryInterval:                 mustDuration("PAYMENTS_EXPIRY_INTERVAL", "1m"),
 			LiveMaxTxnAmount:               strings.TrimSpace(os.Getenv("PAYMENTS_LIVE_MAX_TXN_AMOUNT")),
 			LiveDailyVolumeCap:             strings.TrimSpace(os.Getenv("PAYMENTS_LIVE_DAILY_VOLUME_CAP")),
+			PayerHashSecret:                strings.TrimSpace(os.Getenv("ANALYTICS_PAYER_SECRET")),
 		},
 	}
 

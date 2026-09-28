@@ -63,6 +63,8 @@ type Service struct {
 	// currency) for verified orgs. Empty disables the check.
 	liveMaxTxnAmount   string
 	liveDailyVolumeCap string
+	// payerHashSecret keys analytics payer hashing (see PayerHashSecret).
+	payerHashSecret string
 	http           *http.Client
 	log            *slog.Logger
 	notifier       notify.Writer
@@ -149,6 +151,11 @@ type ServiceOptions struct {
 	// effectiveLiveCaps.
 	LiveMaxTxnAmount    string
 	LiveDailyVolumeCap  string
+	// PayerHashSecret keys the analytics payer HMAC. Empty falls back to
+	// the delivery signing secret (dev convenience) — production should
+	// set ANALYTICS_PAYER_SECRET distinctly. Empty entirely disables
+	// payer hashing (orders keep NULL payer_hash).
+	PayerHashSecret string
 	HTTPClient          *http.Client
 }
 
@@ -195,6 +202,10 @@ func NewService(repo Repository, registry map[string]provider.Constructor, ciphe
 	if opts.HTTPClient == nil {
 		opts.HTTPClient = &http.Client{Timeout: opts.DeliveryTimeout}
 	}
+	payerSecret := strings.TrimSpace(opts.PayerHashSecret)
+	if payerSecret == "" {
+		payerSecret = opts.DeliverySigningSecret
+	}
 
 	return &Service{
 		repo:                           repo,
@@ -211,6 +222,7 @@ func NewService(repo Repository, registry map[string]provider.Constructor, ciphe
 		orderExpiryTTL:                 opts.OrderExpiryTTL,
 		liveMaxTxnAmount:               strings.TrimSpace(opts.LiveMaxTxnAmount),
 		liveDailyVolumeCap:             strings.TrimSpace(opts.LiveDailyVolumeCap),
+		payerHashSecret:                payerSecret,
 		http:                           opts.HTTPClient,
 		log:                            logger,
 	}
@@ -571,6 +583,20 @@ func (s *Service) DeletePaymentApp(ctx context.Context, callerID, callerEmail, a
 
 func (s *Service) GetAppBalance(ctx context.Context, appID string) (AppBalance, error) {
 	return s.repo.GetAppBalance(ctx, appID)
+}
+
+// RefreshAnalyticsRollups recomputes rollup days (service passthrough for
+// the worker loop and the backfill command).
+func (s *Service) RefreshAnalyticsRollups(ctx context.Context, fromDay, toDay time.Time) error {
+	return s.repo.RefreshAnalyticsRollups(ctx, fromDay, toDay)
+}
+
+// BackfillPayerHashes hashes pre-analytics order phones (backfill command).
+func (s *Service) BackfillPayerHashes(ctx context.Context, batch int) (int64, error) {
+	if strings.TrimSpace(s.payerHashSecret) == "" {
+		return 0, fmt.Errorf("payer hash secret is not configured")
+	}
+	return s.repo.BackfillPayerHashes(ctx, s.payerHashSecret, batch)
 }
 
 // OrgLimitsUsage assembles the Settings Limits & Fees tab: effective live
@@ -1138,6 +1164,8 @@ func (s *Service) CreateOrder(ctx context.Context, app PaymentApp, input CreateP
 	// or fails, the pending row remains and a retry with the same reference
 	// resumes it instead of orphaning a provider order the buyer may pay
 	// without any local record to credit.
+	// payer_hash is stamped at birth (the phone is known here); raw numbers
+	// never leave the orders table.
 	pending, err := s.repo.CreatePaymentOrder(ctx, CreatePaymentOrderRepositoryInput{
 		AppID:             app.ID,
 		Provider:          input.Provider,
@@ -1151,6 +1179,7 @@ func (s *Service) CreateOrder(ctx context.Context, app PaymentApp, input CreateP
 		Metadata:          copyMetadata(input.Metadata),
 		ExpiresAt:         time.Now().UTC().Add(s.orderExpiryTTL),
 		Environment:       input.Environment,
+		PayerHash:         HashPayerPhone(input.BuyerPhone, s.payerHashSecret),
 	})
 	if err != nil {
 		if isUniqueViolation(err) && input.ExternalReference != "" {
@@ -1167,6 +1196,7 @@ func (s *Service) CreateOrder(ctx context.Context, app PaymentApp, input CreateP
 	// mid-flight after the provider already created the order.
 	providerCtx, cancel := context.WithTimeout(ctx, s.providerTimeout)
 	defer cancel()
+	providerStart := time.Now()
 	providerOrder, err := p.CreateOrder(providerCtx, provider.CreateOrderRequest{
 		Amount:            input.Amount,
 		Currency:          input.Currency,
@@ -1176,7 +1206,12 @@ func (s *Service) CreateOrder(ctx context.Context, app PaymentApp, input CreateP
 		ExternalReference: input.ExternalReference,
 		Metadata:          input.Metadata,
 	})
+	createLatencyMs := time.Since(providerStart).Milliseconds()
 	if err != nil {
+		// The pending row survives for idempotent retry; stamp the
+		// round-trip time for provider-latency analytics (no failure code
+		// — the order is still pending, not failed).
+		s.stampAnalytics(ctx, pending.ID, OrderAnalyticsUpdate{LatencyMs: &createLatencyMs})
 		return pending, nil, fmt.Errorf("create provider payment order: %w", err)
 	}
 
@@ -1197,6 +1232,11 @@ func (s *Service) CreateOrder(ctx context.Context, app PaymentApp, input CreateP
 	if err != nil {
 		return pending, nil, err
 	}
+	// Analytics: channel from the provider response, round-trip latency,
+	// and a failure code when the provider settled synchronously into a
+	// final non-paid outcome. Best-effort — never fails order creation.
+	s.stampFinal(ctx, order.ID, status, providerOrder.ProviderStatus,
+		NormalizeChannel(providerOrder.Raw), &createLatencyMs)
 
 	return order, nil, nil
 }
@@ -1251,12 +1291,14 @@ func (s *Service) refreshOrder(ctx context.Context, order PaymentOrder) (Payment
 		return PaymentOrder{}, err
 	}
 
+	providerStart := time.Now()
 	providerStatus, err := p.CheckOrderStatus(ctx, order.ProviderOrderID)
+	refreshLatencyMs := time.Since(providerStart).Milliseconds()
 	if err != nil {
 		return PaymentOrder{}, fmt.Errorf("check provider payment order status: %w", err)
 	}
 
-	updated, _, _, err := s.applyProviderStatusUpdate(ctx, order, providerStatus, "refresh")
+	updated, _, _, err := s.applyProviderStatusUpdate(ctx, order, providerStatus, "refresh", refreshLatencyMs)
 	if err != nil {
 		return PaymentOrder{}, err
 	}
@@ -1288,7 +1330,9 @@ func (s *Service) ReconcilePayments(ctx context.Context, limit int) (ReconcilePa
 			continue
 		}
 
+		providerStart := time.Now()
 		providerStatus, err := p.CheckOrderStatus(ctx, order.ProviderOrderID)
+		checkLatencyMs := time.Since(providerStart).Milliseconds()
 		if err != nil {
 			result.Failed++
 			result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", order.ID, err))
@@ -1296,7 +1340,7 @@ func (s *Service) ReconcilePayments(ctx context.Context, limit int) (ReconcilePa
 		}
 		result.Checked++
 
-		updated, _, deliveries, err := s.applyProviderStatusUpdate(ctx, order, providerStatus, "reconciliation")
+		updated, _, deliveries, err := s.applyProviderStatusUpdate(ctx, order, providerStatus, "reconciliation", checkLatencyMs)
 		if err != nil {
 			result.Failed++
 			result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", order.ID, err))
@@ -1919,6 +1963,10 @@ func (s *Service) HandleProviderWebhook(ctx context.Context, providerName string
 		}
 		return WebhookResult{EventID: event.ID, OrderFound: true}, fmt.Errorf("apply payment webhook: %w", err)
 	}
+	// Analytics: channel from the webhook payload + failure code on final
+	// non-paid outcomes. Webhooks carry no round-trip latency (nil).
+	s.stampFinal(ctx, order.ID, nextStatus, webhookEvent.ProviderStatus,
+		NormalizeChannel(webhookEvent.Data), nil)
 	if _, err := s.repo.CreateWebhookDeliveriesForEvent(ctx, event.ID, EventTypePaymentUpdated); err != nil {
 		s.log.Error("create payment webhook deliveries failed", "event_id", event.ID, "payment_order_id", order.ID, "error", err)
 	} else {
@@ -2206,7 +2254,7 @@ func (s *Service) storeWebhookEvent(ctx context.Context, input PaymentEventInput
 	return event, nil
 }
 
-func (s *Service) applyProviderStatusUpdate(ctx context.Context, order PaymentOrder, providerStatus provider.ProviderStatus, source string) (PaymentOrder, string, int64, error) {
+func (s *Service) applyProviderStatusUpdate(ctx context.Context, order PaymentOrder, providerStatus provider.ProviderStatus, source string, latencyMs int64) (PaymentOrder, string, int64, error) {
 	nextStatus := transitionStatus(order.Status, providerStatus.Status)
 	eventID := ""
 	var deliveriesCreated int64
@@ -2258,6 +2306,11 @@ func (s *Service) applyProviderStatusUpdate(ctx context.Context, order PaymentOr
 		}
 		return PaymentOrder{}, eventID, 0, err
 	}
+
+	// Analytics: channel + latency from this provider round-trip, failure
+	// code on final non-paid outcomes. Best-effort.
+	s.stampFinal(ctx, order.ID, nextStatus, providerStatus.ProviderStatus,
+		NormalizeChannel(providerStatus.Raw), &latencyMs)
 
 	if eventID != "" {
 		deliveries, err := s.repo.CreateWebhookDeliveriesForEvent(ctx, eventID, EventTypePaymentUpdated)

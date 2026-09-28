@@ -96,6 +96,7 @@ func New(ctx context.Context) (*App, error) {
 		OrderExpiryTTL:                 cfg.Payments.OrderTTL,
 		LiveMaxTxnAmount:               cfg.Payments.LiveMaxTxnAmount,
 		LiveDailyVolumeCap:             cfg.Payments.LiveDailyVolumeCap,
+		PayerHashSecret:                cfg.Payments.PayerHashSecret,
 	}, logger)
 	// SMS success notifications, admin alerts, and an audit trail are all
 	// optional integrations (SetSMSSender, SetNotifier, SetAuditWriter) —
@@ -443,11 +444,20 @@ func (a *App) runBackgroundJobs() {
 			a.logger.Info("idempotency cleanup completed", "deleted", swept)
 		}
 	}
+	// Analytics rollups: yesterday + today on every reconciliation tick
+	// (rebuildable cache — safe with cmd/worker running alongside).
+	refreshAnalytics := func() {
+		now := time.Now().UTC()
+		if err := a.paymentService.RefreshAnalyticsRollups(a.ctx, now.Add(-24*time.Hour), now); err != nil {
+			a.logger.Error("analytics rollup refresh failed", "error", err)
+		}
+	}
 
 	processDeliveries()
 	reconcilePayments()
 	reconcilePayouts()
 	expireOrders()
+	refreshAnalytics()
 
 	for {
 		select {
@@ -457,6 +467,7 @@ func (a *App) runBackgroundJobs() {
 			processDeliveries()
 		case <-reconciliationTicker.C:
 			reconcilePayments()
+			refreshAnalytics()
 		case <-payoutTicker.C:
 			reconcilePayouts()
 		case <-expiryTicker.C:

@@ -45,6 +45,14 @@ type PaymentOrder struct {
 	Metadata              map[string]any  `json:"metadata,omitempty"`
 	// Environment is live/sandbox (KYC gating + sandbox isolation).
 	Environment           string          `json:"environment,omitempty"`
+	// Analytics-only columns (never on the money path): normalized failure
+	// code/message at final transitions, payer network, provider
+	// round-trip ms. payer_hash is deliberately NOT JSON-exposed.
+	FailureCode       string `json:"failure_code,omitempty"`
+	FailureMessage    string `json:"failure_message,omitempty"`
+	Channel           string `json:"channel,omitempty"`
+	ProviderLatencyMs *int64 `json:"provider_latency_ms,omitempty"`
+	PayerHash         string `json:"-"`
 	// ExpiresAt is the order TTL deadline (nullable for rows predating the
 	// expiry feature). Pending orders past this time are transitioned to
 	// expired by the background worker; no money moves on expiry.
@@ -143,6 +151,19 @@ type CreatePaymentOrderRepositoryInput struct {
 	ExpiresAt time.Time
 	// Environment is live/sandbox (KYC gating + sandbox isolation).
 	Environment           string
+	// PayerHash is the HMAC analytics identifier for the buyer phone,
+	// computed by the service at creation (empty when hashing is off).
+	PayerHash string
+}
+
+// OrderAnalyticsUpdate stamps analytics-only columns on an order. A nil
+// pointer field is left untouched; non-nil overwrites (empty string
+// clears). Never touches money/status columns.
+type OrderAnalyticsUpdate struct {
+	Channel        *string
+	FailureCode    *string
+	FailureMessage *string
+	LatencyMs      *int64
 }
 
 type PaymentEventInput struct {

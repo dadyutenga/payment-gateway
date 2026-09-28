@@ -96,6 +96,11 @@ type Repository interface {
 	ListAppsForUser(ctx context.Context, userID string) ([]PaymentApp, error)
 	TodayLiveVolume(ctx context.Context, appID, currency string) (string, error)
 	ListAppsByOrg(ctx context.Context, orgID string) ([]PaymentApp, error)
+	UpdateOrderAnalytics(ctx context.Context, orderID string, upd OrderAnalyticsUpdate) error
+	BackfillPayerHashes(ctx context.Context, secret string, batch int) (int64, error)
+	// RefreshAnalyticsRollups recomputes rollups for whole EAT days
+	// (idempotent delete+insert per day — see docs/ANALYTICS.md).
+	RefreshAnalyticsRollups(ctx context.Context, fromDay, toDay time.Time) error
 	// OrganizationExists gates app creation: payment_apps.org_id is NOT
 	// NULL, so an unknown org must fail fast with a clean 422 rather than
 	// a foreign-key 500.
@@ -485,9 +490,10 @@ func (r *PostgresRepository) CreatePaymentOrder(ctx context.Context, input Creat
 			provider_status,
 			metadata,
 			expires_at,
-			environment
+			environment,
+			payer_hash
 		)
-		VALUES ($1::uuid,$2,$3,$4,$5,$6::numeric,$7,$8,$9,$10,$11,$12,$13::jsonb,$14::timestamptz,$15)
+		VALUES ($1::uuid,$2,$3,$4,$5,$6::numeric,$7,$8,$9,$10,$11,$12,$13::jsonb,$14::timestamptz,$15,NULLIF($16, ''))
 		RETURNING
 			id::text,
 			COALESCE(app_id::text, ''),
@@ -528,6 +534,7 @@ func (r *PostgresRepository) CreatePaymentOrder(ctx context.Context, input Creat
 		string(metadataJSON),
 		valueOrNilTime(input.ExpiresAt),
 		defaultOrderEnvironment(input.Environment),
+		strings.TrimSpace(input.PayerHash),
 	))
 	if err != nil {
 		return PaymentOrder{}, fmt.Errorf("create payment order: %w", err)
@@ -2874,6 +2881,227 @@ func (r *PostgresRepository) ListAppsByOrg(ctx context.Context, orgID string) ([
 	return apps, nil
 }
 
+// UpdateOrderAnalytics stamps analytics-only columns. Nil fields are left
+// untouched. It never touches status, amounts, or ledger columns, so it is
+// safe to call best-effort after money-path writes.
+func (r *PostgresRepository) UpdateOrderAnalytics(ctx context.Context, orderID string, upd OrderAnalyticsUpdate) error {
+	sets := []string{"updated_at = NOW()"}
+	args := []any{orderID}
+	if upd.Channel != nil {
+		args = append(args, strings.TrimSpace(*upd.Channel))
+		sets = append(sets, fmt.Sprintf("channel = NULLIF($%d, '')", len(args)))
+	}
+	if upd.FailureCode != nil {
+		args = append(args, strings.TrimSpace(*upd.FailureCode))
+		sets = append(sets, fmt.Sprintf("failure_code = NULLIF($%d, '')", len(args)))
+	}
+	if upd.FailureMessage != nil {
+		args = append(args, TruncateMessage(*upd.FailureMessage, 500))
+		sets = append(sets, fmt.Sprintf("failure_message = NULLIF($%d, '')", len(args)))
+	}
+	if upd.LatencyMs != nil {
+		args = append(args, *upd.LatencyMs)
+		sets = append(sets, fmt.Sprintf("provider_latency_ms = $%d", len(args)))
+	}
+	if len(sets) == 1 {
+		return nil
+	}
+	query := fmt.Sprintf(`UPDATE app.payment_orders SET %s WHERE id = $1::uuid`, strings.Join(sets, ", "))
+	if _, err := r.db.ExecEx(ctx, query, nil, args...); err != nil {
+		return fmt.Errorf("update order analytics: %w", err)
+	}
+	return nil
+}
+
+// BackfillPayerHashes computes payer hashes for rows predating analytics
+// (or created while hashing was off). One-off/backfill-tool path: bounded
+// batches, skips empty phones.
+func (r *PostgresRepository) BackfillPayerHashes(ctx context.Context, secret string, batch int) (int64, error) {
+	if strings.TrimSpace(secret) == "" {
+		return 0, fmt.Errorf("payer hash secret is required")
+	}
+	if batch <= 0 || batch > 5000 {
+		batch = 500
+	}
+	rows, err := r.db.QueryEx(ctx, `
+		SELECT id::text, buyer_phone FROM app.payment_orders
+		WHERE payer_hash IS NULL AND COALESCE(buyer_phone, '') <> ''
+		ORDER BY created_at ASC LIMIT $1
+	`, nil, batch)
+	if err != nil {
+		return 0, fmt.Errorf("select orders missing payer hash: %w", err)
+	}
+	type row struct{ id, phone string }
+	var pending []row
+	for rows.Next() {
+		var item row
+		if err := rows.Scan(&item.id, &item.phone); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("scan order phone: %w", err)
+		}
+		pending = append(pending, item)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("iterate order phones: %w", err)
+	}
+	var done int64
+	for _, item := range pending {
+		hash := HashPayerPhone(item.phone, secret)
+		if hash == "" {
+			continue
+		}
+		if _, err := r.db.ExecEx(ctx, `UPDATE app.payment_orders SET payer_hash = $2, updated_at = NOW() WHERE id = $1::uuid`, nil, item.id, hash); err != nil {
+			return done, fmt.Errorf("update payer hash: %w", err)
+		}
+		done++
+	}
+	return done, nil
+}
+
+// ---------- Analytics rollups ----------
+// Rollups are a rebuildable cache over orders/ledger (see
+// docs/ANALYTICS.md): RefreshAnalyticsRollups deletes and recomputes whole
+// EAT days, so reruns are idempotent. Money shown on statements/exports
+// always comes from the ledger, never from these tables.
+
+// eatBounds returns [start, end) timestamptz for an EAT calendar day.
+func eatBounds(day time.Time) (time.Time, time.Time) {
+	loc, err := time.LoadLocation("Africa/Dar_es_Salaam")
+	if err != nil {
+		loc = time.UTC
+	}
+	y, m, d := day.In(loc).Date()
+	start := time.Date(y, m, d, 0, 0, 0, 0, loc)
+	return start.UTC(), start.Add(24 * time.Hour).UTC()
+}
+
+// RefreshAnalyticsRollups recomputes daily + money + hourly rollups for
+// every EAT day in [fromDay, toDay] (inclusive, date parts only).
+func (r *PostgresRepository) RefreshAnalyticsRollups(ctx context.Context, fromDay, toDay time.Time) error {
+	loc, err := time.LoadLocation("Africa/Dar_es_Salaam")
+	if err != nil {
+		loc = time.UTC
+	}
+	fy, fm, fd := fromDay.In(loc).Date()
+	ty, tm, td := toDay.In(loc).Date()
+	start := time.Date(fy, fm, fd, 0, 0, 0, 0, loc)
+	end := time.Date(ty, tm, td, 0, 0, 0, 0, loc)
+	for day := start; !day.After(end); day = day.Add(24 * time.Hour) {
+		if err := r.refreshAnalyticsDay(ctx, day); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *PostgresRepository) refreshAnalyticsDay(ctx context.Context, day time.Time) error {
+	start, end := eatBounds(day)
+	dayDate := start.In(mustEatLoc()).Format("2006-01-02")
+
+	tx, err := r.db.BeginEx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin analytics refresh transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.RollbackEx(ctx)
+		}
+	}()
+	exec := func(query string, args ...any) error {
+		_, execErr := tx.ExecEx(ctx, query, nil, args...)
+		return execErr
+	}
+
+	if err = exec(`DELETE FROM app.analytics_daily_app WHERE day = $1::date`, dayDate); err != nil {
+		return fmt.Errorf("clear daily rollup: %w", err)
+	}
+	if err = exec(`DELETE FROM app.analytics_daily_app_money WHERE day = $1::date`, dayDate); err != nil {
+		return fmt.Errorf("clear money rollup: %w", err)
+	}
+	if err = exec(`DELETE FROM app.analytics_hourly_app WHERE hour >= $1 AND hour < $2`, start, end); err != nil {
+		return fmt.Errorf("clear hourly rollup: %w", err)
+	}
+
+	if _, err = tx.ExecEx(ctx, `
+		INSERT INTO app.analytics_daily_app
+		  (day, org_id, app_id, environment, provider, channel, currency,
+		   created, succeeded, failed, expired, gross, p50_ttp_s, p90_ttp_s, updated_at)
+		SELECT $1::date, a.org_id, o.app_id, o.environment, o.provider,
+		       COALESCE(NULLIF(o.channel, ''), 'OTHER'), o.currency,
+		       COUNT(*),
+		       COUNT(*) FILTER (WHERE o.status = 'paid'),
+		       COUNT(*) FILTER (WHERE o.status IN ('failed', 'cancelled', 'reversed')),
+		       COUNT(*) FILTER (WHERE o.status = 'expired'),
+		       COALESCE(SUM(o.amount) FILTER (WHERE o.status = 'paid'), 0),
+		       percentile_cont(0.5) WITHIN GROUP (ORDER BY fp.ttp_s),
+		       percentile_cont(0.9) WITHIN GROUP (ORDER BY fp.ttp_s),
+		       NOW()
+		FROM app.payment_orders o
+		JOIN app.payment_apps a ON a.id = o.app_id
+		LEFT JOIN (
+			SELECT h.payment_order_id AS oid,
+			       EXTRACT(EPOCH FROM (MIN(h.created_at) - o2.created_at)) AS ttp_s
+			FROM app.payment_status_history h
+			JOIN app.payment_orders o2 ON o2.id = h.payment_order_id
+			WHERE h.to_status = 'paid' AND o2.created_at >= $2 AND o2.created_at < $3
+			GROUP BY h.payment_order_id, o2.created_at
+		) fp ON fp.oid = o.id
+		WHERE o.created_at >= $2 AND o.created_at < $3 AND o.app_id IS NOT NULL
+		GROUP BY a.org_id, o.app_id, o.environment, o.provider, COALESCE(NULLIF(o.channel, ''), 'OTHER'), o.currency
+	`, nil, dayDate, start, end); err != nil {
+		return fmt.Errorf("refresh daily rollup: %w", err)
+	}
+
+	if _, err = tx.ExecEx(ctx, `
+		INSERT INTO app.analytics_daily_app_money
+		  (day, org_id, app_id, currency, fees, refunds, refund_total, updated_at)
+		SELECT $1::date, a.org_id, l.app_id, l.currency,
+		       COALESCE(SUM(l.amount) FILTER (WHERE l.entry_type = 'platform_fee_debit'), 0),
+		       COUNT(*) FILTER (WHERE l.entry_type = 'refund_debit'),
+		       COALESCE(SUM(l.amount) FILTER (WHERE l.entry_type = 'refund_debit'), 0),
+		       NOW()
+		FROM app.payment_ledger_entries l
+		JOIN app.payment_apps a ON a.id = l.app_id
+		WHERE l.created_at >= $2 AND l.created_at < $3
+		  AND l.entry_type IN ('platform_fee_debit', 'refund_debit')
+		GROUP BY a.org_id, l.app_id, l.currency
+	`, nil, dayDate, start, end); err != nil {
+		return fmt.Errorf("refresh money rollup: %w", err)
+	}
+
+	if _, err = tx.ExecEx(ctx, `
+		INSERT INTO app.analytics_hourly_app
+		  (hour, org_id, app_id, environment, created, succeeded, failed, expired, updated_at)
+		SELECT date_trunc('hour', o.created_at AT TIME ZONE 'Africa/Dar_es_Salaam') AT TIME ZONE 'Africa/Dar_es_Salaam',
+		       a.org_id, o.app_id, o.environment,
+		       COUNT(*),
+		       COUNT(*) FILTER (WHERE o.status = 'paid'),
+		       COUNT(*) FILTER (WHERE o.status IN ('failed', 'cancelled', 'reversed')),
+		       COUNT(*) FILTER (WHERE o.status = 'expired'),
+		       NOW()
+		FROM app.payment_orders o
+		JOIN app.payment_apps a ON a.id = o.app_id
+		WHERE o.created_at >= $1 AND o.created_at < $2 AND o.app_id IS NOT NULL
+		GROUP BY 1, 2, 3, 4
+	`, nil, start, end); err != nil {
+		return fmt.Errorf("refresh hourly rollup: %w", err)
+	}
+
+	if err = tx.CommitEx(ctx); err != nil {
+		return fmt.Errorf("commit analytics refresh transaction: %w", err)
+	}
+	return nil
+}
+
+func mustEatLoc() *time.Location {
+	loc, err := time.LoadLocation("Africa/Dar_es_Salaam")
+	if err != nil {
+		return time.UTC
+	}
+	return loc
+}
+
 // ---------- Refunds & reversals ----------
 
 // executor is satisfied by both *pgx.Tx and *pgx.ConnPool (their ExecEx/
@@ -3088,7 +3316,9 @@ func (r *PostgresRepository) ExpirePendingOrders(ctx context.Context, limit int)
 		),
 		updated AS (
 			UPDATE app.payment_orders o
-			SET status = 'expired', updated_at = NOW()
+			SET status = 'expired', updated_at = NOW(),
+			    failure_code = 'expired',
+			    failure_message = 'Order expired without payment.'
 			FROM due
 			WHERE o.id = due.id
 			RETURNING o.id::text,
