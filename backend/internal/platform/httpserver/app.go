@@ -55,6 +55,9 @@ func New(ctx context.Context) (*App, error) {
 	// rejected by audience validation plus per-request DB checks.
 	customerVerifier := auth.NewCustomerVerifier(cfg.Auth, logger)
 	adminVerifier := auth.NewAdminVerifier(cfg.Auth, logger)
+	// Email-verification gate for the customer space (dev escape hatch:
+	// AUTH_REQUIRE_EMAIL_VERIFICATION=false while no mailer is wired).
+	requireEmailVerified := cfg.Auth.RequireEmailVerification
 	authService := auth.NewService(db, customerVerifier)
 	authService.SetVerifiers(customerVerifier, adminVerifier)
 	authService.SetAllowPublicRegister(cfg.Auth.AllowPublicRegister)
@@ -220,16 +223,16 @@ func New(ctx context.Context) (*App, error) {
 
 	// ---- Merchant-facing (authenticated, not admin-gated — each handler
 	// checks the caller's own app_id membership) ----
-	mux.Handle("GET /api/v1/merchant/apps", middleware.Chain(http.HandlerFunc(paymentHandler.ListMyApps), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, true)))
-	mux.Handle("POST /api/v1/merchant/apps", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantCreateApp), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, true)))
-	mux.Handle("PATCH /api/v1/merchant/apps/{id}", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantUpdateApp), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, true)))
-	mux.Handle("GET /api/v1/merchant/apps/{id}/balance", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantGetAppBalance), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, true)))
-	mux.Handle("GET /api/v1/merchant/apps/{id}/ledger", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantListLedgerEntries), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, true)))
-	mux.Handle("GET /api/v1/merchant/apps/{id}/orders", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantSearchOrders), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, true)))
-	mux.Handle("GET /api/v1/merchant/apps/{id}/withdrawals", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantListWithdrawals), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, true)))
-	mux.Handle("POST /api/v1/merchant/apps/{id}/withdrawals", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantCreateWithdrawal), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, true)))
-	mux.Handle("POST /api/v1/merchant/apps/{id}/withdrawals/{withdrawalID}/approve", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantApproveWithdrawal), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, true)))
-	mux.Handle("POST /api/v1/merchant/apps/{id}/withdrawals/{withdrawalID}/reject", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantRejectWithdrawal), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, true)))
+	mux.Handle("GET /api/v1/merchant/apps", middleware.Chain(http.HandlerFunc(paymentHandler.ListMyApps), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("POST /api/v1/merchant/apps", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantCreateApp), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("PATCH /api/v1/merchant/apps/{id}", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantUpdateApp), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("GET /api/v1/merchant/apps/{id}/balance", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantGetAppBalance), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("GET /api/v1/merchant/apps/{id}/ledger", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantListLedgerEntries), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("GET /api/v1/merchant/apps/{id}/orders", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantSearchOrders), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("GET /api/v1/merchant/apps/{id}/withdrawals", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantListWithdrawals), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("POST /api/v1/merchant/apps/{id}/withdrawals", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantCreateWithdrawal), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("POST /api/v1/merchant/apps/{id}/withdrawals/{withdrawalID}/approve", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantApproveWithdrawal), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("POST /api/v1/merchant/apps/{id}/withdrawals/{withdrawalID}/reject", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantRejectWithdrawal), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
 
 	// ---- Merchant self-service: webhook endpoints, API keys, deliveries ----
 	// All scoped to the path app id via membership on the caller's session —
@@ -243,11 +246,11 @@ func New(ctx context.Context) (*App, error) {
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
-	}), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, true)))
-	mux.Handle("PATCH /api/v1/merchant/apps/{id}/webhook-endpoints/{endpointID}", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantUpdateWebhookEndpoint), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, true)))
-	mux.Handle("DELETE /api/v1/merchant/apps/{id}/webhook-endpoints/{endpointID}", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantDeleteWebhookEndpoint), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, true)))
-	mux.Handle("POST /api/v1/merchant/apps/{id}/webhook-endpoints/{endpointID}/test-send", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantTestWebhookEndpoint), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, true)))
-	mux.Handle("POST /api/v1/merchant/apps/{id}/webhook-endpoints/{endpointID}/rotate-secret", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantRotateWebhookEndpointSecret), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, true)))
+	}), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("PATCH /api/v1/merchant/apps/{id}/webhook-endpoints/{endpointID}", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantUpdateWebhookEndpoint), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("DELETE /api/v1/merchant/apps/{id}/webhook-endpoints/{endpointID}", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantDeleteWebhookEndpoint), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("POST /api/v1/merchant/apps/{id}/webhook-endpoints/{endpointID}/test-send", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantTestWebhookEndpoint), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("POST /api/v1/merchant/apps/{id}/webhook-endpoints/{endpointID}/rotate-secret", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantRotateWebhookEndpointSecret), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
 	mux.Handle("/api/v1/merchant/apps/{id}/api-keys", middleware.Chain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -257,12 +260,12 @@ func New(ctx context.Context) (*App, error) {
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
-	}), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, true)))
-	mux.Handle("POST /api/v1/merchant/apps/{id}/api-keys/{keyID}/rotate", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantRotateAPIKey), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, true)))
-	mux.Handle("PATCH /api/v1/merchant/apps/{id}/api-keys/{keyID}", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantUpdateAPIKeyLabel), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, true)))
-	mux.Handle("POST /api/v1/merchant/apps/{id}/api-keys/{keyID}/revoke", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantRevokeAPIKey), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, true)))
-	mux.Handle("GET /api/v1/merchant/apps/{id}/deliveries", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantListDeliveries), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, true)))
-	mux.Handle("POST /api/v1/merchant/apps/{id}/deliveries/{deliveryID}/replay", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantReplayDelivery), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, true)))
+	}), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("POST /api/v1/merchant/apps/{id}/api-keys/{keyID}/rotate", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantRotateAPIKey), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("PATCH /api/v1/merchant/apps/{id}/api-keys/{keyID}", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantUpdateAPIKeyLabel), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("POST /api/v1/merchant/apps/{id}/api-keys/{keyID}/revoke", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantRevokeAPIKey), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("GET /api/v1/merchant/apps/{id}/deliveries", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantListDeliveries), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("POST /api/v1/merchant/apps/{id}/deliveries/{deliveryID}/replay", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantReplayDelivery), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
 
 	// ---- Organizations & roles (session-authenticated; role checks run
 	// inside the handlers/services against the member's own row) ----
@@ -275,20 +278,20 @@ func New(ctx context.Context) (*App, error) {
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
-	}), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, true)))
-	mux.Handle("GET /api/v1/orgs/{orgID}", middleware.Chain(http.HandlerFunc(orgHandler.GetOrganization), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, true)))
-	mux.Handle("PATCH /api/v1/orgs/{orgID}", middleware.Chain(http.HandlerFunc(orgHandler.UpdateOrganization), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, true)))
-	mux.Handle("DELETE /api/v1/orgs/{orgID}", middleware.Chain(http.HandlerFunc(orgHandler.DeleteOrganization), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, true)))
-	mux.Handle("GET /api/v1/orgs/{orgID}/members", middleware.Chain(http.HandlerFunc(orgHandler.ListMembers), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, true)))
-	mux.Handle("POST /api/v1/orgs/{orgID}/invites", middleware.Chain(http.HandlerFunc(orgHandler.InviteMember), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, true)))
-	mux.Handle("POST /api/v1/orgs/{orgID}/accept", middleware.Chain(http.HandlerFunc(orgHandler.AcceptInvite), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, true)))
-	mux.Handle("PATCH /api/v1/orgs/{orgID}/members/{userID}", middleware.Chain(http.HandlerFunc(orgHandler.ChangeMemberRole), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, true)))
-	mux.Handle("DELETE /api/v1/orgs/{orgID}/members/{userID}", middleware.Chain(http.HandlerFunc(orgHandler.RemoveMember), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, true)))
-	mux.Handle("POST /api/v1/orgs/{orgID}/leave", middleware.Chain(http.HandlerFunc(orgHandler.LeaveOrganization), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, true)))
-	mux.Handle("POST /api/v1/orgs/{orgID}/kyc", middleware.Chain(http.HandlerFunc(orgHandler.SubmitKYC), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, true)))
-	mux.Handle("GET /api/v1/orgs/{orgID}/kyc", middleware.Chain(http.HandlerFunc(orgHandler.GetKYCSubmission), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, true)))
-	mux.Handle("POST /api/v1/orgs/{orgID}/kyc/document", middleware.Chain(http.HandlerFunc(orgHandler.UploadKYCDocument), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, true)))
-	mux.Handle("GET /api/v1/orgs/{orgID}/kyc/document", middleware.Chain(http.HandlerFunc(orgHandler.ServeKYCDocument), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, true)))
+	}), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("GET /api/v1/orgs/{orgID}", middleware.Chain(http.HandlerFunc(orgHandler.GetOrganization), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("PATCH /api/v1/orgs/{orgID}", middleware.Chain(http.HandlerFunc(orgHandler.UpdateOrganization), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("DELETE /api/v1/orgs/{orgID}", middleware.Chain(http.HandlerFunc(orgHandler.DeleteOrganization), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("GET /api/v1/orgs/{orgID}/members", middleware.Chain(http.HandlerFunc(orgHandler.ListMembers), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("POST /api/v1/orgs/{orgID}/invites", middleware.Chain(http.HandlerFunc(orgHandler.InviteMember), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("POST /api/v1/orgs/{orgID}/accept", middleware.Chain(http.HandlerFunc(orgHandler.AcceptInvite), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("PATCH /api/v1/orgs/{orgID}/members/{userID}", middleware.Chain(http.HandlerFunc(orgHandler.ChangeMemberRole), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("DELETE /api/v1/orgs/{orgID}/members/{userID}", middleware.Chain(http.HandlerFunc(orgHandler.RemoveMember), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("POST /api/v1/orgs/{orgID}/leave", middleware.Chain(http.HandlerFunc(orgHandler.LeaveOrganization), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("POST /api/v1/orgs/{orgID}/kyc", middleware.Chain(http.HandlerFunc(orgHandler.SubmitKYC), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("GET /api/v1/orgs/{orgID}/kyc", middleware.Chain(http.HandlerFunc(orgHandler.GetKYCSubmission), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("POST /api/v1/orgs/{orgID}/kyc/document", middleware.Chain(http.HandlerFunc(orgHandler.UploadKYCDocument), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("GET /api/v1/orgs/{orgID}/kyc/document", middleware.Chain(http.HandlerFunc(orgHandler.ServeKYCDocument), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
 
 	// ---- Admin: KYC review queue, decisions, per-org live limits ----
 	mux.Handle("GET /api/v1/admin/orgs/kyc-queue", middleware.Chain(http.HandlerFunc(orgHandler.ListKYCQueue), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))

@@ -70,6 +70,10 @@ type AuthConfig struct {
 	// cmd/seed-admin or an admin invite). Set false to close
 	// self-registration entirely.
 	AllowPublicRegister bool
+	// RequireEmailVerification gates org/merchant routes behind email
+	// verification. Default true. Set false TEMPORARILY in local dev when
+	// no mailer is wired (OTP codes can't reach you) — never in production.
+	RequireEmailVerification bool
 }
 
 type CORSConfig struct {
@@ -148,6 +152,7 @@ func Load() (Config, error) {
 			HealthTimeout:   mustDuration("DATABASE_HEALTH_TIMEOUT", "3s"),
 		},
 		Auth: AuthConfig{JWTSecret: strings.TrimSpace(os.Getenv("AUTH_JWT_SECRET")), TokenTTL: mustDuration("AUTH_TOKEN_TTL", "24h"), AllowPublicRegister: mustBool("AUTH_ALLOW_PUBLIC_REGISTER", true),
+			RequireEmailVerification: mustBool("AUTH_REQUIRE_EMAIL_VERIFICATION", true),
 			AdminJWTSecret:           strings.TrimSpace(os.Getenv("AUTH_ADMIN_JWT_SECRET")),
 			AdminTokenTTL:            mustDuration("AUTH_ADMIN_TOKEN_TTL", "4h"),
 			LoginRateLimitPerMin:     mustInt("AUTH_LOGIN_RATE_LIMIT_PER_MIN", 20),
