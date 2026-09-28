@@ -33,6 +33,10 @@ type Repository interface {
 	CountOwners(ctx context.Context, orgID string) (int64, error)
 	FindUserIDByEmail(ctx context.Context, email string) (string, error)
 	CountActiveMembers(ctx context.Context, orgID string) (int64, error)
+	// CountActiveOrgsForUser counts ACTIVE memberships of a user across all
+	// orgs. Product rule: one org per account — enforced in the service
+	// before creating or joining another org.
+	CountActiveOrgsForUser(ctx context.Context, userID string) (int64, error)
 	SubmitKYC(ctx context.Context, orgID, businessName, tin, docURL string) (KYCSubmission, error)
 	GetKYCSubmission(ctx context.Context, orgID string) (KYCSubmission, bool, error)
 	// ReviewKYC flips kyc_status (verified|rejected) and records the
@@ -419,6 +423,14 @@ func (r *PostgresRepository) CountActiveMembers(ctx context.Context, orgID strin
 	var count int64
 	if err := r.db.QueryRowEx(ctx, `SELECT COUNT(*) FROM app.org_members WHERE org_id = $1::uuid AND status = 'active'`, nil, orgID).Scan(&count); err != nil {
 		return 0, fmt.Errorf("count org members: %w", err)
+	}
+	return count, nil
+}
+
+func (r *PostgresRepository) CountActiveOrgsForUser(ctx context.Context, userID string) (int64, error) {
+	var count int64
+	if err := r.db.QueryRowEx(ctx, `SELECT COUNT(*) FROM app.org_members WHERE user_id = $1::uuid AND status = 'active'`, nil, userID).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count user orgs: %w", err)
 	}
 	return count, nil
 }

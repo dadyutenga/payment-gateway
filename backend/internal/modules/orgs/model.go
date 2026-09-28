@@ -134,6 +134,7 @@ var (
 	ErrOrgNotEmpty      = errors.New("organization still has apps — delete or move them first")
 	ErrInviteNotFound       = errors.New("no pending invite for this user")
 	ErrCannotRemoveSelf     = errors.New("use leave instead of removing yourself")
+	ErrSingleOrg            = errors.New("each account belongs to a single organization")
 	ErrKYCNotSubmitted      = errors.New("no kyc submission for this organization")
 	ErrKYCNotInReview       = errors.New("organization has no submission awaiting review")
 	ErrKYCQueueStatusUnknown = errors.New("unknown kyc queue status")

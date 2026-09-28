@@ -22,11 +22,6 @@ const CreateOrg = () => {
       const org = await createOrg({ name: name.trim(), business_name: businessName.trim() || undefined });
       toast.success("Organization created — you are its owner.");
       queryClient.invalidateQueries({ queryKey: ["orgs", "mine"] });
-      try {
-        localStorage.setItem("payments_gateway_org_id", org.id);
-      } catch {
-        /* storage unavailable — switcher falls back to first org */
-      }
       navigate(`/org/${org.id}/members`, { replace: true });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Unable to create organization.");

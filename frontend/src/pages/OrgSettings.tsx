@@ -56,13 +56,6 @@ const OrgSettings = () => {
     try {
       await deleteOrg(orgId);
       toast.success("Organization deleted.");
-      try {
-        if (localStorage.getItem("payments_gateway_org_id") === orgId) {
-          localStorage.removeItem("payments_gateway_org_id");
-        }
-      } catch {
-        /* ignore */
-      }
       queryClient.invalidateQueries({ queryKey: ["orgs", "mine"] });
       navigate("/merchant/apps", { replace: true });
     } catch (err) {

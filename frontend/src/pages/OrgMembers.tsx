@@ -13,7 +13,6 @@ import {
   changeOrgMemberRole,
   getOrg,
   inviteOrgMember,
-  leaveOrg,
   listOrgMembers,
   removeOrgMember,
   ORG_ROLES,
@@ -122,18 +121,6 @@ const OrgMembers = () => {
     }
   };
 
-  const handleLeave = async () => {
-    if (!window.confirm("Leave this organization?")) return;
-    try {
-      await leaveOrg(orgId);
-      toast.success("You left the organization.");
-      queryClient.invalidateQueries({ queryKey: ["orgs", "mine"] });
-      window.location.assign("/merchant/apps");
-    } catch (err) {
-      toast.error(errorMessage(err, "Unable to leave."));
-    }
-  };
-
   return (
     <div>
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -144,9 +131,6 @@ const OrgMembers = () => {
             {myRole && <> Your role: <Badge variant="secondary">{myRole}</Badge></>}
           </p>
         </div>
-        {me && active.some((m) => m.user_id === me) && (
-          <Button size="sm" variant="outline" onClick={handleLeave}>Leave org</Button>
-        )}
       </div>
 
       {myInvite && (

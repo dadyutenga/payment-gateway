@@ -77,6 +77,8 @@ func (h *Handler) orgError(w http.ResponseWriter, err error, action string) {
 		httputil.Error(w, http.StatusNotFound, "invite_not_found", "No pending invite for this user.", nil)
 	case errors.Is(err, ErrCannotRemoveSelf):
 		httputil.Error(w, http.StatusBadRequest, "cannot_remove_self", "Use leave instead of removing yourself.", nil)
+	case errors.Is(err, ErrSingleOrg):
+		httputil.Error(w, http.StatusConflict, "single_org", "Each account belongs to a single organization.", nil)
 	default:
 		h.fail(w, http.StatusInternalServerError, "internal_error", "Unable to complete the organization request.", err)
 	}

@@ -3,20 +3,15 @@ import { ShieldAlert } from "lucide-react";
 import { Link } from "react-router-dom";
 import { listMyOrgs } from "@/lib/orgApi";
 
-// SandboxModeBanner shows when the signed-in user's active org is not
+// SandboxModeBanner shows when the signed-in user's organization is not
 // KYC-verified: live API keys and live payments are blocked until review.
+// One org per account — the banner follows the first active membership.
 const SandboxModeBanner = () => {
   const orgsQuery = useQuery({ queryKey: ["orgs", "mine"], queryFn: () => listMyOrgs(), staleTime: 30_000, retry: false });
   const orgs = (orgsQuery.data ?? []).filter((o) => o.status === "active");
   if (orgs.length === 0) return null;
 
-  let activeOrgId = "";
-  try {
-    activeOrgId = localStorage.getItem("payments_gateway_org_id") ?? "";
-  } catch {
-    /* ignore */
-  }
-  const active = orgs.find((o) => o.id === activeOrgId) ?? orgs[0];
+  const active = orgs[0];
   if (!active || active.kyc_status === "verified") return null;
 
   const copy =

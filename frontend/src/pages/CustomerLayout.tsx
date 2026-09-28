@@ -1,8 +1,6 @@
-import { NavLink, Outlet, useNavigate } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { NavLink, Outlet } from "react-router-dom";
 import { LogOut, Wallet } from "lucide-react";
 import { signOut } from "@/lib/auth";
-import { listMyOrgs } from "@/lib/orgApi";
 import SandboxModeBanner from "@/components/SandboxModeBanner";
 
 const NAV_ITEMS = [
@@ -10,36 +8,10 @@ const NAV_ITEMS = [
   { to: "/onboarding/create-org", label: "New Organization" },
 ];
 
-function currentOrgId(): string {
-  try {
-    return localStorage.getItem("payments_gateway_org_id") ?? "";
-  } catch {
-    return "";
-  }
-}
-
-// Merchant (customer) space layout: org switcher, merchant nav, sandbox/KYC
-// banner. Never renders admin links — operators use AdminLayout instead.
+// Merchant (customer) space layout: one org per account, so no org
+// switcher — merchant nav plus the sandbox/KYC banner. Never renders admin
+// links — operators use AdminLayout instead.
 const CustomerLayout = () => {
-  const navigate = useNavigate();
-  const orgsQuery = useQuery({ queryKey: ["orgs", "mine"], queryFn: () => listMyOrgs(), staleTime: 60_000, retry: false });
-  const orgs = orgsQuery.data ?? [];
-
-  const handleOrgChange = (orgId: string) => {
-    try {
-      if (orgId) {
-        localStorage.setItem("payments_gateway_org_id", orgId);
-      } else {
-        localStorage.removeItem("payments_gateway_org_id");
-      }
-    } catch {
-      /* ignore */
-    }
-    if (orgId) {
-      navigate(`/org/${orgId}/members`);
-    }
-  };
-
   return (
     <div className="min-h-screen bg-slate-50">
       <header className="border-b border-slate-200 bg-white">
@@ -52,19 +24,6 @@ const CustomerLayout = () => {
             </span>
           </div>
           <nav className="flex items-center gap-1">
-            {orgs.length > 0 && (
-              <select
-                aria-label="Organization"
-                className="mr-1 h-8 max-w-40 truncate rounded-md border border-slate-300 px-1.5 text-xs text-slate-700"
-                value={orgs.some((o) => o.id === currentOrgId()) ? currentOrgId() : ""}
-                onChange={(e) => handleOrgChange(e.target.value)}
-              >
-                <option value="">All orgs</option>
-                {orgs.map((o) => (
-                  <option key={o.id} value={o.id}>{o.name} · {o.role}</option>
-                ))}
-              </select>
-            )}
             {NAV_ITEMS.map((item) => (
               <NavLink
                 key={item.to}

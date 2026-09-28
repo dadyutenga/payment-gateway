@@ -83,6 +83,13 @@ func (s *Service) CreateOrganization(ctx context.Context, userID, name, business
 		return Organization{}, errs, nil
 	}
 
+	// One org per account.
+	if count, err := s.repo.CountActiveOrgsForUser(ctx, userID); err != nil {
+		return Organization{}, nil, err
+	} else if count > 0 {
+		return Organization{}, nil, ErrSingleOrg
+	}
+
 	org, err := s.repo.CreateOrganization(ctx, name, SlugFor(name), businessName, userID)
 	if err != nil {
 		return Organization{}, nil, err
@@ -326,10 +333,23 @@ func (s *Service) InviteMember(ctx context.Context, actorUserID, orgID, email st
 	if userID == actorUserID {
 		return OrgMember{}, ErrAlreadyMember
 	}
+	// One org per account — invited-but-unaccepted rows don't count.
+	if count, err := s.repo.CountActiveOrgsForUser(ctx, userID); err != nil {
+		return OrgMember{}, err
+	} else if count > 0 {
+		return OrgMember{}, ErrSingleOrg
+	}
 	return s.repo.InviteMember(ctx, strings.TrimSpace(orgID), userID, role, actorUserID)
 }
 
 func (s *Service) AcceptInvite(ctx context.Context, userID, orgID string) (OrgMember, error) {
+	// Re-check at accept time: the account may have joined an org after
+	// the invite was sent (invited rows never count as active).
+	if count, err := s.repo.CountActiveOrgsForUser(ctx, userID); err != nil {
+		return OrgMember{}, err
+	} else if count > 0 {
+		return OrgMember{}, ErrSingleOrg
+	}
 	return s.repo.AcceptInvite(ctx, strings.TrimSpace(orgID), userID)
 }
 

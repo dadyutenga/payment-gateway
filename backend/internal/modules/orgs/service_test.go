@@ -177,6 +177,16 @@ func (r *fakeOrgRepository) CountActiveMembers(_ context.Context, _ string) (int
 	return 1, nil
 }
 
+func (r *fakeOrgRepository) CountActiveOrgsForUser(_ context.Context, userID string) (int64, error) {
+	var count int64
+	for _, m := range r.members {
+		if m.UserID == userID && m.Status == MemberStatusActive {
+			count++
+		}
+	}
+	return count, nil
+}
+
 func (r *fakeOrgRepository) FindUserIDByEmail(_ context.Context, email string) (string, error) {
 	if r.userErr != nil {
 		return "", r.userErr
@@ -335,5 +345,26 @@ func TestDeleteOrganizationRefusesNonEmpty(t *testing.T) {
 	repo.apps = 0
 	if err := service.DeleteOrganization(context.Background(), "owner-1", "org_test"); err != nil {
 		t.Fatalf("expected empty org deletion, got %v", err)
+	}
+}
+
+func TestSingleOrgPerAccount(t *testing.T) {
+	repo := ownerRepo() // owner-1 already active in org_test
+	repo.userIDs["teammate@example.com"] = "user-team"
+	service := NewService(repo, nil)
+	ctx := context.Background()
+
+	if _, _, err := service.CreateOrganization(ctx, "owner-1", "Second", ""); err == nil {
+		t.Fatal("expected second org creation blocked")
+	}
+	if _, _, err := service.CreateOrganization(ctx, "fresh-user", "First", ""); err != nil {
+		t.Fatalf("expected first org creation allowed, got %v", err)
+	}
+	if _, err := service.InviteMember(ctx, "owner-1", "org_test", "teammate@example.com", RoleViewer); err != nil {
+		t.Fatalf("expected invite of org-less user allowed, got %v", err)
+	}
+	repo.members[orgKey("org_other", "user-team")] = OrgMember{OrgID: "org_other", UserID: "user-team", Role: RoleViewer, Status: MemberStatusActive}
+	if _, err := service.AcceptInvite(ctx, "user-team", "org_test"); err == nil {
+		t.Fatal("expected accept with existing active org blocked")
 	}
 }
