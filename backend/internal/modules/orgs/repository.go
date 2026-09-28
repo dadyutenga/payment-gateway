@@ -59,6 +59,8 @@ type Repository interface {
 	UpdateOrgLogo(ctx context.Context, orgID, logoURL string) (Organization, error)
 	// UpsertNotificationPrefs replaces the org's toggles.
 	UpsertNotificationPrefs(ctx context.Context, prefs NotificationPrefs) (NotificationPrefs, error)
+	// PlatformStats counts tenants and workload for the admin dashboard.
+	PlatformStats(ctx context.Context) (PlatformStats, error)
 }
 
 type PostgresRepository struct {
@@ -683,6 +685,83 @@ func (r *PostgresRepository) ListKYCQueue(ctx context.Context, status string) ([
 		return nil, fmt.Errorf("iterate kyc queue: %w", err)
 	}
 	return items, nil
+}
+
+// PlatformStats is the admin home dashboard snapshot: tenant counts,
+// verification funnel, and withdrawal workload. One call, plain COUNTs.
+type PlatformStats struct {
+	Customers           int64            `json:"customers"`
+	Admins              int64            `json:"admins"`
+	Organizations       int64            `json:"organizations"`
+	OrgsByKYC           map[string]int64 `json:"orgs_by_kyc"`
+	KYCAwaitingReview   int64            `json:"kyc_awaiting_review"`
+	Apps                int64            `json:"apps"`
+	WithdrawalsByStatus map[string]int64 `json:"withdrawals_by_status"`
+}
+
+// PlatformStats counts tenants and workload for the admin dashboard.
+// No actor check — the RequireAdminAuth route gate replaces membership.
+func (r *PostgresRepository) PlatformStats(ctx context.Context) (PlatformStats, error) {
+	stats := PlatformStats{
+		OrgsByKYC:           map[string]int64{},
+		WithdrawalsByStatus: map[string]int64{},
+	}
+	count := func(query string) (int64, error) {
+		var n int64
+		if err := r.db.QueryRowEx(ctx, query, nil).Scan(&n); err != nil {
+			return 0, err
+		}
+		return n, nil
+	}
+	var err error
+	if stats.Customers, err = count(`SELECT COUNT(*) FROM app.users`); err != nil {
+		return PlatformStats{}, fmt.Errorf("count customers: %w", err)
+	}
+	if stats.Admins, err = count(`SELECT COUNT(*) FROM app.admin_users`); err != nil {
+		return PlatformStats{}, fmt.Errorf("count admins: %w", err)
+	}
+	if stats.Organizations, err = count(`SELECT COUNT(*) FROM app.organizations`); err != nil {
+		return PlatformStats{}, fmt.Errorf("count organizations: %w", err)
+	}
+	if stats.Apps, err = count(`SELECT COUNT(*) FROM app.payment_apps WHERE status != 'deleted'`); err != nil {
+		return PlatformStats{}, fmt.Errorf("count apps: %w", err)
+	}
+	rows, err := r.db.QueryEx(ctx, `SELECT kyc_status, COUNT(*) FROM app.organizations GROUP BY kyc_status`, nil)
+	if err != nil {
+		return PlatformStats{}, fmt.Errorf("count orgs by kyc: %w", err)
+	}
+	for rows.Next() {
+		var status string
+		var n int64
+		if err := rows.Scan(&status, &n); err != nil {
+			rows.Close()
+			return PlatformStats{}, fmt.Errorf("scan orgs by kyc: %w", err)
+		}
+		stats.OrgsByKYC[status] = n
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return PlatformStats{}, fmt.Errorf("iterate orgs by kyc: %w", err)
+	}
+	stats.KYCAwaitingReview = stats.OrgsByKYC["submitted"]
+	rows, err = r.db.QueryEx(ctx, `SELECT status, COUNT(*) FROM app.payment_withdrawals GROUP BY status`, nil)
+	if err != nil {
+		return PlatformStats{}, fmt.Errorf("count withdrawals by status: %w", err)
+	}
+	for rows.Next() {
+		var status string
+		var n int64
+		if err := rows.Scan(&status, &n); err != nil {
+			rows.Close()
+			return PlatformStats{}, fmt.Errorf("scan withdrawals by status: %w", err)
+		}
+		stats.WithdrawalsByStatus[status] = n
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return PlatformStats{}, fmt.Errorf("iterate withdrawals by status: %w", err)
+	}
+	return stats, nil
 }
 
 // ListKYCAttempts returns the immutable submit/decide history, newest

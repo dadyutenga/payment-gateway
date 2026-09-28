@@ -4,6 +4,7 @@ import { Toaster } from "@/components/ui/sonner";
 import AdminRoute from "@/components/AdminRoute";
 import MerchantRoute from "@/components/MerchantRoute";
 import AdminLayout from "@/pages/AdminLayout";
+import AdminDashboard from "@/pages/AdminDashboard";
 import CustomerLayout from "@/pages/CustomerLayout";
 import SignIn from "@/pages/SignIn";
 import AdminPayments from "@/pages/AdminPayments";
@@ -52,6 +53,7 @@ const App = () => (
               </AdminRoute>
             }
           >
+            <Route index element={<AdminDashboard />} />
             <Route path="payments" element={<AdminPayments />} />
             <Route path="payments/apps" element={<AdminPaymentApps />} />
             <Route path="payments/apps/:id" element={<AdminPaymentAppDetail />} />

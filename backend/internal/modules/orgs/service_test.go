@@ -105,6 +105,10 @@ func (r *fakeOrgRepository) UpsertNotificationPrefs(_ context.Context, prefs Not
 	return prefs, nil
 }
 
+func (r *fakeOrgRepository) PlatformStats(_ context.Context) (PlatformStats, error) {
+	return PlatformStats{OrgsByKYC: map[string]int64{}, WithdrawalsByStatus: map[string]int64{}}, nil
+}
+
 func (r *fakeOrgRepository) UpdateOrgLogo(_ context.Context, orgID, logoURL string) (Organization, error) {
 	return Organization{ID: orgID, LogoURL: logoURL}, nil
 }

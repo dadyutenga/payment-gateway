@@ -314,6 +314,22 @@ export async function updateOrgLimits(orgId: string, input: { live_max_txn_amoun
   ).data;
 }
 
+// ---------- Admin: platform stats (home dashboard) ----------
+
+export type PlatformStats = {
+  customers: number;
+  admins: number;
+  organizations: number;
+  orgs_by_kyc: Record<string, number>;
+  kyc_awaiting_review: number;
+  apps: number;
+  withdrawals_by_status: Record<string, number>;
+};
+
+export async function getPlatformStats() {
+  return (await request<PlatformStats>("/api/v1/admin/stats")).data;
+}
+
 // fetchKYCDocument downloads an org's ID document as a blob (admin review
 // path — the member route requires org membership reviewers don't have).
 export async function fetchKYCDocument(orgId: string): Promise<{ blob: Blob; contentType: string }> {

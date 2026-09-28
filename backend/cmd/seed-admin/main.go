@@ -54,7 +54,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	db, err := database.NewPool(ctx, config.DatabaseConfig{URL: *dbURLFlag})
+	db, err := database.NewPool(ctx, config.DatabaseConfig{URL: *dbURLFlag, MaxOpenConns: 4, HealthTimeout: 5 * time.Second})
 	if err != nil {
 		log.Fatalf("connect database: %v", err)
 	}

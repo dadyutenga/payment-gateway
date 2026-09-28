@@ -303,6 +303,12 @@ func (s *Service) UpdateNotificationPrefs(ctx context.Context, userID, orgID str
 	return s.repo.UpsertNotificationPrefs(ctx, prefs)
 }
 
+// PlatformStats returns the admin dashboard snapshot. No actor check —
+// route-gated by RequireAdminAuth.
+func (s *Service) PlatformStats(ctx context.Context) (PlatformStats, error) {
+	return s.repo.PlatformStats(ctx)
+}
+
 // SetOrgLogoURL stores the org's logo location (owner/manage_org). The
 // handler validates and stores the file; this records the reference.
 func (s *Service) SetOrgLogoURL(ctx context.Context, userID, orgID, logoURL string) (Organization, error) {

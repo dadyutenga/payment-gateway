@@ -648,6 +648,20 @@ func (h *Handler) ServeOrgLogo(w http.ResponseWriter, r *http.Request) {
 // All routes carry RequireAdmin; handlers use claimsIdentity (no org
 // membership needed) and record the reviewer's email on decisions.
 
+// PlatformStats serves GET /api/v1/admin/stats — the admin home
+// dashboard snapshot. Route-gated by RequireAdminAuth.
+func (h *Handler) PlatformStats(w http.ResponseWriter, r *http.Request) {
+	if _, _, ok := claimsIdentity(w, r); !ok {
+		return
+	}
+	stats, err := h.service.PlatformStats(r.Context())
+	if err != nil {
+		h.fail(w, http.StatusInternalServerError, "internal_error", "Unable to load platform stats.", err)
+		return
+	}
+	httputil.JSON(w, http.StatusOK, map[string]any{"data": stats})
+}
+
 func (h *Handler) ListKYCQueue(w http.ResponseWriter, r *http.Request) {
 	if _, _, ok := claimsIdentity(w, r); !ok {
 		return
