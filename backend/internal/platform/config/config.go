@@ -53,6 +53,17 @@ type DatabaseConfig struct {
 type AuthConfig struct {
 	JWTSecret string
 	TokenTTL  time.Duration
+	// AdminJWTSecret signs admin-space tokens. When empty the customer
+	// secret is reused BUT audiences still partition the spaces (aud
+	// validation rejects cross-use either way). Set a distinct value in
+	// production so a leaked customer secret cannot mint admin tokens.
+	AdminJWTSecret string
+	// AdminTokenTTL is the shorter admin session lifetime.
+	AdminTokenTTL time.Duration
+	// LoginRateLimitPerMin caps customer login attempts per IP+account.
+	LoginRateLimitPerMin int
+	// AdminLoginRateLimitPerMin is the stricter admin login cap.
+	AdminLoginRateLimitPerMin int
 	// AllowPublicRegister keeps POST /api/v1/auth/register open to anyone.
 	// Default false: only the very first account (empty users table) may
 	// self-register as a bootstrap; afterwards registration is closed and
@@ -137,7 +148,11 @@ func Load() (Config, error) {
 			MaxConnIdleTime: mustDuration("DATABASE_MAX_CONN_IDLE_TIME", "5m"),
 			HealthTimeout:   mustDuration("DATABASE_HEALTH_TIMEOUT", "3s"),
 		},
-		Auth: AuthConfig{JWTSecret: strings.TrimSpace(os.Getenv("AUTH_JWT_SECRET")), TokenTTL: mustDuration("AUTH_TOKEN_TTL", "24h"), AllowPublicRegister: mustBool("AUTH_ALLOW_PUBLIC_REGISTER", false)},
+		Auth: AuthConfig{JWTSecret: strings.TrimSpace(os.Getenv("AUTH_JWT_SECRET")), TokenTTL: mustDuration("AUTH_TOKEN_TTL", "24h"), AllowPublicRegister: mustBool("AUTH_ALLOW_PUBLIC_REGISTER", false),
+			AdminJWTSecret:           strings.TrimSpace(os.Getenv("AUTH_ADMIN_JWT_SECRET")),
+			AdminTokenTTL:            mustDuration("AUTH_ADMIN_TOKEN_TTL", "4h"),
+			LoginRateLimitPerMin:     mustInt("AUTH_LOGIN_RATE_LIMIT_PER_MIN", 20),
+			AdminLoginRateLimitPerMin: mustInt("AUTH_ADMIN_LOGIN_RATE_LIMIT_PER_MIN", 5)},
 		CORS: CORSConfig{
 			AllowedOrigins: splitCSV(getEnv("CORS_ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:3000")),
 		},
@@ -175,6 +190,9 @@ func Load() (Config, error) {
 	}
 	if len(cfg.Auth.JWTSecret) < 32 {
 		validationErrs = append(validationErrs, "AUTH_JWT_SECRET must be at least 32 characters")
+	}
+	if cfg.Auth.AdminJWTSecret != "" && len(cfg.Auth.AdminJWTSecret) < 32 {
+		validationErrs = append(validationErrs, "AUTH_ADMIN_JWT_SECRET must be at least 32 characters")
 	}
 	if strings.EqualFold(cfg.App.Env, "production") && cfg.Payments.DeliverySigningSecret == "development-payment-delivery-secret" {
 		validationErrs = append(validationErrs, "PAYMENTS_DELIVERY_SIGNING_SECRET is required in production")

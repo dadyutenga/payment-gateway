@@ -147,6 +147,10 @@ func RequireAuth(verifier *auth.Verifier) func(http.Handler) http.Handler {
 			token := strings.TrimSpace(strings.TrimPrefix(header, "Bearer "))
 			claims, err := verifier.VerifyBearerToken(r.Context(), token)
 			if err != nil {
+				if strings.Contains(err.Error(), "audience") {
+					httputil.Error(w, http.StatusUnauthorized, "invalid_audience", "This token belongs to the other space — sign in through the matching login path.", nil)
+					return
+				}
 				httputil.Error(w, http.StatusUnauthorized, "unauthorized", "Invalid bearer token.", nil)
 				return
 			}
@@ -155,6 +159,120 @@ func RequireAuth(verifier *auth.Verifier) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+// SpaceChecker validates identity against the matching table on every
+// request (revocation takes effect immediately, never waits for expiry).
+type SpaceChecker interface {
+	IsCustomerUser(ctx context.Context, userID string) (bool, error)
+	IsAdminUser(ctx context.Context, userID string) (bool, error)
+	CustomerEmailVerified(ctx context.Context, userID string) (bool, error)
+}
+
+// RequireCustomerAuth gates the customer space: customer-audience token +
+// row in app.users. With requireVerified, unverified emails get
+// 403 email_unverified (OTP/me endpoints use false so users can verify).
+// otherSpace is the admin verifier: when the customer check fails but the
+// token verifies as an admin token, the caller gets a clear
+// invalid_audience error instead of a generic 401 (with distinct signing
+// keys the signature check fails first, so this second probe is what
+// identifies the token as belonging to the other space).
+func RequireCustomerAuth(verifier, otherSpace *auth.Verifier, checker SpaceChecker, requireVerified bool) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			header := strings.TrimSpace(r.Header.Get("Authorization"))
+			if !strings.HasPrefix(header, "Bearer ") {
+				httputil.Error(w, http.StatusUnauthorized, "unauthorized", "Missing bearer token.", nil)
+				return
+			}
+			token := strings.TrimSpace(strings.TrimPrefix(header, "Bearer "))
+			claims, err := verifier.VerifyBearerToken(r.Context(), token)
+			if err != nil {
+				if strings.Contains(err.Error(), "audience") || verifiesInOtherSpace(r, otherSpace, token) {
+					httputil.Error(w, http.StatusUnauthorized, "invalid_audience", "Admin tokens are not accepted here — sign in at /login.", nil)
+					return
+				}
+				httputil.Error(w, http.StatusUnauthorized, "unauthorized", "Invalid bearer token.", nil)
+				return
+			}
+			if claims.Audience != "" && claims.Audience != auth.AudienceCustomer {
+				httputil.Error(w, http.StatusForbidden, "wrong_space", "Admin tokens are not accepted here — sign in at /login.", nil)
+				return
+			}
+			ok, err := checker.IsCustomerUser(r.Context(), claims.Subject)
+			if err != nil {
+				httputil.Error(w, http.StatusInternalServerError, "internal_error", "Unable to verify account.", nil)
+				return
+			}
+			if !ok {
+				httputil.Error(w, http.StatusUnauthorized, "unauthorized", "Account not found.", nil)
+				return
+			}
+			if requireVerified {
+				verified, err := checker.CustomerEmailVerified(r.Context(), claims.Subject)
+				if err != nil {
+					httputil.Error(w, http.StatusInternalServerError, "internal_error", "Unable to verify account.", nil)
+					return
+				}
+				if !verified {
+					httputil.Error(w, http.StatusForbidden, "email_unverified", "Verify your email before continuing.", nil)
+					return
+				}
+			}
+			next.ServeHTTP(w, r.WithContext(auth.WithClaims(r.Context(), claims)))
+		})
+	}
+}
+
+// RequireAdminAuth gates the admin space: admin-audience token + row in
+// app.admin_users, re-read per request so revocation is immediate.
+// otherSpace is the customer verifier, used for the same clear
+// invalid_audience signal as RequireCustomerAuth.
+func RequireAdminAuth(verifier, otherSpace *auth.Verifier, checker SpaceChecker) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			header := strings.TrimSpace(r.Header.Get("Authorization"))
+			if !strings.HasPrefix(header, "Bearer ") {
+				httputil.Error(w, http.StatusUnauthorized, "unauthorized", "Missing bearer token.", nil)
+				return
+			}
+			token := strings.TrimSpace(strings.TrimPrefix(header, "Bearer "))
+			claims, err := verifier.VerifyBearerToken(r.Context(), token)
+			if err != nil {
+				if strings.Contains(err.Error(), "audience") || verifiesInOtherSpace(r, otherSpace, token) {
+					httputil.Error(w, http.StatusUnauthorized, "invalid_audience", "Customer tokens are not accepted here — sign in at /admin/login.", nil)
+					return
+				}
+				httputil.Error(w, http.StatusUnauthorized, "unauthorized", "Invalid bearer token.", nil)
+				return
+			}
+			if claims.Audience != "" && claims.Audience != auth.AudienceAdmin {
+				httputil.Error(w, http.StatusForbidden, "wrong_space", "Customer tokens are not accepted here — sign in at /admin/login.", nil)
+				return
+			}
+			ok, err := checker.IsAdminUser(r.Context(), claims.Subject)
+			if err != nil {
+				httputil.Error(w, http.StatusInternalServerError, "internal_error", "Unable to verify admin privileges.", nil)
+				return
+			}
+			if !ok {
+				httputil.Error(w, http.StatusForbidden, "forbidden", "Insufficient privileges.", nil)
+				return
+			}
+			next.ServeHTTP(w, r.WithContext(auth.WithClaims(r.Context(), claims)))
+		})
+	}
+}
+
+// verifiesInOtherSpace probes the other space's verifier (failure path
+// only) so cross-space tokens produce a clear invalid_audience error even
+// when the spaces use distinct signing keys.
+func verifiesInOtherSpace(r *http.Request, otherSpace *auth.Verifier, token string) bool {
+	if otherSpace == nil || token == "" {
+		return false
+	}
+	_, err := otherSpace.VerifyBearerToken(r.Context(), token)
+	return err == nil
 }
 
 func RequireAdmin(check func(ctx context.Context, claims auth.Claims) (bool, error)) func(http.Handler) http.Handler {

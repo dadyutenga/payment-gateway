@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -10,10 +11,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/big"
+	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"lipago/internal/platform/config"
@@ -28,9 +32,19 @@ type Claims struct {
 	Subject  string `json:"sub"`
 	Email    string `json:"email"`
 	IsAdmin  bool   `json:"is_admin"`
+	Audience string `json:"aud"`
 	Expiry   int64  `json:"exp"`
 	IssuedAt int64  `json:"iat"`
 }
+
+// Token audiences partition the two spaces. A customer token is never
+// accepted on an admin route and vice versa — enforced by using separate
+// Verifier instances (ideally separate signing keys) plus per-request DB
+// checks against the matching table.
+const (
+	AudienceCustomer = "customer"
+	AudienceAdmin    = "admin"
+)
 
 // claimsKey stores verified Claims on the request context. Defined here
 // (not in middleware) so auth handlers can read claims without importing
@@ -56,15 +70,40 @@ type User struct {
 type Verifier struct {
 	secret   []byte
 	tokenTTL time.Duration
+	audience string
 }
 
+// NewVerifier keeps its original signature for compatibility and returns
+// the CUSTOMER verifier (aud=customer).
 func NewVerifier(cfg config.AuthConfig, _ any) *Verifier {
-	return &Verifier{secret: []byte(cfg.JWTSecret), tokenTTL: cfg.TokenTTL}
+	return NewCustomerVerifier(cfg, nil)
 }
+
+// NewCustomerVerifier validates customer-space tokens (aud=customer).
+func NewCustomerVerifier(cfg config.AuthConfig, _ any) *Verifier {
+	return &Verifier{secret: []byte(cfg.JWTSecret), tokenTTL: cfg.TokenTTL, audience: AudienceCustomer}
+}
+
+// NewAdminVerifier validates admin-space tokens (aud=admin). It uses
+// AUTH_ADMIN_JWT_SECRET when set, otherwise falls back to the customer
+// secret — audience separation still rejects cross-use either way.
+func NewAdminVerifier(cfg config.AuthConfig, _ any) *Verifier {
+	secret := strings.TrimSpace(cfg.AdminJWTSecret)
+	if secret == "" {
+		secret = cfg.JWTSecret
+	}
+	ttl := cfg.AdminTokenTTL
+	if ttl <= 0 {
+		ttl = cfg.TokenTTL
+	}
+	return &Verifier{secret: []byte(secret), tokenTTL: ttl, audience: AudienceAdmin}
+}
+
+func (v *Verifier) Audience() string { return v.audience }
 
 func (v *Verifier) IssueToken(user User) (string, error) {
 	now := time.Now().Unix()
-	claims := Claims{Subject: user.ID, Email: user.Email, IsAdmin: user.IsAdmin, IssuedAt: now, Expiry: now + int64(v.tokenTTL.Seconds())}
+	claims := Claims{Subject: user.ID, Email: user.Email, IsAdmin: user.IsAdmin, Audience: v.audience, IssuedAt: now, Expiry: now + int64(v.tokenTTL.Seconds())}
 	header, _ := json.Marshal(map[string]string{"alg": "HS256", "typ": "JWT"})
 	payload, err := json.Marshal(claims)
 	if err != nil {
@@ -110,19 +149,116 @@ func (v *Verifier) VerifyBearerToken(_ context.Context, token string) (Claims, e
 	if claims.Subject == "" || claims.Email == "" || time.Now().Unix() >= claims.Expiry {
 		return Claims{}, errors.New("token expired or invalid")
 	}
+	// Audience partition: a token minted for one space is unusable in the
+	// other even if the user_id somehow matches a row there.
+	if v.audience != "" && claims.Audience != "" && claims.Audience != v.audience {
+		return Claims{}, errors.New("invalid token audience")
+	}
+	if v.audience != "" && claims.Audience == "" {
+		return Claims{}, errors.New("invalid token audience")
+	}
 	return claims, nil
 }
 
 type Service struct {
 	db                  *pgx.ConnPool
-	verifier            *Verifier
+	verifier            *Verifier // customer verifier (back-compat)
+	customerVerifier    *Verifier
+	adminVerifier       *Verifier
 	allowPublicRegister bool
 	mailer              Mailer
 	sms                 SMSSender
+	loginLimiter        *rateLimiter
+	adminLoginLimiter   *rateLimiter
+	// TOTPVerify is the hook where TOTP 2FA plugs in later:
+	// func(secret, code string) bool. Nil means "no TOTP provider wired".
+	TOTPVerify func(secret, code string) bool
 }
 
 func NewService(db *pgx.ConnPool, verifier *Verifier) *Service {
-	return &Service{db: db, verifier: verifier}
+	return &Service{
+		db: db, verifier: verifier,
+		customerVerifier: verifier,
+		loginLimiter:      newRateLimiter(20, time.Minute),
+		adminLoginLimiter: newRateLimiter(5, time.Minute),
+	}
+}
+
+// SetVerifiers wires the split customer/admin verifiers (separate
+// audiences, separate TTLs, ideally separate secrets).
+func (s *Service) SetVerifiers(customer, admin *Verifier) {
+	if customer != nil {
+		s.customerVerifier = customer
+		s.verifier = customer
+	}
+	if admin != nil {
+		s.adminVerifier = admin
+	}
+}
+
+// SetLoginRateLimits overrides the default 20/min customer and 5/min
+// admin login caps (from AUTH_LOGIN_RATE_LIMIT_PER_MIN and
+// AUTH_ADMIN_LOGIN_RATE_LIMIT_PER_MIN).
+func (s *Service) SetLoginRateLimits(customerPerMin, adminPerMin int) {
+	if customerPerMin > 0 {
+		s.loginLimiter = newRateLimiter(customerPerMin, time.Minute)
+	}
+	if adminPerMin > 0 {
+		s.adminLoginLimiter = newRateLimiter(adminPerMin, time.Minute)
+	}
+}
+
+// rateLimiter is a minimal in-memory sliding-window limiter (per key).
+type rateLimiter struct {
+	max    int
+	window time.Duration
+	mu     sync.Mutex
+	hits   map[string][]time.Time
+}
+
+func newRateLimiter(max int, window time.Duration) *rateLimiter {
+	return &rateLimiter{max: max, window: window, hits: map[string][]time.Time{}}
+}
+
+// Allow reports whether key may proceed (recording the hit).
+func (l *rateLimiter) Allow(key string) bool {
+	if l == nil || l.max <= 0 {
+		return true
+	}
+	now := time.Now()
+	cutoff := now.Add(-l.window)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	kept := l.hits[key][:0]
+	for _, t := range l.hits[key] {
+		if t.After(cutoff) {
+			kept = append(kept, t)
+		}
+	}
+	if len(kept) >= l.max {
+		l.hits[key] = kept
+		return false
+	}
+	l.hits[key] = append(kept, now)
+	return true
+}
+
+// clientIP extracts the request IP for rate limiting / audit.
+func clientIP(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
+		if idx := strings.Index(forwarded, ","); idx >= 0 {
+			return strings.TrimSpace(forwarded[:idx])
+		}
+		return forwarded
+	}
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err != nil {
+		return strings.TrimSpace(r.RemoteAddr)
+	}
+	return host
 }
 
 // Mailer sends one-off emails (OTP codes). No implementation ships with
@@ -156,6 +292,20 @@ func (s *Service) SetAllowPublicRegister(allow bool) {
 // attempted after the bootstrap account already exists.
 var ErrPublicRegistrationDisabled = errors.New("public registration is disabled")
 
+func (s *Service) customerTokens() *Verifier {
+	if s.customerVerifier != nil {
+		return s.customerVerifier
+	}
+	return s.verifier
+}
+
+func (s *Service) adminTokens() *Verifier {
+	if s.adminVerifier != nil {
+		return s.adminVerifier
+	}
+	return s.verifier
+}
+
 func (s *Service) Register(ctx context.Context, email, password string) (User, string, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 	if !strings.Contains(email, "@") || len(password) < 12 {
@@ -168,9 +318,9 @@ func (s *Service) Register(ctx context.Context, email, password string) (User, s
 	if err != nil {
 		return User{}, "", fmt.Errorf("hash password: %w", err)
 	}
-	// Self-registration never grants admin — not even to the bootstrap
-	// account, and never by matching an env allowlist (removed). Admins
-	// are created via the seed script or promoted by an existing admin.
+	// Self-registration creates CUSTOMER accounts only (app.users, never
+	// admin). There is no allowlist, no flag, no email that can mint an
+	// operator — admins exist solely in app.admin_users via seed/invite.
 	u := User{ID: uuid.NewString(), Email: email, PasswordHash: string(hash), IsAdmin: false}
 	err = s.db.QueryRowEx(ctx, `INSERT INTO app.users (id, email, password_hash, is_admin) VALUES ($1::uuid, $2, $3, $4) RETURNING id::text, email, password_hash, is_admin`, nil, u.ID, u.Email, u.PasswordHash, u.IsAdmin).Scan(&u.ID, &u.Email, &u.PasswordHash, &u.IsAdmin)
 	if err != nil {
@@ -179,7 +329,8 @@ func (s *Service) Register(ctx context.Context, email, password string) (User, s
 		}
 		return User{}, "", fmt.Errorf("create user: %w", err)
 	}
-	token, err := s.verifier.IssueToken(u)
+	u.IsAdmin = false
+	token, err := s.customerTokens().IssueToken(u)
 	return u, token, err
 }
 
@@ -190,7 +341,8 @@ func (s *Service) Login(ctx context.Context, email, password string) (User, stri
 	if err != nil || bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password)) != nil {
 		return User{}, "", errors.New("invalid email or password")
 	}
-	token, err := s.verifier.IssueToken(u)
+	u.IsAdmin = false
+	token, err := s.customerTokens().IssueToken(u)
 	return u, token, err
 }
 
@@ -204,26 +356,177 @@ func (s *Service) isFirstUser(ctx context.Context) bool {
 	return count == 0
 }
 
-// IsAdmin reads the current admin flag from the database. Admin-gated
-// requests must call this per request instead of trusting the is_admin
-// claim baked into the token — otherwise revoking admin has no effect
-// until the token (up to AUTH_TOKEN_TTL) expires. Unknown/deleted users
-// are not admins.
+// IsAdmin reports whether userID is an active operator. It reads
+// app.admin_users from the database on EVERY call — never from the token
+// claim — so revoking (deleting) an admin takes effect immediately.
+// Unknown/deleted operators are not admins.
 func (s *Service) IsAdmin(ctx context.Context, userID string) (bool, error) {
-	var isAdmin bool
-	err := s.db.QueryRowEx(ctx, `SELECT is_admin FROM app.users WHERE id = $1::uuid`, nil, userID).Scan(&isAdmin)
+	return s.IsAdminUser(ctx, userID)
+}
+
+// IsAdminUser checks the admin table (the only admin source of truth).
+func (s *Service) IsAdminUser(ctx context.Context, userID string) (bool, error) {
+	var exists bool
+	err := s.db.QueryRowEx(ctx, `SELECT EXISTS(SELECT 1 FROM app.admin_users WHERE id = $1::uuid)`, nil, userID).Scan(&exists)
+	if err != nil {
+		return false, err
+	}
+	return exists, nil
+}
+
+// IsCustomerUser checks the customer table (app.users).
+func (s *Service) IsCustomerUser(ctx context.Context, userID string) (bool, error) {
+	var exists bool
+	err := s.db.QueryRowEx(ctx, `SELECT EXISTS(SELECT 1 FROM app.users WHERE id = $1::uuid)`, nil, userID).Scan(&exists)
+	if err != nil {
+		return false, err
+	}
+	return exists, nil
+}
+
+// CustomerEmailVerified reports whether the customer completed email
+// verification. Dashboard/org access requires this (OTP + status reads
+// stay open so users can finish verifying).
+func (s *Service) CustomerEmailVerified(ctx context.Context, userID string) (bool, error) {
+	var verifiedAt sql.NullTime
+	err := s.db.QueryRowEx(ctx, `SELECT email_verified_at FROM app.users WHERE id = $1::uuid`, nil, userID).Scan(&verifiedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
-	return isAdmin, nil
+	return verifiedAt.Valid, nil
 }
 
-// CreateAdminUser creates an admin directly (seed script / operator
-// tooling). It is the only way admin accounts come into existence —
-// public registration never grants admin.
+// WriteAudit records an admin-space action. Best-effort: audit failures
+// are returned so callers can log them, but must never grant access.
+func (s *Service) WriteAudit(ctx context.Context, actorID, actorEmail, action, targetType, targetID, ip string, before, after map[string]any) error {
+	var beforeJSON, afterJSON *string
+	if before != nil {
+		if raw, err := json.Marshal(before); err == nil {
+			str := string(raw)
+			beforeJSON = &str
+		}
+	}
+	if after != nil {
+		if raw, err := json.Marshal(after); err == nil {
+			str := string(raw)
+			afterJSON = &str
+		}
+	}
+	_, err := s.db.ExecEx(ctx, `INSERT INTO app.audit_log (actor_id, actor_email, action, target_type, target_id, before_data, after_data, ip) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8)`,
+		nil, actorID, actorEmail, action, targetType, targetID, beforeJSON, afterJSON, ip)
+	return err
+}
+
+// ---------- Admin identity (Option A: app.admin_users) ----------
+
+// AdminUser is a platform operator (separate table, separate hashes,
+// separate tokens from customers).
+type AdminUser struct {
+	ID, Email, PasswordHash string
+}
+
+var (
+	ErrAdminInvalidCredentials = errors.New("invalid email or password")
+	ErrAdminLocked             = errors.New("account temporarily locked after too many failed attempts")
+	ErrTOTPRequired            = errors.New("two-factor code required")
+	ErrTOTPInvalid             = errors.New("invalid two-factor code")
+)
+
+// AdminLogin authenticates an operator against app.admin_users and issues
+// an admin-audience token (short TTL). Failures are audit-logged; repeated
+// failures lock the account briefly. TOTP: when the row carries a
+// totp_secret and a TOTPVerify hook is wired, the code must verify;
+// when a secret exists but no hook is wired, login stops with
+// ErrTOTPRequired so 2FA cannot be silently skipped later.
+func (s *Service) AdminLogin(ctx context.Context, email, password, totpCode, ip string) (AdminUser, string, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	var u AdminUser
+	var totpSecret string
+	var failedAttempts int
+	var lockedUntil sql.NullTime
+	err := s.db.QueryRowEx(ctx, `SELECT id::text, email, password_hash, COALESCE(totp_secret, ''), COALESCE(failed_attempts, 0), locked_until FROM app.admin_users WHERE lower(email) = lower($1)`, nil, email).Scan(
+		&u.ID, &u.Email, &u.PasswordHash, &totpSecret, &failedAttempts, &lockedUntil)
+	if err != nil {
+		_ = s.WriteAudit(ctx, "", email, "admin.login_failed", "admin_user", "", ip, nil, map[string]any{"reason": "unknown_email"})
+		return AdminUser{}, "", ErrAdminInvalidCredentials
+	}
+	if lockedUntil.Valid && time.Now().Before(lockedUntil.Time) {
+		_ = s.WriteAudit(ctx, u.ID, u.Email, "admin.login_blocked_locked", "admin_user", u.ID, ip, nil, nil)
+		return AdminUser{}, "", ErrAdminLocked
+	}
+	if bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password)) != nil {
+		failedAttempts++
+		lockClause := ""
+		if failedAttempts >= 5 {
+			lockClause = ", locked_until = NOW() + INTERVAL '15 minutes', failed_attempts = 0"
+		} else {
+			lockClause = fmt.Sprintf(", failed_attempts = %d", failedAttempts)
+		}
+		_, _ = s.db.ExecEx(ctx, `UPDATE app.admin_users SET updated_at = NOW()`+lockClause+` WHERE id = $1::uuid`, nil, u.ID)
+		_ = s.WriteAudit(ctx, u.ID, u.Email, "admin.login_failed", "admin_user", u.ID, ip, nil, map[string]any{"reason": "bad_password"})
+		if failedAttempts >= 5 {
+			return AdminUser{}, "", ErrAdminLocked
+		}
+		return AdminUser{}, "", ErrAdminInvalidCredentials
+	}
+	if strings.TrimSpace(totpSecret) != "" {
+		if s.TOTPVerify == nil {
+			return AdminUser{}, "", ErrTOTPRequired
+		}
+		if !s.TOTPVerify(totpSecret, strings.TrimSpace(totpCode)) {
+			_ = s.WriteAudit(ctx, u.ID, u.Email, "admin.login_failed", "admin_user", u.ID, ip, nil, map[string]any{"reason": "bad_totp"})
+			return AdminUser{}, "", ErrTOTPInvalid
+		}
+	}
+	_, _ = s.db.ExecEx(ctx, `UPDATE app.admin_users SET failed_attempts = 0, locked_until = NULL, last_login_at = NOW(), updated_at = NOW() WHERE id = $1::uuid`, nil, u.ID)
+	_ = s.WriteAudit(ctx, u.ID, u.Email, "admin.login", "admin_user", u.ID, ip, nil, nil)
+	token, err := s.adminTokens().IssueToken(User{ID: u.ID, Email: u.Email, IsAdmin: true})
+	return u, token, err
+}
+
+// AdminInviteUser creates another operator. Callable only by an existing
+// admin (route-gated AND re-checked here from the DB). ctx must carry
+// admin claims (set by RequireAdminAuth).
+func (s *Service) AdminInviteUser(ctx context.Context, email, password string) (AdminUser, error) {
+	claims, ok := ClaimsFromContext(ctx)
+	if !ok {
+		return AdminUser{}, errors.New("missing authenticated admin")
+	}
+	if claims.Audience != "" && claims.Audience != AudienceAdmin {
+		return AdminUser{}, errors.New("wrong token audience")
+	}
+	isAdmin, err := s.IsAdminUser(ctx, claims.Subject)
+	if err != nil || !isAdmin {
+		return AdminUser{}, errors.New("insufficient privileges")
+	}
+	email = strings.ToLower(strings.TrimSpace(email))
+	if !strings.Contains(email, "@") || len(password) < 12 {
+		return AdminUser{}, errors.New("use a valid email and a password with at least 12 characters")
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return AdminUser{}, fmt.Errorf("hash password: %w", err)
+	}
+	var u AdminUser
+	u = AdminUser{ID: uuid.NewString(), Email: email, PasswordHash: string(hash)}
+	err = s.db.QueryRowEx(ctx, `INSERT INTO app.admin_users (id, email, password_hash) VALUES ($1::uuid, $2, $3) RETURNING id::text, email, password_hash`, nil, u.ID, u.Email, u.PasswordHash).Scan(&u.ID, &u.Email, &u.PasswordHash)
+	if err != nil {
+		if pgErr, ok := err.(pgx.PgError); ok && pgErr.Code == "23505" {
+			return AdminUser{}, errors.New("an admin already exists for this email")
+		}
+		return AdminUser{}, fmt.Errorf("create admin user: %w", err)
+	}
+	_ = s.WriteAudit(ctx, claims.Subject, claims.Email, "admin.invite", "admin_user", u.ID, "", nil, map[string]any{"email": u.Email})
+	return u, nil
+}
+
+// CreateAdminUser creates an operator directly in app.admin_users (seed
+// script / admin invite tooling). It is the only way admin accounts come
+// into existence — public registration writes app.users and can never
+// grant admin.
 func (s *Service) CreateAdminUser(ctx context.Context, email, password string) (User, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 	if !strings.Contains(email, "@") || len(password) < 12 {
@@ -235,7 +538,7 @@ func (s *Service) CreateAdminUser(ctx context.Context, email, password string) (
 	}
 	var u User
 	u = User{ID: uuid.NewString(), Email: email, PasswordHash: string(hash), IsAdmin: true}
-	err = s.db.QueryRowEx(ctx, `INSERT INTO app.users (id, email, password_hash, is_admin, email_verified_at) VALUES ($1::uuid, $2, $3, $4, NOW()) RETURNING id::text, email, password_hash, is_admin`, nil, u.ID, u.Email, u.PasswordHash, u.IsAdmin).Scan(&u.ID, &u.Email, &u.PasswordHash, &u.IsAdmin)
+	err = s.db.QueryRowEx(ctx, `INSERT INTO app.admin_users (id, email, password_hash) VALUES ($1::uuid, $2, $3) RETURNING id::text, email, password_hash`, nil, u.ID, u.Email, u.PasswordHash).Scan(&u.ID, &u.Email, &u.PasswordHash)
 	if err != nil {
 		if pgErr, ok := err.(pgx.PgError); ok && pgErr.Code == "23505" {
 			return User{}, errors.New("an account already exists for this email")
@@ -255,7 +558,8 @@ type UserProfile struct {
 	PhoneVerified bool   `json:"phone_verified"`
 }
 
-// GetUserProfile loads the caller's identity including verification flags.
+// GetUserProfile loads the CUSTOMER identity including verification
+// flags (customer space only; admins live in app.admin_users).
 func (s *Service) GetUserProfile(ctx context.Context, userID string) (UserProfile, error) {
 	var profile UserProfile
 	var emailVerifiedAt, phoneVerifiedAt sql.NullTime
@@ -269,6 +573,34 @@ func (s *Service) GetUserProfile(ctx context.Context, userID string) (UserProfil
 	profile.EmailVerified = emailVerifiedAt.Valid
 	profile.Phone = phone.String
 	profile.PhoneVerified = phoneVerifiedAt.Valid
+	return profile, nil
+}
+
+// AdminProfile is the operator identity view for /admin/auth/me.
+type AdminProfile struct {
+	ID        string `json:"id"`
+	Email     string `json:"email"`
+	IsAdmin   bool   `json:"is_admin"`
+	HasTOTP   bool   `json:"has_totp"`
+	LastLogin string `json:"last_login_at,omitempty"`
+}
+
+// GetAdminProfile loads the operator identity from app.admin_users.
+func (s *Service) GetAdminProfile(ctx context.Context, adminID string) (AdminProfile, error) {
+	var profile AdminProfile
+	var totpSecret sql.NullString
+	var lastLogin sql.NullTime
+	err := s.db.QueryRowEx(ctx, `SELECT id::text, email, COALESCE(totp_secret, ''), last_login_at FROM app.admin_users WHERE id = $1::uuid`, nil, adminID).Scan(
+		&profile.ID, &profile.Email, &totpSecret, &lastLogin,
+	)
+	if err != nil {
+		return AdminProfile{}, err
+	}
+	profile.IsAdmin = true
+	profile.HasTOTP = strings.TrimSpace(totpSecret.String) != ""
+	if lastLogin.Valid {
+		profile.LastLogin = lastLogin.Time.UTC().Format(time.RFC3339)
+	}
 	return profile, nil
 }
 
@@ -494,11 +826,138 @@ func (s *Service) VerifyOTP(ctx context.Context, userID, channel, purpose, code 
 }
 
 func (s *Service) HandleRegister(w http.ResponseWriter, r *http.Request) {
+	// Customer-space rate limit: per IP + per email.
+	ip := clientIP(r)
+	if !s.loginLimiter.Allow("register:ip:"+ip) {
+		httputil.Error(w, http.StatusTooManyRequests, "rate_limited", "Too many attempts — try again later.", nil)
+		return
+	}
 	s.handleCredentials(w, r, s.Register)
 }
 
 func (s *Service) HandleLogin(w http.ResponseWriter, r *http.Request) {
+	// Customer-space rate limit: per IP and per account.
+	ip := clientIP(r)
+	if !s.loginLimiter.Allow("login:ip:"+ip) {
+		httputil.Error(w, http.StatusTooManyRequests, "rate_limited", "Too many attempts — try again later.", nil)
+		return
+	}
+	var peek struct {
+		Email string `json:"email"`
+	}
+	peekBody, _ := io.ReadAll(io.LimitReader(r.Body, 16<<10))
+	_ = json.Unmarshal(peekBody, &peek)
+	r.Body = io.NopCloser(bytes.NewReader(peekBody))
+	if email := strings.ToLower(strings.TrimSpace(peek.Email)); email != "" {
+		if !s.loginLimiter.Allow("login:acct:"+email) {
+			httputil.Error(w, http.StatusTooManyRequests, "rate_limited", "Too many attempts for this account — try again later.", nil)
+			return
+		}
+	}
 	s.handleCredentials(w, r, s.Login)
+}
+
+// HandleAdminLogin authenticates operators (separate path, separate
+// audience, shorter TTL, stricter rate limit, audited). TOTP hook: when
+// wired, pass {"totp_code"} alongside email/password.
+func (s *Service) HandleAdminLogin(w http.ResponseWriter, r *http.Request) {
+	ip := clientIP(r)
+	if !s.adminLoginLimiter.Allow("admin:ip:"+ip) {
+		httputil.Error(w, http.StatusTooManyRequests, "rate_limited", "Too many attempts — try again later.", nil)
+		return
+	}
+	var in struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+		TOTPCode string `json:"totp_code"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		httputil.Error(w, http.StatusBadRequest, "invalid_request", "Email and password are required.", nil)
+		return
+	}
+	if email := strings.ToLower(strings.TrimSpace(in.Email)); email != "" {
+		if !s.adminLoginLimiter.Allow("admin:acct:"+email) {
+			httputil.Error(w, http.StatusTooManyRequests, "rate_limited", "Too many attempts for this account — try again later.", nil)
+			return
+		}
+	}
+	u, token, err := s.AdminLogin(r.Context(), in.Email, in.Password, in.TOTPCode, ip)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrAdminLocked):
+			httputil.Error(w, http.StatusTooManyRequests, "account_locked", "Account temporarily locked after too many failed attempts.", nil)
+		case errors.Is(err, ErrTOTPRequired):
+			httputil.Error(w, http.StatusUnauthorized, "totp_required", "A two-factor code is required.", nil)
+		case errors.Is(err, ErrTOTPInvalid):
+			httputil.Error(w, http.StatusUnauthorized, "invalid_credentials", "Invalid email, password, or two-factor code.", nil)
+		default:
+			httputil.Error(w, http.StatusUnauthorized, "invalid_credentials", "Invalid email or password.", nil)
+		}
+		return
+	}
+	httputil.JSON(w, http.StatusOK, map[string]any{"data": map[string]any{"access_token": token, "user": map[string]any{"id": u.ID, "email": u.Email, "is_admin": true}}})
+}
+
+// HandleAdminInvite creates another operator. Route-gated by
+// RequireAdminAuth AND re-checked in AdminInviteUser from the DB.
+func (s *Service) HandleAdminInvite(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		httputil.Error(w, http.StatusBadRequest, "invalid_request", "Email and password are required.", nil)
+		return
+	}
+	u, err := s.AdminInviteUser(r.Context(), in.Email, in.Password)
+	if err != nil {
+		switch err.Error() {
+		case "an admin already exists for this email":
+			httputil.Error(w, http.StatusConflict, "already_exists", err.Error(), nil)
+		case "use a valid email and a password with at least 12 characters":
+			httputil.Error(w, http.StatusUnprocessableEntity, "validation_failed", err.Error(), nil)
+		default:
+			httputil.Error(w, http.StatusForbidden, "forbidden", "Insufficient privileges.", nil)
+		}
+		return
+	}
+	httputil.JSON(w, http.StatusCreated, map[string]any{"data": map[string]any{"id": u.ID, "email": u.Email}})
+}
+
+// HandleCustomerMe is the customer-space identity endpoint.
+func (s *Service) HandleCustomerMe(w http.ResponseWriter, r *http.Request) {
+	claims, ok := ClaimsFromContext(r.Context())
+	if !ok {
+		httputil.Error(w, http.StatusUnauthorized, "unauthorized", "Missing authenticated user.", nil)
+		return
+	}
+	profile, err := s.GetUserProfile(r.Context(), claims.Subject)
+	if err != nil {
+		httputil.Error(w, http.StatusUnauthorized, "unauthorized", "Account not found.", nil)
+		return
+	}
+	httputil.JSON(w, http.StatusOK, map[string]any{"data": map[string]any{
+		"email": profile.Email, "is_admin": false, "user": profile,
+		"email_verified": profile.EmailVerified, "phone": profile.Phone,
+		"phone_verified": profile.PhoneVerified,
+	}})
+}
+
+// HandleAdminMe is the admin-space identity endpoint.
+func (s *Service) HandleAdminMe(w http.ResponseWriter, r *http.Request) {
+	claims, ok := ClaimsFromContext(r.Context())
+	if !ok {
+		httputil.Error(w, http.StatusUnauthorized, "unauthorized", "Missing authenticated user.", nil)
+		return
+	}
+	profile, err := s.GetAdminProfile(r.Context(), claims.Subject)
+	if err != nil {
+		httputil.Error(w, http.StatusUnauthorized, "unauthorized", "Admin account not found.", nil)
+		return
+	}
+	httputil.JSON(w, http.StatusOK, map[string]any{"data": profile})
 }
 
 // LogMailer is the development-only Mailer: it logs metadata, never the

@@ -1,12 +1,18 @@
-// Command seed-admin creates (or promotes) an administrator account.
+// Command seed-admin creates an administrator account in app.admin_users.
 //
-// Self-registration never grants admin — this script is the only automated
-// way to mint one. Run it against the same DATABASE_URL as the API:
+// Option A identity: operators live ONLY in app.admin_users with their own
+// password hashes and admin-audience tokens. Self-registration writes
+// app.users (customers) and can never grant admin — this script (or an
+// existing admin inviting another admin via POST /api/v1/admin/auth/invite)
+// is the only way operators come into existence.
+//
+// Run it against the same DATABASE_URL as the API:
 //
 //	go run ./cmd/seed-admin -email admin@example.com -password '...'
 //
 // Password is optional; when omitted a random one is printed once.
-// Existing non-admin accounts are promoted; existing admins are left alone.
+// Existing operators are left alone. A customer row with the same email
+// (if any) is left untouched — the two spaces are separate identities.
 package main
 
 import (
@@ -23,6 +29,7 @@ import (
 	"lipago/internal/platform/database"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -53,6 +60,10 @@ func main() {
 	}
 	defer db.Close()
 
+	// The seed must work before migration 000044 is applied too, so make
+	// sure the operator table exists (idempotent on migrated databases).
+	ensureAdminUsersTable(ctx, db)
+
 	emailNorm := strings.ToLower(strings.TrimSpace(*email))
 	if !strings.Contains(emailNorm, "@") {
 		log.Fatal("-email must be a valid address")
@@ -71,47 +82,59 @@ func main() {
 		log.Fatal("password must be at least 12 characters")
 	}
 
-	// Promote an existing account if present.
-	var existingID, existingIsAdmin string
-	err = db.QueryRowEx(ctx, `SELECT id::text, is_admin::text FROM app.users WHERE lower(email) = lower($1)`, nil, emailNorm).Scan(&existingID, &existingIsAdmin)
-	switch {
-	case err == nil:
-		if existingIsAdmin == "t" || existingIsAdmin == "true" {
-			fmt.Printf("user %s is already an admin\n", emailNorm)
-			return
-		}
-		if _, err := db.ExecEx(ctx, `UPDATE app.users SET is_admin = true, email_verified_at = COALESCE(email_verified_at, NOW()) WHERE id = $1::uuid`, nil, existingID); err != nil {
-			log.Fatalf("promote user: %v", err)
-		}
-		fmt.Printf("promoted %s to admin\n", emailNorm)
-		if generated {
-			fmt.Printf("generated password (shown once): %s\n", pw)
-		}
+	var existingID string
+	err = db.QueryRowEx(ctx, `SELECT id::text FROM app.admin_users WHERE lower(email) = lower($1)`, nil, emailNorm).Scan(&existingID)
+	if err == nil {
+		fmt.Printf("user %s is already an admin\n", emailNorm)
 		return
-	case strings.Contains(err.Error(), "no rows"):
-		// fall through to create
-	default:
-		// pgx returns pgx.ErrNoRows; string check above is best-effort
-		if !strings.Contains(fmt.Sprint(err), "no rows") {
-			log.Fatalf("lookup user: %v", err)
-		}
+	}
+	if err != nil && !strings.Contains(fmt.Sprint(err), "no rows") {
+		log.Fatalf("lookup admin: %v", err)
 	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(pw), bcrypt.DefaultCost)
 	if err != nil {
 		log.Fatalf("hash password: %v", err)
 	}
-	// Reuse auth.Service's insert shape without pulling its first-user
-	// registration gate (seed must work with users already present).
 	if _, err := db.ExecEx(ctx, `
-		INSERT INTO app.users (id, email, password_hash, is_admin, email_verified_at)
-		VALUES ($1::uuid, $2, $3, true, NOW())
+		INSERT INTO app.admin_users (id, email, password_hash)
+		VALUES ($1::uuid, $2, $3)
 	`, nil, uuid.NewString(), emailNorm, string(hash)); err != nil {
 		log.Fatalf("create admin user: %v", err)
 	}
 	fmt.Printf("created admin %s\n", emailNorm)
 	if generated {
 		fmt.Printf("generated password (shown once): %s\n", pw)
+	}
+}
+
+// ensureAdminUsersTable creates the operator table when the seed runs
+// against a database that predates migration 000044.
+func ensureAdminUsersTable(ctx context.Context, db *pgx.ConnPool) {
+	const ddl = `
+		CREATE TABLE IF NOT EXISTS app.admin_users (
+		  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		  email TEXT NOT NULL,
+		  password_hash TEXT NOT NULL,
+		  totp_secret TEXT NOT NULL DEFAULT '',
+		  failed_attempts INTEGER NOT NULL DEFAULT 0,
+		  locked_until TIMESTAMPTZ,
+		  last_login_at TIMESTAMPTZ,
+		  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+		CREATE UNIQUE INDEX IF NOT EXISTS admin_users_email_lower_idx
+		  ON app.admin_users (lower(email));
+		ALTER TABLE app.admin_users ADD COLUMN IF NOT EXISTS totp_secret TEXT NOT NULL DEFAULT '';
+		ALTER TABLE app.admin_users ADD COLUMN IF NOT EXISTS failed_attempts INTEGER NOT NULL DEFAULT 0;
+		ALTER TABLE app.admin_users ADD COLUMN IF NOT EXISTS locked_until TIMESTAMPTZ;
+		ALTER TABLE app.admin_users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ;
+	`
+	// Best-effort: migration 000044 is the source of truth; this only
+	// helps fresh pre-migration databases. Log and continue on failure —
+	// the INSERT below will surface real problems.
+	if _, err := db.ExecEx(ctx, ddl, nil); err != nil {
+		log.Printf("ensure admin_users table: %v", err)
 	}
 }
 
