@@ -3,7 +3,8 @@ import { LogOut, Wallet } from "lucide-react";
 import { signOut } from "@/lib/auth";
 import SandboxModeBanner from "@/components/SandboxModeBanner";
 
-const NAV_ITEMS = [
+const NAV_ITEMS: { to: string; label: string; end?: boolean }[] = [
+  { to: "/", label: "Home", end: true },
   { to: "/merchant/apps", label: "My Apps" },
   { to: "/merchant/payments", label: "Payments" },
   { to: "/merchant/withdrawals", label: "Withdrawals" },
@@ -33,6 +34,7 @@ const CustomerLayout = () => {
               <NavLink
                 key={item.to}
                 to={item.to}
+                end={item.end}
                 className={({ isActive }) =>
                   `rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
                     isActive ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-100"

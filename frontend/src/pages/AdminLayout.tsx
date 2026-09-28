@@ -5,6 +5,7 @@ import { signOut } from "@/lib/auth";
 import { getAdminMe } from "@/lib/adminApi";
 
 const NAV_ITEMS = [
+  { to: "/", label: "Home", end: true },
   { to: "/admin/payments", label: "Overview", end: true },
   { to: "/admin/payments/apps", label: "Apps" },
   { to: "/admin/payments/withdrawals", label: "Withdrawals" },
