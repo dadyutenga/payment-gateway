@@ -1,8 +1,7 @@
-import { FormEvent, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, Wallet, Check, X, Send, Ban, RefreshCw } from "lucide-react";
+import { Wallet, Send, Ban, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -12,17 +11,13 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from "@/components/ui/dialog";
 import { toast } from "@/components/ui/sonner";
 import {
-  approveWithdrawal,
-  createWithdrawal,
   listPaymentApps,
   listWithdrawals,
   markWithdrawalFailed,
   markWithdrawalPaid,
-  rejectWithdrawal,
   retryWithdrawalPayout,
   AdminApiError,
   type PaymentWithdrawal,
@@ -59,24 +54,6 @@ function formatMoney(value: string, currency: string) {
   return `${Number.isFinite(n) ? n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : value} ${currency}`;
 }
 
-type DestinationForm = {
-  destinationType: "bank" | "mobile_money";
-  bankName: string;
-  accountName: string;
-  accountNumber: string;
-  provider: string;
-  phone: string;
-};
-
-const emptyDestination: DestinationForm = {
-  destinationType: "bank",
-  bankName: "",
-  accountName: "",
-  accountNumber: "",
-  provider: "",
-  phone: "",
-};
-
 function destinationSummary(withdrawal: PaymentWithdrawal) {
   const d = withdrawal.destination_details || {};
   if (withdrawal.destination_type === "mobile_money") {
@@ -89,12 +66,6 @@ const AdminPaymentWithdrawals = () => {
   const queryClient = useQueryClient();
   const [statusFilter, setStatusFilter] = useState("");
 
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [selectedAppId, setSelectedAppId] = useState("");
-  const [amount, setAmount] = useState("");
-  const [notes, setNotes] = useState("");
-  const [destination, setDestination] = useState<DestinationForm>(emptyDestination);
-  const [creating, setCreating] = useState(false);
   const [actingId, setActingId] = useState<string | null>(null);
 
   // Dispatch-payout confirm modal. Automated payouts stay off until the
@@ -130,41 +101,6 @@ const AdminPaymentWithdrawals = () => {
   const reload = () => {
     queryClient.invalidateQueries({ queryKey: QUERY_KEY });
     queryClient.invalidateQueries({ queryKey: ["admin", "payment-app-balance"] });
-  };
-
-  const resetForm = () => {
-    setSelectedAppId("");
-    setAmount("");
-    setNotes("");
-    setDestination(emptyDestination);
-  };
-
-  const handleCreate = async (event: FormEvent) => {
-    event.preventDefault();
-    setCreating(true);
-    try {
-      const destinationDetails =
-        destination.destinationType === "mobile_money"
-          ? { provider: destination.provider, phone: destination.phone }
-          : { bank_name: destination.bankName, account_name: destination.accountName, account_number: destination.accountNumber };
-
-      await createWithdrawal({
-        app_id: selectedAppId,
-        amount,
-        currency: "TZS",
-        destination_type: destination.destinationType,
-        destination_details: destinationDetails,
-        notes,
-      });
-      toast.success("Withdrawal requested.");
-      setDialogOpen(false);
-      resetForm();
-      reload();
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Unable to create withdrawal.");
-    } finally {
-      setCreating(false);
-    }
   };
 
   const runAction = async (id: string, action: () => Promise<unknown>, successMessage: string) => {
@@ -233,68 +169,8 @@ const AdminPaymentWithdrawals = () => {
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h2 className="text-2xl font-bold text-slate-900">Withdrawals</h2>
-          <p className="mt-1 text-sm text-slate-500">Payouts recorded on behalf of each app. Every approval debits that app's ledger balance.</p>
+          <p className="mt-1 text-sm text-slate-500">Oversight across every app — request/approve/reject happens merchant-side. Operators record payouts here (dispatch, mark paid/failed).</p>
         </div>
-        <Dialog open={dialogOpen} onOpenChange={(open) => { setDialogOpen(open); if (!open) resetForm(); }}>
-          <DialogTrigger asChild>
-            <Button><Plus className="h-4 w-4 mr-1" /> New withdrawal</Button>
-          </DialogTrigger>
-          <DialogContent className="max-h-[85vh] overflow-y-auto">
-            <DialogHeader>
-              <DialogTitle>Request withdrawal</DialogTitle>
-            </DialogHeader>
-            <form onSubmit={handleCreate} className="space-y-4">
-              <div>
-                <label className="text-sm font-medium text-slate-700">App</label>
-                <select
-                  className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
-                  value={selectedAppId}
-                  onChange={(e) => setSelectedAppId(e.target.value)}
-                  required
-                >
-                  <option value="">Select an app</option>
-                  {apps.map((app) => (
-                    <option key={app.id} value={app.id}>{app.name}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="text-sm font-medium text-slate-700">Amount (TZS)</label>
-                <Input value={amount} onChange={(e) => setAmount(e.target.value)} required inputMode="decimal" placeholder="50000" className="mt-1" />
-              </div>
-              <div>
-                <label className="text-sm font-medium text-slate-700">Destination</label>
-                <select
-                  className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
-                  value={destination.destinationType}
-                  onChange={(e) => setDestination((d) => ({ ...d, destinationType: e.target.value as "bank" | "mobile_money" }))}
-                >
-                  <option value="bank">Bank transfer</option>
-                  <option value="mobile_money">Mobile money</option>
-                </select>
-              </div>
-              {destination.destinationType === "bank" ? (
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  <Input placeholder="Bank name" value={destination.bankName} onChange={(e) => setDestination((d) => ({ ...d, bankName: e.target.value }))} required />
-                  <Input placeholder="Account name" value={destination.accountName} onChange={(e) => setDestination((d) => ({ ...d, accountName: e.target.value }))} required />
-                  <Input placeholder="Account number" value={destination.accountNumber} onChange={(e) => setDestination((d) => ({ ...d, accountNumber: e.target.value }))} required className="sm:col-span-2" />
-                </div>
-              ) : (
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  <Input placeholder="Provider (e.g. M-Pesa)" value={destination.provider} onChange={(e) => setDestination((d) => ({ ...d, provider: e.target.value }))} required />
-                  <Input placeholder="Phone number" value={destination.phone} onChange={(e) => setDestination((d) => ({ ...d, phone: e.target.value }))} required />
-                </div>
-              )}
-              <div>
-                <label className="text-sm font-medium text-slate-700">Notes</label>
-                <Input value={notes} onChange={(e) => setNotes(e.target.value)} className="mt-1" placeholder="Optional" />
-              </div>
-              <DialogFooter>
-                <Button type="submit" disabled={creating}>{creating ? "Requesting..." : "Request withdrawal"}</Button>
-              </DialogFooter>
-            </form>
-          </DialogContent>
-        </Dialog>
       </div>
 
       <div className="mt-6 flex gap-1.5 overflow-x-auto pb-1">
@@ -367,25 +243,6 @@ const AdminPaymentWithdrawals = () => {
                     )}
                   </div>
                   <div className="flex shrink-0 flex-wrap items-center gap-1.5 self-end sm:self-start">
-                    {withdrawal.status === "requested" && (
-                      <>
-                        <Button
-                          size="sm"
-                          disabled={busy}
-                          onClick={() => runAction(withdrawal.id, () => approveWithdrawal(withdrawal.id), "Withdrawal approved — balance debited.")}
-                        >
-                          <Check className="h-3.5 w-3.5 mr-1" /> Approve
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          disabled={busy}
-                          onClick={() => runAction(withdrawal.id, () => rejectWithdrawal(withdrawal.id), "Withdrawal rejected.")}
-                        >
-                          <X className="h-3.5 w-3.5 mr-1" /> Reject
-                        </Button>
-                      </>
-                    )}
                     {(withdrawal.status === "approved" || withdrawal.status === "processing") && (
                       <>
                         {withdrawal.status === "approved" && (
