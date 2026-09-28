@@ -14,6 +14,7 @@ import AdminPaymentProviders from "@/pages/AdminPaymentProviders";
 import AdminKYCReview from "@/pages/AdminKYCReview";
 import MerchantApps from "@/pages/MerchantApps";
 import MerchantAppDetail from "@/pages/MerchantAppDetail";
+import MerchantDashboard from "@/pages/MerchantDashboard";
 import MerchantPayments from "@/pages/MerchantPayments";
 import MerchantWithdrawals from "@/pages/MerchantWithdrawals";
 import MerchantWebhooks from "@/pages/MerchantWebhooks";
@@ -66,6 +67,7 @@ const App = () => (
               </MerchantRoute>
             }
           >
+            <Route index element={<MerchantDashboard />} />
             <Route path="apps" element={<MerchantApps />} />
             <Route path="apps/:id" element={<MerchantAppDetail />} />
             <Route path="payments" element={<MerchantPayments />} />

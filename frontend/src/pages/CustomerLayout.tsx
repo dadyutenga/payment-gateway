@@ -4,7 +4,7 @@ import { signOut } from "@/lib/auth";
 import SandboxModeBanner from "@/components/SandboxModeBanner";
 
 const NAV_ITEMS: { to: string; label: string; end?: boolean }[] = [
-  { to: "/", label: "Home", end: true },
+  { to: "/merchant", label: "Home", end: true },
   { to: "/merchant/apps", label: "My Apps" },
   { to: "/merchant/payments", label: "Payments" },
   { to: "/merchant/withdrawals", label: "Withdrawals" },
