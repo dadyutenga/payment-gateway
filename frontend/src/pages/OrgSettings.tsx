@@ -16,6 +16,7 @@ import {
   getNotificationPrefs,
   getOrg,
   listKYCAttempts,
+  listOrgMembers,
   resolveLogoSrc,
   updateNotificationPrefs,
   updateOrg,
@@ -23,7 +24,7 @@ import {
   type NotificationPrefs,
   type Organization,
 } from "@/lib/orgApi";
-import { changePassword, getKYC } from "@/lib/signupApi";
+import { changePassword, getKYC, getOwnProfile, updateOwnProfile } from "@/lib/signupApi";
 import { listMerchantWithdrawals, listMyApps } from "@/lib/merchantApi";
 
 function errorMessage(err: unknown, fallback: string) {
@@ -78,6 +79,15 @@ const GeneralTab = ({ org, isOwner }: { org: Organization; isOwner: boolean }) =
   const set = (key: keyof ProfileForm) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setForm((f) => ({ ...f, [key]: e.target.value }));
 
+  // Organization owner section: first active owner, with contact from
+  // their profile (members list carries full_name/phone when filled in).
+  const membersQuery = useQuery({
+    queryKey: ["orgs", org.id, "members"],
+    queryFn: () => listOrgMembers(org.id),
+    staleTime: 30_000,
+  });
+  const owner = (membersQuery.data ?? []).find((m) => m.role === "owner" && m.status === "active");
+
   const handleSave = async (event: FormEvent) => {
     event.preventDefault();
     setSaving(true);
@@ -130,6 +140,24 @@ const GeneralTab = ({ org, isOwner }: { org: Organization; isOwner: boolean }) =
     <Card className="mt-4">
       <CardContent className="p-4 sm:p-6">
         <form onSubmit={handleSave} className="space-y-4">
+          <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5">
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Organization owner</p>
+            {membersQuery.isLoading ? (
+              <p className="mt-1 text-sm text-slate-500">Loading owner…</p>
+            ) : owner ? (
+              <div className="mt-1 text-sm">
+                <p className="font-semibold text-slate-900">{owner.full_name || owner.email}</p>
+                <p className="text-slate-500">{owner.email}{owner.phone ? ` · ${owner.phone}` : ""}</p>
+                {(!owner.full_name || !owner.phone) && (
+                  <p className="mt-1 text-xs text-amber-700">
+                    Owner profile incomplete — {isOwner ? "complete it under Security → My profile." : "ask the owner to complete it under Security → My profile."}
+                  </p>
+                )}
+              </div>
+            ) : (
+              <p className="mt-1 text-sm text-slate-500">No active owner found.</p>
+            )}
+          </div>
           <div>
             <label className="text-sm font-medium text-slate-700">Org ID</label>
             <div className="mt-1 flex items-center gap-2">
@@ -324,13 +352,42 @@ const LimitsTab = ({ org }: { org: Organization }) => {
   );
 };
 
-// ---------- Security tab (the signed-in user's own password) ----------
+// ---------- Security tab (own profile + own password) ----------
 
 const SecurityTab = () => {
+  const queryClient = useQueryClient();
+  const profileQuery = useQuery({ queryKey: ["auth", "profile"], queryFn: () => getOwnProfile(), staleTime: 30_000 });
+  const profile = profileQuery.data;
+  const [fullName, setFullName] = useState<string | null>(null);
+  const [phone, setPhone] = useState<string | null>(null);
+  const [savingProfile, setSavingProfile] = useState(false);
+  const profileDirty =
+    profile !== undefined &&
+    ((fullName ?? profile.full_name ?? "") !== (profile.full_name ?? "") ||
+      (phone ?? profile.phone ?? "") !== (profile.phone ?? ""));
+
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [saving, setSaving] = useState(false);
+
+  const handleSaveProfile = async (event: FormEvent) => {
+    event.preventDefault();
+    setSavingProfile(true);
+    try {
+      await updateOwnProfile({
+        full_name: (fullName ?? profile?.full_name ?? "").trim(),
+        phone: (phone ?? profile?.phone ?? "").trim(),
+      });
+      toast.success("Profile saved.");
+      queryClient.invalidateQueries({ queryKey: ["auth", "profile"] });
+      queryClient.invalidateQueries({ queryKey: ["orgs"] });
+    } catch (err) {
+      toast.error(errorMessage(err, "Unable to save profile."));
+    } finally {
+      setSavingProfile(false);
+    }
+  };
 
   const handleChange = async (event: FormEvent) => {
     event.preventDefault();
@@ -353,7 +410,32 @@ const SecurityTab = () => {
   };
 
   return (
-    <Card className="mt-4">
+    <div className="mt-4 space-y-4">
+    <Card>
+      <CardContent className="p-4 sm:p-6">
+        <h3 className="text-sm font-bold text-slate-800">My profile</h3>
+        <p className="mt-1 text-xs text-slate-500">Your display name and phone — shown as the organization owner&apos;s contact.</p>
+        {profileQuery.isLoading ? (
+          <p className="mt-3 text-sm text-slate-500">Loading profile…</p>
+        ) : profile ? (
+          <form onSubmit={handleSaveProfile} className="mt-4 space-y-4">
+            <div>
+              <label className="text-sm font-medium text-slate-700">Full name</label>
+              <Input value={fullName ?? profile.full_name ?? ""} onChange={(e) => setFullName(e.target.value)} maxLength={100} placeholder="Amina Juma" className="mt-1" />
+            </div>
+            <div>
+              <label className="text-sm font-medium text-slate-700">Phone</label>
+              <Input value={phone ?? profile.phone ?? ""} onChange={(e) => setPhone(e.target.value)} inputMode="tel" placeholder="+255712345678" className="mt-1" />
+              <p className="mt-1 text-xs text-slate-400">Tanzanian mobile — also used for SMS verification codes.</p>
+            </div>
+            <Button type="submit" disabled={!profileDirty || savingProfile}>{savingProfile ? "Saving..." : "Save profile"}</Button>
+          </form>
+        ) : (
+          <p className="mt-3 text-sm text-red-600">Unable to load profile.</p>
+        )}
+      </CardContent>
+    </Card>
+    <Card>
       <CardContent className="p-4 sm:p-6">
         <h3 className="text-sm font-bold text-slate-800">Change your password</h3>
         <p className="mt-1 text-xs text-slate-500">Applies to your own sign-in — every member manages their own password here.</p>
@@ -375,6 +457,7 @@ const SecurityTab = () => {
         </form>
       </CardContent>
     </Card>
+    </div>
   );
 };
 

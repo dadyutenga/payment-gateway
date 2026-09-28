@@ -189,7 +189,8 @@ type NotificationPrefs struct {
 }
 
 // KYCQueueItem is one row of the admin review queue: the org plus its
-// current submission evidence.
+// current submission evidence plus the owner's contact (first active
+// owner) so reviewers can reach the business.
 type KYCQueueItem struct {
 	OrgID           string    `json:"org_id"`
 	OrgName         string    `json:"org_name"`
@@ -200,4 +201,7 @@ type KYCQueueItem struct {
 	HasDocument     bool      `json:"has_document"`
 	SubmittedAt     time.Time `json:"submitted_at"`
 	RejectionReason string    `json:"rejection_reason,omitempty"`
+	OwnerEmail      string    `json:"owner_email,omitempty"`
+	OwnerName       string    `json:"owner_name,omitempty"`
+	OwnerPhone      string    `json:"owner_phone,omitempty"`
 }

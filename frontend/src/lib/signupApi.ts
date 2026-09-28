@@ -24,6 +24,7 @@ export type UserProfile = {
   id: string;
   email: string;
   is_admin: boolean;
+  full_name?: string;
   email_verified: boolean;
   phone?: string;
   phone_verified: boolean;
@@ -111,4 +112,12 @@ export async function uploadKYCDocument(orgId: string, file: File) {
 
 export async function changePassword(input: { current_password: string; new_password: string }) {
   return request<{ changed: boolean }>("/api/v1/auth/password", { method: "POST", body: input });
+}
+
+export async function getOwnProfile() {
+  return request<UserProfile>("/api/v1/auth/profile");
+}
+
+export async function updateOwnProfile(input: { full_name: string; phone: string }) {
+  return request<UserProfile>("/api/v1/auth/profile", { method: "PATCH", body: input });
 }

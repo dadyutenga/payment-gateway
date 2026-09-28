@@ -658,7 +658,16 @@ func (r *PostgresRepository) ListKYCQueue(ctx context.Context, status string) ([
 		SELECT o.id::text, o.name, o.slug, o.kyc_status,
 		       COALESCE(s.business_name, ''), COALESCE(s.tin, ''),
 		       COALESCE(s.id_document_url, '') <> '',
-		       s.submitted_at, COALESCE(s.rejection_reason, '')
+		       s.submitted_at, COALESCE(s.rejection_reason, ''),
+		       COALESCE((SELECT u.email FROM app.org_members m JOIN app.users u ON u.id = m.user_id
+		                 WHERE m.org_id = o.id AND m.role = 'owner' AND m.status = 'active'
+		                 ORDER BY m.created_at ASC LIMIT 1), ''),
+		       COALESCE((SELECT u.full_name FROM app.org_members m JOIN app.users u ON u.id = m.user_id
+		                 WHERE m.org_id = o.id AND m.role = 'owner' AND m.status = 'active'
+		                 ORDER BY m.created_at ASC LIMIT 1), ''),
+		       COALESCE((SELECT u.phone FROM app.org_members m JOIN app.users u ON u.id = m.user_id
+		                 WHERE m.org_id = o.id AND m.role = 'owner' AND m.status = 'active'
+		                 ORDER BY m.created_at ASC LIMIT 1), '')
 		FROM app.organizations o
 		JOIN app.kyc_submissions s ON s.org_id = o.id
 		%s
@@ -676,6 +685,7 @@ func (r *PostgresRepository) ListKYCQueue(ctx context.Context, status string) ([
 			&item.OrgID, &item.OrgName, &item.Slug, &item.KYCStatus,
 			&item.BusinessName, &item.TIN, &item.HasDocument,
 			&item.SubmittedAt, &item.RejectionReason,
+			&item.OwnerEmail, &item.OwnerName, &item.OwnerPhone,
 		); err != nil {
 			return nil, fmt.Errorf("scan kyc queue item: %w", err)
 		}

@@ -158,6 +158,7 @@ const AdminKYCReview = () => {
                 <TableRow>
                   <TableHead>Organization</TableHead>
                   <TableHead>Business / TIN</TableHead>
+                  <TableHead>Owner</TableHead>
                   <TableHead>Submitted</TableHead>
                   <TableHead>Doc</TableHead>
                   <TableHead className="text-right">Actions</TableHead>
@@ -176,6 +177,11 @@ const AdminKYCReview = () => {
                     <TableCell className="text-xs text-slate-600">
                       {item.business_name || "—"}<br />
                       <span className="text-slate-400">TIN {item.tin || "—"}</span>
+                    </TableCell>
+                    <TableCell className="text-xs text-slate-600">
+                      {item.owner_name || item.owner_email || "—"}
+                      {item.owner_email && item.owner_name && <><br /><span className="text-slate-400">{item.owner_email}</span></>}
+                      {item.owner_phone && <><br /><span className="text-slate-400">{item.owner_phone}</span></>}
                     </TableCell>
                     <TableCell className="text-xs text-slate-500">{formatDate(item.submitted_at)}</TableCell>
                     <TableCell>

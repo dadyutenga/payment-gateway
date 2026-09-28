@@ -553,6 +553,7 @@ type UserProfile struct {
 	ID            string `json:"id"`
 	Email         string `json:"email"`
 	IsAdmin       bool   `json:"is_admin"`
+	FullName      string `json:"full_name,omitempty"`
 	EmailVerified bool   `json:"email_verified"`
 	Phone         string `json:"phone,omitempty"`
 	PhoneVerified bool   `json:"phone_verified"`
@@ -563,17 +564,43 @@ type UserProfile struct {
 func (s *Service) GetUserProfile(ctx context.Context, userID string) (UserProfile, error) {
 	var profile UserProfile
 	var emailVerifiedAt, phoneVerifiedAt sql.NullTime
-	var phone sql.NullString
-	err := s.db.QueryRowEx(ctx, `SELECT id::text, email, is_admin, email_verified_at, COALESCE(phone, ''), phone_verified_at FROM app.users WHERE id = $1::uuid`, nil, userID).Scan(
-		&profile.ID, &profile.Email, &profile.IsAdmin, &emailVerifiedAt, &phone, &phoneVerifiedAt,
+	var fullName, phone sql.NullString
+	err := s.db.QueryRowEx(ctx, `SELECT id::text, email, is_admin, COALESCE(full_name, ''), email_verified_at, COALESCE(phone, ''), phone_verified_at FROM app.users WHERE id = $1::uuid`, nil, userID).Scan(
+		&profile.ID, &profile.Email, &profile.IsAdmin, &fullName, &emailVerifiedAt, &phone, &phoneVerifiedAt,
 	)
 	if err != nil {
 		return UserProfile{}, err
 	}
+	profile.FullName = fullName.String
 	profile.EmailVerified = emailVerifiedAt.Valid
 	profile.Phone = phone.String
 	profile.PhoneVerified = phoneVerifiedAt.Valid
 	return profile, nil
+}
+
+// UpdateOwnProfile saves the caller's display name and phone. Phone must
+// be empty or a Tanzanian mobile (same rule as SMS OTP) so the stored
+// contact data stays callable.
+func (s *Service) UpdateOwnProfile(ctx context.Context, userID, fullName, phone string) (UserProfile, error) {
+	fullName = strings.TrimSpace(fullName)
+	phone = strings.TrimSpace(phone)
+	if len(fullName) > 100 {
+		return UserProfile{}, errors.New("name must be 100 characters or fewer")
+	}
+	if len(phone) > 30 {
+		return UserProfile{}, errors.New("phone must be 30 characters or fewer")
+	}
+	if phone != "" && !ValidTanzanianPhone(phone) {
+		return UserProfile{}, ErrPhoneInvalid
+	}
+	tag, err := s.db.ExecEx(ctx, `UPDATE app.users SET full_name = NULLIF($2, ''), phone = NULLIF($3, ''), updated_at = NOW() WHERE id = $1::uuid`, nil, userID, fullName, phone)
+	if err != nil {
+		return UserProfile{}, fmt.Errorf("save profile: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return UserProfile{}, errors.New("account not found")
+	}
+	return s.GetUserProfile(ctx, userID)
 }
 
 // AdminProfile is the operator identity view for /admin/auth/me.
@@ -924,6 +951,58 @@ func (s *Service) HandleAdminInvite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httputil.JSON(w, http.StatusCreated, map[string]any{"data": map[string]any{"id": u.ID, "email": u.Email}})
+}
+
+type ownProfileHTTPInput struct {
+	FullName string `json:"full_name"`
+	Phone    string `json:"phone"`
+}
+
+// HandleGetOwnProfile serves GET /api/v1/auth/profile (own contact data).
+func (s *Service) HandleGetOwnProfile(w http.ResponseWriter, r *http.Request) {
+	claims, ok := ClaimsFromContext(r.Context())
+	if !ok {
+		httputil.Error(w, http.StatusUnauthorized, "unauthorized", "Missing authenticated user.", nil)
+		return
+	}
+	profile, err := s.GetUserProfile(r.Context(), claims.Subject)
+	if err != nil {
+		httputil.Error(w, http.StatusUnauthorized, "unauthorized", "Account not found.", nil)
+		return
+	}
+	httputil.JSON(w, http.StatusOK, map[string]any{"data": profile})
+}
+
+// HandleUpdateOwnProfile serves PATCH /api/v1/auth/profile (own display
+// name + phone — this is how the users table gets completed).
+func (s *Service) HandleUpdateOwnProfile(w http.ResponseWriter, r *http.Request) {
+	claims, ok := ClaimsFromContext(r.Context())
+	if !ok {
+		httputil.Error(w, http.StatusUnauthorized, "unauthorized", "Missing authenticated user.", nil)
+		return
+	}
+	var in ownProfileHTTPInput
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		httputil.Error(w, http.StatusBadRequest, "invalid_request", "Name and phone are required.", nil)
+		return
+	}
+	profile, err := s.UpdateOwnProfile(r.Context(), claims.Subject, in.FullName, in.Phone)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrPhoneInvalid):
+			httputil.Error(w, http.StatusUnprocessableEntity, "invalid_phone", "Phone must be a Tanzanian mobile number like +255712345678.", nil)
+		case err.Error() == "name must be 100 characters or fewer" ||
+			err.Error() == "phone must be 30 characters or fewer":
+			httputil.Error(w, http.StatusUnprocessableEntity, "validation_failed", err.Error(), nil)
+		case err.Error() == "account not found":
+			httputil.Error(w, http.StatusUnauthorized, "unauthorized", "Account not found.", nil)
+		default:
+			httputil.Error(w, http.StatusInternalServerError, "internal_error", "Unable to save profile.", nil)
+		}
+		return
+	}
+	httputil.JSON(w, http.StatusOK, map[string]any{"data": profile})
 }
 
 // HandleCustomerMe is the customer-space identity endpoint.

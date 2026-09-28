@@ -127,6 +127,8 @@ func New(ctx context.Context) (*App, error) {
 	mux.Handle("POST /api/v1/auth/otp/request", middleware.Chain(http.HandlerFunc(authService.HandleOTPRequest), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, false)))
 	mux.Handle("POST /api/v1/auth/otp/verify", middleware.Chain(http.HandlerFunc(authService.HandleOTPVerify), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, false)))
 	mux.Handle("POST /api/v1/auth/password", middleware.Chain(http.HandlerFunc(authService.HandlePasswordChange), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, false)))
+	mux.Handle("GET /api/v1/auth/profile", middleware.Chain(http.HandlerFunc(authService.HandleGetOwnProfile), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, false)))
+	mux.Handle("PATCH /api/v1/auth/profile", middleware.Chain(http.HandlerFunc(authService.HandleUpdateOwnProfile), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, false)))
 	// Canonical identity endpoints per space.
 	mux.Handle("GET /api/v1/auth/me", middleware.Chain(http.HandlerFunc(authService.HandleCustomerMe), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, false)))
 	mux.Handle("GET /api/v1/admin/auth/me", middleware.Chain(http.HandlerFunc(authService.HandleAdminMe), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))

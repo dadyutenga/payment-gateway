@@ -291,6 +291,9 @@ export type KYCQueueItem = {
   has_document: boolean;
   submitted_at: string;
   rejection_reason?: string;
+  owner_email?: string;
+  owner_name?: string;
+  owner_phone?: string;
 };
 
 export async function listKYCQueue(status?: string) {
