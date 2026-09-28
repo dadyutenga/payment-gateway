@@ -8,6 +8,8 @@
 backend/azsubay-payments-gateway
 backend/*.exe
 backend/bin/
+# uploaded user files (KYC docs, logos) — local data, never commit
+backend/uploads/
 
 # frontend
 frontend/node_modules/
