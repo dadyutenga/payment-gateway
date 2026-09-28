@@ -267,6 +267,48 @@ export async function revokeMerchantKey(appId: string, keyId: string) {
   await request<unknown>(`/api/v1/merchant/apps/${appId}/api-keys/${keyId}/revoke`, { method: "POST" });
 }
 
+// ---------- Payments: balance + orders (scoped to the path app) ----------
+
+export type MerchantOrder = {
+  id: string;
+  app_id?: string;
+  provider: string;
+  provider_order_id?: string;
+  external_reference?: string;
+  amount: string;
+  currency: string;
+  buyer_name?: string;
+  buyer_email?: string;
+  buyer_phone?: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type MerchantBalance = {
+  app_id: string;
+  currency: string;
+  available_balance: string;
+  total_revenue: string;
+  total_platform_fees: string;
+  total_withdrawn: string;
+  pending_order_total: string;
+};
+
+export async function listMerchantOrders(appId: string, status?: string) {
+  const r = await request<{ items: MerchantOrder[]; total: number }>(
+    `/api/v1/merchant/apps/${appId}/orders`,
+    { query: { status } },
+  );
+  return Array.isArray((r.data as unknown as { items?: MerchantOrder[] })?.items)
+    ? ((r.data as unknown as { items: MerchantOrder[] }).items ?? [])
+    : [];
+}
+
+export async function getMerchantBalance(appId: string) {
+  return (await request<MerchantBalance>(`/api/v1/merchant/apps/${appId}/balance`)).data;
+}
+
 // ---------- Withdrawals (scoped to the path app) ----------
 
 export type MerchantWithdrawal = {

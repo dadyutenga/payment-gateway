@@ -139,9 +139,6 @@ const MerchantApps = () => {
               )}
             </DialogContent>
           </Dialog>
-          <Button size="sm" variant="outline" asChild>
-            <Link to="/onboarding/create-org">New organization</Link>
-          </Button>
         </div>
       </div>
 

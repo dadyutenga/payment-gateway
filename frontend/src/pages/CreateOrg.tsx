@@ -1,12 +1,12 @@
 import { FormEvent, useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { useQueryClient } from "@tanstack/react-query";
+import { Navigate, useNavigate } from "react-router-dom";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Building2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
 import { toast } from "@/components/ui/sonner";
-import { createOrg } from "@/lib/orgApi";
+import { createOrg, listMyOrgs } from "@/lib/orgApi";
 
 const CreateOrg = () => {
   const navigate = useNavigate();
@@ -14,6 +14,14 @@ const CreateOrg = () => {
   const [name, setName] = useState("");
   const [businessName, setBusinessName] = useState("");
   const [creating, setCreating] = useState(false);
+
+  // One org per account — anyone who already holds one is sent back to
+  // their apps instead of hitting a 409 here.
+  const orgsQuery = useQuery({ queryKey: ["orgs", "mine"], queryFn: () => listMyOrgs(), staleTime: 30_000 });
+  const hasOrg = (orgsQuery.data ?? []).some((o) => o.status === "active");
+  if (!orgsQuery.isLoading && hasOrg) {
+    return <Navigate to="/merchant/apps" replace />;
+  }
 
   const handleCreate = async (event: FormEvent) => {
     event.preventDefault();

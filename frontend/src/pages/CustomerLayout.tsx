@@ -5,7 +5,6 @@ import SandboxModeBanner from "@/components/SandboxModeBanner";
 
 const NAV_ITEMS = [
   { to: "/merchant/apps", label: "My Apps" },
-  { to: "/onboarding/create-org", label: "New Organization" },
 ];
 
 // Merchant (customer) space layout: one org per account, so no org

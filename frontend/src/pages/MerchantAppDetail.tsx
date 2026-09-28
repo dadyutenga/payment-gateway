@@ -24,9 +24,11 @@ import {
   createMerchantKey,
   createMerchantWithdrawal,
   deleteMerchantEndpoint,
+  getMerchantBalance,
   listMerchantDeliveries,
   listMerchantEndpoints,
   listMerchantKeys,
+  listMerchantOrders,
   listMerchantWithdrawals,
   listMyApps,
   rejectMerchantWithdrawal,
@@ -69,11 +71,19 @@ const MerchantAppDetail = () => {
   const keysKey = ["merchant", appId, "keys"];
   const deliveriesKey = ["merchant", appId, "deliveries"];
   const withdrawalsKey = ["merchant", appId, "withdrawals"];
+  const balanceKey = ["merchant", appId, "balance"];
 
   const endpointsQuery = useQuery({ queryKey: endpointsKey, queryFn: () => listMerchantEndpoints(appId), staleTime: 15_000 });
   const keysQuery = useQuery({ queryKey: keysKey, queryFn: () => listMerchantKeys(appId), staleTime: 15_000 });
   const deliveriesQuery = useQuery({ queryKey: deliveriesKey, queryFn: () => listMerchantDeliveries(appId), staleTime: 15_000 });
   const withdrawalsQuery = useQuery({ queryKey: withdrawalsKey, queryFn: () => listMerchantWithdrawals(appId), staleTime: 15_000 });
+  const balanceQuery = useQuery({ queryKey: balanceKey, queryFn: () => getMerchantBalance(appId), staleTime: 15_000 });
+  const balance = balanceQuery.data;
+
+  const [orderStatus, setOrderStatus] = useState("");
+  const ordersKey = ["merchant", appId, "orders", orderStatus];
+  const ordersQuery = useQuery({ queryKey: ordersKey, queryFn: () => listMerchantOrders(appId, orderStatus || undefined), staleTime: 15_000 });
+  const orders = ordersQuery.data ?? [];
 
   const endpoints = endpointsQuery.data ?? [];
   const keys = keysQuery.data ?? [];
@@ -172,6 +182,8 @@ const MerchantAppDetail = () => {
     queryClient.invalidateQueries({ queryKey: keysKey });
     queryClient.invalidateQueries({ queryKey: deliveriesKey });
     queryClient.invalidateQueries({ queryKey: withdrawalsKey });
+    queryClient.invalidateQueries({ queryKey: balanceKey });
+    queryClient.invalidateQueries({ queryKey: ["merchant", appId, "orders"] });
   };
 
   const handleCreateEndpoint = async (event: FormEvent) => {
@@ -388,13 +400,73 @@ const MerchantAppDetail = () => {
         </Dialog>
       </div>
 
-      <Tabs defaultValue="webhooks" className="mt-6">
+      <Tabs defaultValue="payments" className="mt-6">
         <TabsList>
+          <TabsTrigger value="payments">Payments ({orders.length})</TabsTrigger>
           <TabsTrigger value="webhooks">Webhooks ({endpoints.length})</TabsTrigger>
           <TabsTrigger value="keys">API keys ({keys.length})</TabsTrigger>
           <TabsTrigger value="withdrawals">Withdrawals ({withdrawals.length})</TabsTrigger>
           <TabsTrigger value="deliveries">Deliveries ({deliveries.length})</TabsTrigger>
         </TabsList>
+
+        <TabsContent value="payments">
+          <div className="mb-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <Card><CardContent className="p-3">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Available</p>
+              <p className="mt-0.5 text-lg font-extrabold text-slate-900">{balance ? `${balance.available_balance} ${balance.currency}` : "—"}</p>
+            </CardContent></Card>
+            <Card><CardContent className="p-3">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Revenue</p>
+              <p className="mt-0.5 text-lg font-extrabold text-slate-900">{balance ? `${balance.total_revenue} ${balance.currency}` : "—"}</p>
+            </CardContent></Card>
+            <Card><CardContent className="p-3">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Withdrawn</p>
+              <p className="mt-0.5 text-lg font-extrabold text-slate-900">{balance ? `${balance.total_withdrawn} ${balance.currency}` : "—"}</p>
+            </CardContent></Card>
+            <Card><CardContent className="p-3">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Pending</p>
+              <p className="mt-0.5 text-lg font-extrabold text-slate-900">{balance ? `${balance.pending_order_total} ${balance.currency}` : "—"}</p>
+            </CardContent></Card>
+          </div>
+          <div className="mb-3 flex items-center gap-2">
+            <select
+              className="h-9 rounded-md border border-slate-300 px-2 text-sm"
+              value={orderStatus}
+              onChange={(e) => setOrderStatus(e.target.value)}
+            >
+              {["", "pending", "paid", "failed", "expired"].map((s) => (
+                <option key={s} value={s}>{s === "" ? "Any status" : s}</option>
+              ))}
+            </select>
+          </div>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Provider</TableHead>
+                <TableHead>Amount</TableHead>
+                <TableHead>Buyer</TableHead>
+                <TableHead>Reference</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead>Created</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {orders.map((order) => (
+                <TableRow key={order.id}>
+                  <TableCell>{order.provider}</TableCell>
+                  <TableCell>{order.amount} {order.currency}</TableCell>
+                  <TableCell>{order.buyer_name || order.buyer_phone || "—"}</TableCell>
+                  <TableCell className="max-w-xs truncate font-mono text-xs">{order.external_reference || order.provider_order_id || "—"}</TableCell>
+                  <TableCell><Badge variant="secondary">{order.status}</Badge></TableCell>
+                  <TableCell>{formatDate(order.created_at)}</TableCell>
+                </TableRow>
+              ))}
+              {!ordersQuery.isLoading && orders.length === 0 && (
+                <TableRow><TableCell colSpan={6} className="text-center text-slate-500">No payments yet.</TableCell></TableRow>
+              )}
+            </TableBody>
+          </Table>
+        </TabsContent>
 
         <TabsContent value="webhooks">
           <div className="mb-3 flex justify-end">
