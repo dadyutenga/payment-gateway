@@ -295,6 +295,8 @@ func New(ctx context.Context) (*App, error) {
 	mux.Handle("GET /api/v1/orgs/{orgID}/kyc/attempts", middleware.Chain(http.HandlerFunc(orgHandler.ListKYCAttempts), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
 	mux.Handle("GET /api/v1/orgs/{orgID}/notification-prefs", middleware.Chain(http.HandlerFunc(orgHandler.GetNotificationPrefs), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
 	mux.Handle("PATCH /api/v1/orgs/{orgID}/notification-prefs", middleware.Chain(http.HandlerFunc(orgHandler.UpdateNotificationPrefs), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("POST /api/v1/orgs/{orgID}/logo", middleware.Chain(http.HandlerFunc(orgHandler.UploadOrgLogo), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("GET /api/v1/orgs/{orgID}/logo", middleware.Chain(http.HandlerFunc(orgHandler.ServeOrgLogo), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
 	mux.Handle("POST /api/v1/orgs/{orgID}/kyc/document", middleware.Chain(http.HandlerFunc(orgHandler.UploadKYCDocument), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
 	mux.Handle("GET /api/v1/orgs/{orgID}/kyc/document", middleware.Chain(http.HandlerFunc(orgHandler.ServeKYCDocument), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
 

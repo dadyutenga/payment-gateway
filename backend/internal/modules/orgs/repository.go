@@ -55,6 +55,8 @@ type Repository interface {
 	// GetNotificationPrefs returns the org's toggles (all-enabled when no
 	// row was ever saved).
 	GetNotificationPrefs(ctx context.Context, orgID string) (NotificationPrefs, error)
+	// UpdateOrgLogo sets the org's logo location (uploaded path or URL).
+	UpdateOrgLogo(ctx context.Context, orgID, logoURL string) (Organization, error)
 	// UpsertNotificationPrefs replaces the org's toggles.
 	UpsertNotificationPrefs(ctx context.Context, prefs NotificationPrefs) (NotificationPrefs, error)
 }
@@ -770,6 +772,26 @@ func (r *PostgresRepository) UpsertNotificationPrefs(ctx context.Context, prefs 
 		return NotificationPrefs{}, fmt.Errorf("upsert notification prefs: %w", err)
 	}
 	return out, nil
+}
+
+// UpdateOrgLogo sets the org's logo location (uploaded private path or an
+// external URL). Served only through the authenticated logo endpoint.
+func (r *PostgresRepository) UpdateOrgLogo(ctx context.Context, orgID, logoURL string) (Organization, error) {
+	org, err := scanOrganization(r.db.QueryRowEx(ctx, `
+		UPDATE app.organizations SET logo_url = NULLIF($2, ''), updated_at = NOW()
+		WHERE id = $1::uuid
+		RETURNING id::text, name, slug, kyc_status, business_name, tin,
+		          live_max_txn_amount, live_daily_volume_cap,
+		          address, phone, contact_email, logo_url, primary_color,
+		          created_at, updated_at
+	`, nil, orgID, strings.TrimSpace(logoURL)))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Organization{}, ErrOrgNotFound
+	}
+	if err != nil {
+		return Organization{}, fmt.Errorf("update org logo: %w", err)
+	}
+	return org, nil
 }
 
 // UpdateOrgLiveLimits sets per-org live caps; empty clears to platform

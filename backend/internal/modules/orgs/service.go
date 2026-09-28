@@ -303,6 +303,15 @@ func (s *Service) UpdateNotificationPrefs(ctx context.Context, userID, orgID str
 	return s.repo.UpsertNotificationPrefs(ctx, prefs)
 }
 
+// SetOrgLogoURL stores the org's logo location (owner/manage_org). The
+// handler validates and stores the file; this records the reference.
+func (s *Service) SetOrgLogoURL(ctx context.Context, userID, orgID, logoURL string) (Organization, error) {
+	if _, err := s.CheckOrgPermission(ctx, userID, orgID, PermManageOrg); err != nil {
+		return Organization{}, err
+	}
+	return s.repo.UpdateOrgLogo(ctx, strings.TrimSpace(orgID), strings.TrimSpace(logoURL))
+}
+
 // OrgKYCStatus returns an app's org KYC status with no actor check —
 // callers (order/key gates) are already authorized via key or membership.
 func (s *Service) OrgKYCStatus(ctx context.Context, appID string) (string, error) {

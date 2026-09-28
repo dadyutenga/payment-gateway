@@ -517,6 +517,133 @@ func (h *Handler) serveKYCDocumentPath(w http.ResponseWriter, r *http.Request, d
 	http.ServeFile(w, r, clean)
 }
 
+// maxLogoBytes caps branding logo uploads at 2MB.
+const maxLogoBytes = 2 << 20
+
+// logoUploadDir sits next to the KYC store: local disk, never served
+// publicly — only through the authenticated logo endpoint below.
+const logoUploadDir = "uploads/branding"
+
+var allowedLogoExtensions = map[string]bool{
+	".jpg": true, ".jpeg": true, ".png": true, ".webp": true,
+}
+
+// logoContentTypeAllowed sniffs raster images only. SVG is deliberately
+// excluded (stored-XSS vector when served); PDF makes no sense for a logo.
+func logoContentTypeAllowed(detected, filename string) bool {
+	switch detected {
+	case "image/jpeg", "image/png", "image/webp":
+	default:
+		return false
+	}
+	ext := strings.ToLower(filepath.Ext(filename))
+	return allowedLogoExtensions[ext]
+}
+
+// UploadOrgLogo stores a branding logo (owner/manage_org) and records its
+// private path on the org. External URLs remain settable via PATCH.
+func (h *Handler) UploadOrgLogo(w http.ResponseWriter, r *http.Request) {
+	userID, ok := claimsUserID(w, r)
+	if !ok {
+		return
+	}
+	orgID := r.PathValue("orgID")
+	if _, err := h.service.CheckOrgPermission(r.Context(), userID, orgID, PermManageOrg); err != nil {
+		h.orgError(w, err, "upload the logo")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxLogoBytes+1<<20)
+	if err := r.ParseMultipartForm(maxLogoBytes); err != nil {
+		httputil.Error(w, http.StatusBadRequest, "invalid_request", "Logo must be under 2MB.", nil)
+		return
+	}
+	file, header, err := r.FormFile("logo")
+	if err != nil {
+		httputil.Error(w, http.StatusBadRequest, "invalid_request", "Attach the logo as the 'logo' field.", nil)
+		return
+	}
+	defer file.Close()
+	if header.Size > maxLogoBytes {
+		httputil.Error(w, http.StatusBadRequest, "invalid_request", "Logo must be under 2MB.", nil)
+		return
+	}
+	head := make([]byte, 512)
+	n, _ := io.ReadFull(file, head)
+	head = head[:n]
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		h.fail(w, http.StatusInternalServerError, "upload_failed", "Unable to store logo.", err)
+		return
+	}
+	detected := http.DetectContentType(head)
+	if !logoContentTypeAllowed(detected, header.Filename) {
+		httputil.Error(w, http.StatusUnprocessableEntity, "invalid_logo", "Logo must be a JPEG, PNG, or WEBP image.", nil)
+		return
+	}
+	if err := os.MkdirAll(logoUploadDir, 0o750); err != nil {
+		h.fail(w, http.StatusInternalServerError, "upload_failed", "Unable to store logo.", err)
+		return
+	}
+	ext := strings.ToLower(filepath.Ext(header.Filename))
+	name := orgID + "-" + strconv.FormatInt(time.Now().UnixNano(), 10) + ext
+	path := filepath.Join(logoUploadDir, name)
+	out, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o640)
+	if err != nil {
+		h.fail(w, http.StatusInternalServerError, "upload_failed", "Unable to store logo.", err)
+		return
+	}
+	if _, err := io.Copy(out, file); err != nil {
+		_ = out.Close()
+		_ = os.Remove(path)
+		h.fail(w, http.StatusInternalServerError, "upload_failed", "Unable to store logo.", err)
+		return
+	}
+	_ = out.Close()
+	org, err := h.service.SetOrgLogoURL(r.Context(), userID, orgID, filepath.ToSlash(path))
+	if err != nil {
+		_ = os.Remove(path)
+		h.orgError(w, err, "save the logo")
+		return
+	}
+	httputil.JSON(w, http.StatusCreated, map[string]any{"data": org})
+}
+
+// ServeOrgLogo streams the org's logo to active members. Uploaded files
+// serve from disk (path-confined); external URLs redirect; anything else
+// is 404 — never a public directory listing.
+func (h *Handler) ServeOrgLogo(w http.ResponseWriter, r *http.Request) {
+	userID, ok := claimsUserID(w, r)
+	if !ok {
+		return
+	}
+	orgID := r.PathValue("orgID")
+	member, err := h.service.CheckOrgPermission(r.Context(), userID, orgID, PermRead)
+	if err != nil {
+		h.orgError(w, err, "view the logo")
+		return
+	}
+	_ = member
+	org, err := h.service.GetOrganization(r.Context(), userID, orgID)
+	if err != nil {
+		h.orgError(w, err, "view the logo")
+		return
+	}
+	loc := strings.TrimSpace(org.LogoURL)
+	if loc == "" {
+		httputil.Error(w, http.StatusNotFound, "not_found", "No logo set.", nil)
+		return
+	}
+	if strings.HasPrefix(loc, "http://") || strings.HasPrefix(loc, "https://") {
+		http.Redirect(w, r, loc, http.StatusFound)
+		return
+	}
+	clean := filepath.Clean(loc)
+	if strings.Contains(clean, "..") || !strings.HasPrefix(filepath.ToSlash(clean), "uploads/branding/") {
+		h.fail(w, http.StatusInternalServerError, "internal_error", "Stored logo path is invalid.", errors.New("logo path escape"))
+		return
+	}
+	http.ServeFile(w, r, clean)
+}
+
 // ---------- Admin: KYC review queue, decisions, live limits ----------
 // All routes carry RequireAdmin; handlers use claimsIdentity (no org
 // membership needed) and record the reviewer's email on decisions.

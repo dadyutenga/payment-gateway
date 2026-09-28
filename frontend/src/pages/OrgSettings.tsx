@@ -1,4 +1,4 @@
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, CheckCircle2, Clock, Copy, Trash2, XCircle } from "lucide-react";
@@ -16,8 +16,10 @@ import {
   getNotificationPrefs,
   getOrg,
   listKYCAttempts,
+  resolveLogoSrc,
   updateNotificationPrefs,
   updateOrg,
+  uploadOrgLogo,
   type NotificationPrefs,
   type Organization,
 } from "@/lib/orgApi";
@@ -464,7 +466,34 @@ const BrandingTab = ({ org, isOwner }: { org: Organization; isOwner: boolean }) 
   const [logoUrl, setLogoUrl] = useState(org.logo_url ?? "");
   const [primaryColor, setPrimaryColor] = useState(org.primary_color || "#0f172a");
   const [saving, setSaving] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [logoSrc, setLogoSrc] = useState("");
   const dirty = logoUrl !== (org.logo_url ?? "") || primaryColor !== (org.primary_color || "#0f172a");
+
+  // Uploaded logos live privately — resolve them through the authenticated
+  // endpoint; external URLs render directly.
+  useEffect(() => {
+    let cancelled = false;
+    let objectUrl = "";
+    (async () => {
+      try {
+        const src = await resolveLogoSrc(org.id, logoUrl);
+        if (!cancelled) {
+          if (objectUrl) URL.revokeObjectURL(objectUrl);
+          if (src.startsWith("blob:")) objectUrl = src;
+          setLogoSrc(src);
+        } else if (src.startsWith("blob:")) {
+          URL.revokeObjectURL(src);
+        }
+      } catch {
+        if (!cancelled) setLogoSrc("");
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [org.id, logoUrl]);
 
   const handleSave = async (event: FormEvent) => {
     event.preventDefault();
@@ -487,15 +516,52 @@ const BrandingTab = ({ org, isOwner }: { org: Organization; isOwner: boolean }) 
     }
   };
 
+  const handleFile = async (file: File | undefined) => {
+    if (!file) return;
+    if (file.size > 2 << 20) {
+      toast.error("Logo must be under 2MB.");
+      return;
+    }
+    if (!/^(image\/jpeg|image\/png|image\/webp)$/.test(file.type)) {
+      toast.error("Logo must be a JPEG, PNG, or WEBP image.");
+      return;
+    }
+    setUploading(true);
+    try {
+      const updated = await uploadOrgLogo(org.id, file);
+      setLogoUrl(updated.logo_url ?? "");
+      toast.success("Logo uploaded.");
+      queryClient.invalidateQueries({ queryKey: ["orgs", org.id] });
+      queryClient.invalidateQueries({ queryKey: ["orgs", "mine"] });
+    } catch (err) {
+      toast.error(errorMessage(err, "Unable to upload logo."));
+    } finally {
+      setUploading(false);
+    }
+  };
+
   return (
     <div className="mt-4 grid gap-4 lg:grid-cols-2">
       <Card>
         <CardContent className="p-4 sm:p-6">
           <form onSubmit={handleSave} className="space-y-4">
             <div>
-              <label className="text-sm font-medium text-slate-700">Logo URL</label>
+              <label className="text-sm font-medium text-slate-700">Upload logo</label>
+              <div className="mt-1 flex items-center gap-2">
+                <Input
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp"
+                  disabled={!isOwner || uploading}
+                  onChange={(e) => { void handleFile(e.target.files?.[0]); e.target.value = ""; }}
+                />
+              </div>
+              <p className="mt-1 text-xs text-slate-400">
+                JPEG, PNG, or WEBP, under 2MB. Stored privately — served only to your members. {uploading && "Uploading…"}
+              </p>
+            </div>
+            <div>
+              <label className="text-sm font-medium text-slate-700">…or paste a logo URL</label>
               <Input value={logoUrl} onChange={(e) => setLogoUrl(e.target.value)} disabled={!isOwner} placeholder="https://…" className="mt-1" />
-              <p className="mt-1 text-xs text-slate-400">Hosted image URL (HTTPS). Shown beside your organization name.</p>
             </div>
             <div>
               <label className="text-sm font-medium text-slate-700">Primary color</label>
@@ -517,8 +583,8 @@ const BrandingTab = ({ org, isOwner }: { org: Organization; isOwner: boolean }) 
           <h3 className="text-sm font-bold text-slate-800">Preview</h3>
           <div className="mt-3 overflow-hidden rounded-lg border border-slate-200">
             <div className="flex items-center gap-2 px-4 py-3" style={{ backgroundColor: /^#[0-9a-fA-F]{6}$/.test(primaryColor) ? primaryColor : "#0f172a" }}>
-              {logoUrl ? (
-                <img src={logoUrl} alt="" className="h-6 w-6 rounded bg-white object-contain" />
+              {logoSrc ? (
+                <img src={logoSrc} alt="" className="h-6 w-6 rounded bg-white object-contain" />
               ) : (
                 <span className="flex h-6 w-6 items-center justify-center rounded bg-white/20 text-xs font-bold text-white">
                   {(org.business_name || org.name || "L").slice(0, 1)}

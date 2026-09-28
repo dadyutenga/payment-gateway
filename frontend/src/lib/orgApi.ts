@@ -36,6 +36,7 @@ async function request<T>(
   options?: {
     method?: "GET" | "POST" | "PATCH" | "DELETE";
     body?: unknown;
+    formData?: FormData;
   },
 ): Promise<{ data: T }> {
   const token = readAccessToken();
@@ -46,14 +47,18 @@ async function request<T>(
     Accept: "application/json",
     Authorization: `Bearer ${token}`,
   };
-  if (options?.body !== undefined) {
+  let body: BodyInit | undefined;
+  if (options?.formData) {
+    body = options.formData;
+  } else if (options?.body !== undefined) {
     headers["Content-Type"] = "application/json";
+    body = JSON.stringify(options.body);
   }
 
   const response = await fetch(`${apiBaseUrl}${path}`, {
     method: options?.method ?? "GET",
     headers,
-    body: options?.body !== undefined ? JSON.stringify(options.body) : undefined,
+    body,
   });
 
   if (response.status === 204) {
@@ -248,6 +253,30 @@ export async function updateNotificationPrefs(orgId: string, input: Omit<Notific
   return (
     await request<NotificationPrefs>(`/api/v1/orgs/${orgId}/notification-prefs`, { method: "PATCH", body: input })
   ).data;
+}
+
+// ---------- Logo upload (multipart) + authenticated serving ----------
+
+export async function uploadOrgLogo(orgId: string, file: File) {
+  const formData = new FormData();
+  formData.append("logo", file);
+  return request<Organization>(`/api/v1/orgs/${orgId}/logo`, { method: "POST", formData });
+}
+
+// resolveLogoSrc maps the stored logo location to something an <img> can
+// use: external URLs pass through, uploaded paths fetch through the
+// authenticated logo endpoint as a blob URL.
+export async function resolveLogoSrc(orgId: string, logoUrl?: string): Promise<string> {
+  const loc = (logoUrl ?? "").trim();
+  if (!loc) return "";
+  if (/^https?:\/\//i.test(loc)) return loc;
+  const token = readAccessToken();
+  if (!token) throw new OrgApiError(401, "You need to sign in to continue.", "unauthorized");
+  const response = await fetch(`${apiBaseUrl}/api/v1/orgs/${orgId}/logo`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!response.ok) throw new OrgApiError(response.status, "Unable to load the logo.");
+  return URL.createObjectURL(await response.blob());
 }
 
 // ---------- Admin: KYC review queue, decisions, live limits ----------

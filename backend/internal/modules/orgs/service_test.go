@@ -105,6 +105,10 @@ func (r *fakeOrgRepository) UpsertNotificationPrefs(_ context.Context, prefs Not
 	return prefs, nil
 }
 
+func (r *fakeOrgRepository) UpdateOrgLogo(_ context.Context, orgID, logoURL string) (Organization, error) {
+	return Organization{ID: orgID, LogoURL: logoURL}, nil
+}
+
 func (r *fakeOrgRepository) DeleteOrganization(_ context.Context, _ string) error { return nil }
 
 func (r *fakeOrgRepository) CountApps(_ context.Context, _ string) (int64, error) { return r.apps, nil }
