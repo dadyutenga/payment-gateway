@@ -4,6 +4,7 @@ import { Toaster } from "@/components/ui/sonner";
 import AdminRoute from "@/components/AdminRoute";
 import MerchantRoute from "@/components/MerchantRoute";
 import AdminLayout from "@/pages/AdminLayout";
+import CustomerLayout from "@/pages/CustomerLayout";
 import SignIn from "@/pages/SignIn";
 import AdminPayments from "@/pages/AdminPayments";
 import AdminPaymentApps from "@/pages/AdminPaymentApps";
@@ -54,7 +55,7 @@ const App = () => (
             path="/merchant"
             element={
               <MerchantRoute>
-                <AdminLayout />
+                <CustomerLayout />
               </MerchantRoute>
             }
           >
@@ -65,7 +66,7 @@ const App = () => (
             path="/onboarding/create-org"
             element={
               <MerchantRoute>
-                <AdminLayout />
+                <CustomerLayout />
               </MerchantRoute>
             }
           >
@@ -75,7 +76,7 @@ const App = () => (
             path="/org/:orgId"
             element={
               <MerchantRoute>
-                <AdminLayout />
+                <CustomerLayout />
               </MerchantRoute>
             }
           >
@@ -86,7 +87,7 @@ const App = () => (
             path="/onboarding/kyc/:orgId"
             element={
               <MerchantRoute>
-                <AdminLayout />
+                <CustomerLayout />
               </MerchantRoute>
             }
           >
