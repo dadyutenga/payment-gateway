@@ -108,7 +108,7 @@ const SignUp = () => {
 
           <p className="mt-4 text-center text-xs text-slate-500">
             Already have an account?{" "}
-            <Link to="/signin" className="text-blue-600 hover:underline">Sign in</Link>
+            <Link to="/login" className="text-blue-600 hover:underline">Sign in</Link>
           </p>
         </CardContent>
       </Card>

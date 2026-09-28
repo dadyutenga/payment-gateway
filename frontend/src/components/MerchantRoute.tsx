@@ -32,7 +32,7 @@ const MerchantRoute = ({ children }: { children: JSX.Element }) => {
     return <div className="flex min-h-[60vh] items-center justify-center text-sm text-slate-500">Loading.</div>;
   }
   if (state === "signed-out") {
-    return <Navigate to={`/signin?next=${encodeURIComponent(location.pathname + location.search)}`} replace />;
+    return <Navigate to={`/login?next=${encodeURIComponent(location.pathname + location.search)}`} replace />;
   }
   return children;
 };

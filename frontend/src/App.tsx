@@ -27,8 +27,14 @@ const App = () => (
       <Toaster richColors closeButton position="top-right" />
       <BrowserRouter>
         <Routes>
+          {/* Merchant (customer) space: /login + /register.
+              /signin + /signup are kept as aliases. Operators use
+              /admin/login (separate path, audience, session). */}
+          <Route path="/login" element={<SignIn />} />
           <Route path="/signin" element={<SignIn />} />
+          <Route path="/register" element={<SignUp />} />
           <Route path="/signup" element={<SignUp />} />
+          <Route path="/admin/login" element={<SignIn admin />} />
           <Route
             path="/admin"
             element={

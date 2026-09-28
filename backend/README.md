@@ -62,7 +62,7 @@ required ones to get running at all:
 | `DATABASE_URL` | Postgres connection string |
 | `AUTH_JWT_SECRET` | signs and verifies local user sessions |
 | `APP_ENCRYPTION_KEY` | encrypts provider credentials at rest (`openssl rand -base64 32`) |
-| `AUTH_ALLOW_PUBLIC_REGISTER` | `false` (default): only the first account may self-register, then signup closes |
+| `AUTH_ALLOW_PUBLIC_REGISTER` | `true` (default): merchant self-registration open (customer accounts only, never admins) |
 | `PAYMENTS_LIVE_MAX_TXN_AMOUNT` | per-transaction live cap (default `5000000`) |
 | `PAYMENTS_LIVE_DAILY_VOLUME_CAP` | per-app per-currency live daily cap (default `50000000`) |
 
@@ -78,13 +78,13 @@ go run ./cmd/seed-admin -email admin@example.com -password '...'
 ```
 
 It creates the account if missing, promotes an existing non-admin, and is
-a no-op for existing admins. Self-registration is closed by default: only
-the very first account (empty users table) may self-register to bootstrap
-the deployment; afterwards `POST /api/v1/auth/register` returns
-`403 registration_disabled` unless `AUTH_ALLOW_PUBLIC_REGISTER=true`.
-Admin rights are re-read from `app.users` on every request, so revoking
-`is_admin` takes effect immediately instead of lingering in the token
-until `AUTH_TOKEN_TTL` expires.
+a no-op for existing admins. Self-registration is open by default
+(`AUTH_ALLOW_PUBLIC_REGISTER=true`): anyone may sign up, but signup only
+ever creates customer (merchant) accounts — never admins. Set
+`AUTH_ALLOW_PUBLIC_REGISTER=false` to close signup entirely. Admin rights
+are re-read from `app.admin_users` on every request, so deleting an admin
+takes effect immediately instead of lingering in the token
+until `AUTH_ADMIN_TOKEN_TTL` expires.
 
 ## Signup verification (OTP)
 

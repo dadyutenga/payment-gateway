@@ -1,14 +1,16 @@
 import { FormEvent, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { authenticate } from "@/lib/auth";
+import { authenticate, authenticateAdmin } from "@/lib/auth";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { toast } from "@/components/ui/sonner";
 
-const SignIn = () => {
+// Customer space: /login (signin alias kept). Admin space: /admin/login
+// (separate login path + token audience, no self-registration).
+const SignIn = ({ admin = false }: { admin?: boolean }) => {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const next = searchParams.get("next") || "/admin/payments";
+  const next = searchParams.get("next") || (admin ? "/admin/payments" : "/merchant/apps");
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -19,7 +21,11 @@ const SignIn = () => {
     event.preventDefault();
     setSubmitting(true);
     try {
-      await authenticate(registering ? "register" : "login", email, password);
+      if (admin) {
+        await authenticateAdmin(email, password);
+      } else {
+        await authenticate(registering ? "register" : "login", email, password);
+      }
       navigate(next, { replace: true });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Unable to sign in.");
@@ -31,7 +37,10 @@ const SignIn = () => {
   return (
     <div className="flex min-h-screen items-center justify-center bg-slate-50 px-4">
       <div className="w-full max-w-sm rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
-          <h1 className="text-lg font-bold text-slate-900">LipaGO</h1>
+          <h1 className="text-lg font-bold text-slate-900">{admin ? "LipaGO Admin" : "LipaGO"}</h1>
+          {admin && (
+            <p className="mt-1 text-xs text-slate-500">Operator sign-in — no self-registration. Ask an existing admin for access.</p>
+          )}
 
           <form onSubmit={handleSignIn} className="mt-5 space-y-4">
             <div>
@@ -46,12 +55,14 @@ const SignIn = () => {
               {submitting ? "Please wait..." : registering ? "Create account" : "Sign in"}
             </Button>
           </form>
-        <button type="button" className="mt-4 text-xs text-blue-600 hover:underline" onClick={() => setRegistering(!registering)}>
-          {registering ? "Already have an account? Sign in" : "Create an account"}
-        </button>
-        {!registering && (
+        {!admin && (
+          <button type="button" className="mt-4 text-xs text-blue-600 hover:underline" onClick={() => setRegistering(!registering)}>
+            {registering ? "Already have an account? Sign in" : "Create an account"}
+          </button>
+        )}
+        {!admin && !registering && (
           <p className="mt-2 text-center text-xs text-slate-500">
-            New here? <Link to="/signup" className="text-blue-600 hover:underline">Sign up</Link>
+            New here? <Link to="/register" className="text-blue-600 hover:underline">Sign up</Link>
           </p>
         )}
       </div>

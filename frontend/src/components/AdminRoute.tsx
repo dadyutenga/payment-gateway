@@ -37,7 +37,7 @@ const AdminRoute = ({ children }: { children: JSX.Element }) => {
     return <div className="flex min-h-[60vh] items-center justify-center text-sm text-slate-500">Loading…</div>;
   }
   if (state === "signed-out") {
-    return <Navigate to={`/signin?next=${encodeURIComponent(location.pathname + location.search)}`} replace />;
+    return <Navigate to={`/admin/login?next=${encodeURIComponent(location.pathname + location.search)}`} replace />;
   }
   if (state === "not-admin") {
     return (
@@ -49,7 +49,7 @@ const AdminRoute = ({ children }: { children: JSX.Element }) => {
         <button
           type="button"
           className="mt-2 text-sm font-medium text-blue-600 hover:underline"
-          onClick={() => { signOut(); window.location.assign("/signin"); }}
+          onClick={() => { signOut(); window.location.assign("/admin/login"); }}
         >
           Sign out
         </button>

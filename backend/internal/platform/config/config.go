@@ -65,11 +65,10 @@ type AuthConfig struct {
 	// AdminLoginRateLimitPerMin is the stricter admin login cap.
 	AdminLoginRateLimitPerMin int
 	// AllowPublicRegister keeps POST /api/v1/auth/register open to anyone.
-	// Default false: only the very first account (empty users table) may
-	// self-register as a bootstrap; afterwards registration is closed and
-	// additional accounts must be created by cmd/seed-admin or an operator.
-	// Self-registration never grants admin — there is no ADMIN_EMAILS
-	// allowlist grant path anymore.
+	// Default true: merchants self-register as CUSTOMER accounts
+	// (registration can never mint an admin — operators come only from
+	// cmd/seed-admin or an admin invite). Set false to close
+	// self-registration entirely.
 	AllowPublicRegister bool
 }
 
@@ -148,7 +147,7 @@ func Load() (Config, error) {
 			MaxConnIdleTime: mustDuration("DATABASE_MAX_CONN_IDLE_TIME", "5m"),
 			HealthTimeout:   mustDuration("DATABASE_HEALTH_TIMEOUT", "3s"),
 		},
-		Auth: AuthConfig{JWTSecret: strings.TrimSpace(os.Getenv("AUTH_JWT_SECRET")), TokenTTL: mustDuration("AUTH_TOKEN_TTL", "24h"), AllowPublicRegister: mustBool("AUTH_ALLOW_PUBLIC_REGISTER", false),
+		Auth: AuthConfig{JWTSecret: strings.TrimSpace(os.Getenv("AUTH_JWT_SECRET")), TokenTTL: mustDuration("AUTH_TOKEN_TTL", "24h"), AllowPublicRegister: mustBool("AUTH_ALLOW_PUBLIC_REGISTER", true),
 			AdminJWTSecret:           strings.TrimSpace(os.Getenv("AUTH_ADMIN_JWT_SECRET")),
 			AdminTokenTTL:            mustDuration("AUTH_ADMIN_TOKEN_TTL", "4h"),
 			LoginRateLimitPerMin:     mustInt("AUTH_LOGIN_RATE_LIMIT_PER_MIN", 20),
