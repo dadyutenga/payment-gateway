@@ -267,6 +267,70 @@ export async function revokeMerchantKey(appId: string, keyId: string) {
   await request<unknown>(`/api/v1/merchant/apps/${appId}/api-keys/${keyId}/revoke`, { method: "POST" });
 }
 
+// ---------- Withdrawals (scoped to the path app) ----------
+
+export type MerchantWithdrawal = {
+  id: string;
+  app_id: string;
+  amount: string;
+  currency: string;
+  destination_type: "bank" | "mobile_money";
+  destination_details: Record<string, unknown>;
+  status: "requested" | "approved" | "processing" | "rejected" | "paid" | "failed";
+  requested_by: string;
+  approved_by?: string;
+  notes?: string;
+  provider?: string;
+  provider_payout_id?: string;
+  provider_status?: string;
+  failure_reason?: string;
+  dispatched_at?: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CreateMerchantWithdrawalInput = {
+  amount: string;
+  currency: string;
+  destination_type: "bank" | "mobile_money";
+  destination_details: Record<string, unknown>;
+  notes?: string;
+};
+
+export async function listMerchantWithdrawals(appId: string) {
+  const r = await request<{ items: MerchantWithdrawal[]; total: number }>(
+    `/api/v1/merchant/apps/${appId}/withdrawals`,
+  );
+  return Array.isArray((r.data as unknown as { items?: MerchantWithdrawal[] })?.items)
+    ? ((r.data as unknown as { items: MerchantWithdrawal[] }).items ?? [])
+    : [];
+}
+
+export async function createMerchantWithdrawal(appId: string, input: CreateMerchantWithdrawalInput) {
+  return (
+    await request<MerchantWithdrawal>(`/api/v1/merchant/apps/${appId}/withdrawals`, {
+      method: "POST",
+      body: input,
+    })
+  ).data;
+}
+
+export async function approveMerchantWithdrawal(appId: string, withdrawalId: string) {
+  return (
+    await request<MerchantWithdrawal>(`/api/v1/merchant/apps/${appId}/withdrawals/${withdrawalId}/approve`, {
+      method: "POST",
+    })
+  ).data;
+}
+
+export async function rejectMerchantWithdrawal(appId: string, withdrawalId: string) {
+  return (
+    await request<MerchantWithdrawal>(`/api/v1/merchant/apps/${appId}/withdrawals/${withdrawalId}/reject`, {
+      method: "POST",
+    })
+  ).data;
+}
+
 // ---------- Delivery logs ----------
 
 export async function listMerchantDeliveries(appId: string, query?: { status?: string; endpoint_id?: string }) {
