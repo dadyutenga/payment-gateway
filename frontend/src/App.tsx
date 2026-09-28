@@ -14,6 +14,12 @@ import AdminPaymentProviders from "@/pages/AdminPaymentProviders";
 import AdminKYCReview from "@/pages/AdminKYCReview";
 import MerchantApps from "@/pages/MerchantApps";
 import MerchantAppDetail from "@/pages/MerchantAppDetail";
+import MerchantPayments from "@/pages/MerchantPayments";
+import MerchantWithdrawals from "@/pages/MerchantWithdrawals";
+import MerchantWebhooks from "@/pages/MerchantWebhooks";
+import MerchantApiKeys from "@/pages/MerchantApiKeys";
+import MerchantDeliveries from "@/pages/MerchantDeliveries";
+import MerchantSettings from "@/pages/MerchantSettings";
 import CreateOrg from "@/pages/CreateOrg";
 import OrgMembers from "@/pages/OrgMembers";
 import OrgSettings from "@/pages/OrgSettings";
@@ -62,6 +68,12 @@ const App = () => (
           >
             <Route path="apps" element={<MerchantApps />} />
             <Route path="apps/:id" element={<MerchantAppDetail />} />
+            <Route path="payments" element={<MerchantPayments />} />
+            <Route path="withdrawals" element={<MerchantWithdrawals />} />
+            <Route path="webhooks" element={<MerchantWebhooks />} />
+            <Route path="api-keys" element={<MerchantApiKeys />} />
+            <Route path="deliveries" element={<MerchantDeliveries />} />
+            <Route path="settings" element={<MerchantSettings />} />
           </Route>
           <Route
             path="/onboarding/create-org"

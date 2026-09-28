@@ -5,6 +5,12 @@ import SandboxModeBanner from "@/components/SandboxModeBanner";
 
 const NAV_ITEMS = [
   { to: "/merchant/apps", label: "My Apps" },
+  { to: "/merchant/payments", label: "Payments" },
+  { to: "/merchant/withdrawals", label: "Withdrawals" },
+  { to: "/merchant/webhooks", label: "Webhooks" },
+  { to: "/merchant/api-keys", label: "API Keys" },
+  { to: "/merchant/deliveries", label: "Deliveries" },
+  { to: "/merchant/settings", label: "Settings" },
 ];
 
 // Merchant (customer) space layout: one org per account, so no org
