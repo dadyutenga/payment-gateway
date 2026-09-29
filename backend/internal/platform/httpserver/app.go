@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"lipago/internal/modules/analytics"
 	"lipago/internal/modules/orgs"
 	"lipago/internal/modules/payments"
 	"lipago/internal/modules/payments/providers"
@@ -110,6 +111,10 @@ func New(ctx context.Context) (*App, error) {
 	orgService := orgs.NewService(orgRepo, logger)
 	orgHandler := orgs.NewHandler(orgService, logger)
 	paymentHandler.SetOrgService(orgService)
+
+	analyticsRepo := analytics.NewPostgresRepository(db)
+	analyticsService := analytics.NewService(analyticsRepo, logger)
+	analyticsHandler := analytics.NewHandler(analyticsService, logger)
 
 	// Admin identity is read from app.admin_users on every request by
 	// RequireAdminAuth — never trusted from the token claim — so deleting
@@ -306,6 +311,24 @@ func New(ctx context.Context) (*App, error) {
 	// ---- Admin: KYC review queue, decisions, per-org live limits ----
 	mux.Handle("GET /api/v1/admin/orgs/kyc-queue", middleware.Chain(http.HandlerFunc(orgHandler.ListKYCQueue), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))
 	mux.Handle("GET /api/v1/admin/stats", middleware.Chain(http.HandlerFunc(orgHandler.PlatformStats), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))
+
+	// ---- Admin analytics (read-only; exports audited) ----
+	adminAnalytics := func(h http.HandlerFunc) http.Handler {
+		return middleware.Chain(h, middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService))
+	}
+	mux.Handle("GET /api/v1/admin/analytics/overview", adminAnalytics(analyticsHandler.Overview))
+	mux.Handle("GET /api/v1/admin/analytics/providers", adminAnalytics(analyticsHandler.Providers))
+	mux.Handle("GET /api/v1/admin/analytics/merchants/top", adminAnalytics(analyticsHandler.TopMerchants))
+	mux.Handle("GET /api/v1/admin/analytics/merchants/signups", adminAnalytics(analyticsHandler.SignupFunnel))
+	mux.Handle("GET /api/v1/admin/analytics/merchants/dormant", adminAnalytics(analyticsHandler.DormantMerchants))
+	mux.Handle("GET /api/v1/admin/analytics/merchants/churn-risk", adminAnalytics(analyticsHandler.ChurnRiskMerchants))
+	mux.Handle("GET /api/v1/admin/analytics/failures", adminAnalytics(analyticsHandler.Failures))
+	mux.Handle("GET /api/v1/admin/analytics/withdrawals", adminAnalytics(analyticsHandler.Withdrawals))
+	mux.Handle("GET /api/v1/admin/analytics/webhooks", adminAnalytics(analyticsHandler.Webhooks))
+	mux.Handle("GET /api/v1/admin/analytics/ops/stuck-orders", adminAnalytics(analyticsHandler.StuckOrders))
+	mux.Handle("GET /api/v1/admin/analytics/ops/unreconciled", adminAnalytics(analyticsHandler.Unreconciled))
+	mux.Handle("GET /api/v1/admin/analytics/ops/negative-balances", adminAnalytics(analyticsHandler.NegativeBalances))
+	mux.Handle("GET /api/v1/admin/analytics/export/{report}", adminAnalytics(analyticsHandler.Export))
 	mux.Handle("POST /api/v1/admin/orgs/{orgID}/kyc/approve", middleware.Chain(http.HandlerFunc(orgHandler.ApproveKYC), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))
 	mux.Handle("POST /api/v1/admin/orgs/{orgID}/kyc/reject", middleware.Chain(http.HandlerFunc(orgHandler.RejectKYC), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))
 	mux.Handle("GET /api/v1/admin/orgs/{orgID}/kyc/document", middleware.Chain(http.HandlerFunc(orgHandler.AdminServeKYCDocument), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))
