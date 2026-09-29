@@ -77,6 +77,40 @@ func (s *Service) LogExport(ctx context.Context, actorID, actorEmail, report, ip
 	return s.repo.LogExport(ctx, actorID, actorEmail, report, ip)
 }
 
+// MerchantOverview reuses the platform Overview scoped to one org, plus
+// average order value per currency.
+func (s *Service) MerchantOverview(ctx context.Context, p Params, env string) (MerchantOverview, error) {
+	overview, err := s.repo.Overview(ctx, p)
+	if err != nil {
+		return MerchantOverview{}, err
+	}
+	avg, err := s.repo.MerchantAvgOrderValue(ctx, p, env)
+	if err != nil {
+		return MerchantOverview{}, err
+	}
+	return MerchantOverview{Overview: overview, AvgOrderValue: avg}, nil
+}
+
+func (s *Service) MerchantChannels(ctx context.Context, p Params, env string) ([]ChannelRow, error) {
+	return s.repo.MerchantChannels(ctx, p, env)
+}
+
+func (s *Service) MerchantPeakHours(ctx context.Context, p Params, env string) (PeakHours, error) {
+	return s.repo.MerchantPeakHours(ctx, p, env)
+}
+
+func (s *Service) MerchantCustomers(ctx context.Context, p Params, env string, showDetail bool, mask func(string) string) (CustomerStats, error) {
+	return s.repo.MerchantCustomers(ctx, p, env, showDetail, mask)
+}
+
+func (s *Service) MerchantApps(ctx context.Context, p Params, env string) ([]MerchantAppRow, error) {
+	return s.repo.MerchantAppsTable(ctx, p, env)
+}
+
+func (s *Service) MerchantSettlements(ctx context.Context, p Params, env, currency string, entryLimit int) (Settlement, error) {
+	return s.repo.MerchantSettlements(ctx, p, env, currency, entryLimit)
+}
+
 // ExportReports are the CSV-exportable list reports.
 var ExportReports = []string{
 	"top-merchants", "signups", "dormant", "churn-risk", "failures",

@@ -29,6 +29,14 @@ type Repository interface {
 	Unreconciled(ctx context.Context, p Params, limit int) ([]UnreconciledItem, error)
 	NegativeBalances(ctx context.Context) ([]NegativeBalance, error)
 	LogExport(ctx context.Context, actorID, actorEmail, report, ip string) error
+	// Merchant (org-scoped) analytics. Callers pin OrgIDs to exactly the
+	// caller's org after resolving membership server-side.
+	MerchantAvgOrderValue(ctx context.Context, p Params, env string) (MoneyByCurrency, error)
+	MerchantChannels(ctx context.Context, p Params, env string) ([]ChannelRow, error)
+	MerchantPeakHours(ctx context.Context, p Params, env string) (PeakHours, error)
+	MerchantCustomers(ctx context.Context, p Params, env string, showDetail bool, mask func(string) string) (CustomerStats, error)
+	MerchantAppsTable(ctx context.Context, p Params, env string) ([]MerchantAppRow, error)
+	MerchantSettlements(ctx context.Context, p Params, env, currency string, entryLimit int) (Settlement, error)
 }
 
 type PostgresRepository struct {
@@ -39,15 +47,18 @@ func NewPostgresRepository(db *pgx.ConnPool) *PostgresRepository {
 	return &PostgresRepository{db: db}
 }
 
-// condBuilder numbers $ placeholders as args accumulate.
+// condBuilder numbers $ placeholders as args accumulate. offset shifts
+// numbering so two builders can share one query (second builder starts
+// after the first builder's args).
 type condBuilder struct {
-	conds []string
-	args  []any
+	conds  []string
+	args   []any
+	offset int
 }
 
 func (b *condBuilder) ph(v any) string {
 	b.args = append(b.args, v)
-	return fmt.Sprintf("$%d", len(b.args))
+	return fmt.Sprintf("$%d", b.offset+len(b.args))
 }
 
 func (b *condBuilder) where() string {

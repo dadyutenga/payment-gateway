@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"lipago/internal/modules/orgs"
 	"lipago/internal/platform/middleware"
 	"lipago/internal/shared/httputil"
 )
@@ -14,6 +15,7 @@ import (
 // handler parses shared Params (400 on bad input) and returns {data}.
 type Handler struct {
 	service *Service
+	orgs    *orgs.Service
 	logger  *slog.Logger
 }
 

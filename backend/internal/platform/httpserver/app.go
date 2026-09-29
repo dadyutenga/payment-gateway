@@ -115,6 +115,7 @@ func New(ctx context.Context) (*App, error) {
 	analyticsRepo := analytics.NewPostgresRepository(db)
 	analyticsService := analytics.NewService(analyticsRepo, logger)
 	analyticsHandler := analytics.NewHandler(analyticsService, logger)
+	analyticsHandler.SetOrgsService(orgService)
 
 	// Admin identity is read from app.admin_users on every request by
 	// RequireAdminAuth — never trusted from the token claim — so deleting
@@ -330,6 +331,18 @@ func New(ctx context.Context) (*App, error) {
 	mux.Handle("GET /api/v1/admin/analytics/ops/unreconciled", adminAnalytics(analyticsHandler.Unreconciled))
 	mux.Handle("GET /api/v1/admin/analytics/ops/negative-balances", adminAnalytics(analyticsHandler.NegativeBalances))
 	mux.Handle("GET /api/v1/admin/analytics/export/{report}", adminAnalytics(analyticsHandler.Export))
+
+	// ---- Merchant analytics (customer space, org-scoped server-side) ----
+	merchantAnalytics := func(h http.HandlerFunc) http.Handler {
+		return middleware.Chain(h, middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified))
+	}
+	mux.Handle("GET /api/v1/orgs/{orgID}/analytics/overview", merchantAnalytics(analyticsHandler.MerchantOverview))
+	mux.Handle("GET /api/v1/orgs/{orgID}/analytics/methods", merchantAnalytics(analyticsHandler.MerchantMethods))
+	mux.Handle("GET /api/v1/orgs/{orgID}/analytics/peak-hours", merchantAnalytics(analyticsHandler.MerchantPeakHours))
+	mux.Handle("GET /api/v1/orgs/{orgID}/analytics/customers", merchantAnalytics(analyticsHandler.MerchantCustomers))
+	mux.Handle("GET /api/v1/orgs/{orgID}/analytics/failures", merchantAnalytics(analyticsHandler.MerchantFailures))
+	mux.Handle("GET /api/v1/orgs/{orgID}/analytics/apps", merchantAnalytics(analyticsHandler.MerchantApps))
+	mux.Handle("GET /api/v1/orgs/{orgID}/settlements", merchantAnalytics(analyticsHandler.MerchantSettlements))
 	mux.Handle("POST /api/v1/admin/orgs/{orgID}/kyc/approve", middleware.Chain(http.HandlerFunc(orgHandler.ApproveKYC), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))
 	mux.Handle("POST /api/v1/admin/orgs/{orgID}/kyc/reject", middleware.Chain(http.HandlerFunc(orgHandler.RejectKYC), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))
 	mux.Handle("GET /api/v1/admin/orgs/{orgID}/kyc/document", middleware.Chain(http.HandlerFunc(orgHandler.AdminServeKYCDocument), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))
