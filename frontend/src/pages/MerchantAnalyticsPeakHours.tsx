@@ -6,16 +6,13 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { listMyApps } from "@/lib/merchantApi";
 import { fetchMerchantPeakHours } from "@/lib/merchantAnalyticsApi";
 import { AppFilter, AnalyticsSubNav, EnvToggle } from "@/pages/merchantAnalyticsCommon";
-import { DateRangePicker, presetRange } from "@/pages/analyticsCommon";
+import { DateRangePicker, useFilterParams } from "@/pages/analyticsCommon";
 
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 const MerchantAnalyticsPeakHours = () => {
   const { orgId = "" } = useParams();
-  const initial = presetRange("30d");
-  const [from, setFrom] = useState(initial.from);
-  const [to, setTo] = useState(initial.to);
-  const [env, setEnv] = useState<"live" | "sandbox">("live");
+  const { from, to, env, setRange, setEnv } = useFilterParams();
   const [appId, setAppId] = useState("");
 
   const appsQuery = useQuery({ queryKey: ["merchant", "my-apps"], queryFn: () => listMyApps(), staleTime: 30_000 });
@@ -52,7 +49,7 @@ const MerchantAnalyticsPeakHours = () => {
         <div className="flex flex-wrap items-center gap-2">
           <EnvToggle env={env} onChange={setEnv} />
           <AppFilter apps={appsQuery.data ?? []} value={appId} onChange={setAppId} />
-          <DateRangePicker from={from} to={to} onChange={(f, t) => { setFrom(f); setTo(t); }} />
+          <DateRangePicker from={from} to={to} onChange={setRange} />
         </div>
       </div>
 

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
@@ -8,12 +8,10 @@ import {
   Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
 import { fetchProviders } from "@/lib/analyticsApi";
-import { CsvButton, DateRangePicker, moneyText, presetRange, rateText } from "@/pages/analyticsCommon";
+import { CsvButton, DateRangePicker, moneyText, useFilterParams, rateText } from "@/pages/analyticsCommon";
 
 const AdminAnalyticsProviders = () => {
-  const initial = presetRange("30d");
-  const [from, setFrom] = useState(initial.from);
-  const [to, setTo] = useState(initial.to);
+  const { from, to, setRange } = useFilterParams();
 
   const providersQuery = useQuery({
     queryKey: ["admin", "analytics", "providers", from, to],
@@ -34,7 +32,7 @@ const AdminAnalyticsProviders = () => {
           <h2 className="text-2xl font-bold text-slate-900">Providers</h2>
           <p className="mt-1 text-sm text-slate-500">Live payments only · latency in milliseconds</p>
         </div>
-        <DateRangePicker from={from} to={to} onChange={(f, t) => { setFrom(f); setTo(t); }} />
+        <DateRangePicker from={from} to={to} onChange={setRange} />
       </div>
 
       {providersQuery.isLoading ? (

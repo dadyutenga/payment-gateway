@@ -278,6 +278,19 @@ reversal until a real contract is confirmed.
   the app, plus `POST .../{deliveryID}/replay`
 - All merchant routes require a signed-in session AND app membership —
   the app id always comes from the verified path, never client input.
+- `/api/v1/admin/analytics/...` — platform analytics (admin-auth,
+  live-only): `overview`, `providers`, `merchants/top|signups|dormant|
+  churn-risk`, `failures`, `withdrawals`, `webhooks`,
+  `ops/stuck-orders|unreconciled|negative-balances`, plus
+  `export/:report?format=csv` (audited). Params: `from`/`to`
+  (YYYY-MM-DD, EAT), `granularity`, `provider`, `currency`, `org_id`.
+- `/api/v1/orgs/{orgID}/analytics/...` — merchant analytics (org resolved
+  server-side from the session): `overview`, `methods`, `peak-hours`,
+  `customers`, `failures`, `apps`, plus `GET .../settlements?format=
+  json|csv|pdf` (ledger-based statements; csv/pdf need owner/finance).
+  `?environment=live|sandbox` (live default, never mixed).
+- Full metric definitions, thresholds, and privacy rules:
+  `docs/ANALYTICS.md`.
 - `GET /api/v1/health` — liveness + DB check
 - `GET /api/v1/admin/me` — `{email, is_admin}` for the signed-in user
 

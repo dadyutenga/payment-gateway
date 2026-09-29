@@ -24,31 +24,47 @@ npm run preview    # preview the production build locally
 1. Create the first admin on the backend with
    `go run ./cmd/seed-admin -email you@example.com` (self-registration
    never grants admin).
-2. Sign in at `/signin` — you land in the admin panel with full access:
-   create payment apps, generate API keys, configure providers, review
-   orders/ledger, approve or reject withdrawals.
-3. Merchants sign up at `/signup` (email + OTP verification), create an
-   organization at `/onboarding/create-org`, and can work in sandbox mode
-   immediately. Live API keys/payments unlock after the org's verification
-   is submitted at `/onboarding/kyc/:orgId` and approved.
+2. Sign in at `/admin/login` — operators land in the admin panel:
+   overview dashboard, platform analytics, KYC review, apps oversight,
+   providers, withdrawals/payout recording.
+3. Merchants sign up at `/register` (or `/signup`), verify email, create
+   an organization at `/onboarding/create-org`, and work in sandbox mode
+   immediately. Live API keys/payments unlock after verification is
+   submitted at `/onboarding/kyc/:orgId` and approved. Merchant sign-in
+   is at `/login`.
 
 ## Pages
 
 | Route | Purpose |
 |---|---|
-| `/signup` | merchant signup + email OTP verification |
-| `/admin/payments` | overview / metrics |
-| `/admin/payments/apps` | create apps, generate/revoke API keys, manage members |
-| `/admin/payments/apps/:id` | single app detail — orders, ledger, webhook endpoints |
-| `/admin/payments/withdrawals` | review and act on withdrawal requests |
+| `/` | public welcome with merchant/operator doors |
+| `/register`, `/login` | merchant signup + sign-in (`/signup`, `/signin` kept as aliases) |
+| `/admin/login` | operator sign-in (separate path + token audience) |
+| `/admin` | operator dashboard (tenants, verification, payouts) |
+| `/admin/analytics` | platform overview KPIs, deltas, charts |
+| `/admin/analytics/providers` | per-provider volume, quality, latency, channels |
+| `/admin/analytics/merchants` | top orgs, signup funnel, dormant, churn risk |
+| `/admin/analytics/failures` | ranked failure reasons with samples |
+| `/admin/ops` | stuck orders, unreconciled, negative balances, aging, webhooks |
+| `/admin/orgs/:orgId` | operator org detail (profile, members, verification) |
+| `/admin/payments` | orders/ledger/events/deliveries/metrics ops |
+| `/admin/payments/apps` | cross-org apps oversight (read-only) |
+| `/admin/payments/apps/:id` | single app detail — orders, ledger, withdrawals |
+| `/admin/payments/withdrawals` | payout recording (dispatch, mark paid/failed) |
 | `/admin/payments/providers` | configure payment provider credentials |
 | `/admin/kyc` | verification review queue (approve/reject, per-org live limits) |
+| `/merchant` | merchant dashboard (balance, apps, payouts, recent payments) |
 | `/merchant/apps` | merchant app list (org-scoped) + self-service app creation |
-| `/merchant/apps/:id` | app detail — rename, webhooks, labeled API keys, deliveries |
-| `/onboarding/create-org` | create an organization |
+| `/merchant/apps/:id` | app detail — payments, webhooks, API keys, withdrawals, deliveries |
+| `/merchant/payments|withdrawals|webhooks|api-keys|deliveries` | cross-app aggregate views |
+| `/merchant/analytics`, `/merchant/settlements` | resolve the org, then land on org analytics/settlements |
+| `/org/:orgId/analytics` | KPI overview, per-app comparison |
+| `/org/:orgId/analytics/methods|peak-hours|customers|failures` | mix, heatmap, repeat payers, reasons |
+| `/org/:orgId/settlements` | ledger statements (CSV/PDF export for owner/finance) |
+| `/onboarding/create-org` | create an organization (one per account) |
 | `/onboarding/kyc/:orgId` | verification submission (business name, TIN, ID doc) |
 | `/org/:orgId/members` | member roles & invites |
-| `/org/:orgId/settings` | org settings + verification status |
+| `/org/:orgId/settings` | tabbed settings (general, verification, limits, security, notifications, branding, payouts, danger) |
 
 Unverified orgs show a sandbox-mode banner (live keys/payments blocked).
 

@@ -15,12 +15,10 @@ import { toast } from "@/components/ui/sonner";
 import {
   fetchChurn, fetchDormant, fetchFunnel, fetchTopMerchants,
 } from "@/lib/analyticsApi";
-import { CsvButton, DateRangePicker, moneyText, presetRange, rateText } from "@/pages/analyticsCommon";
+import { CsvButton, DateRangePicker, moneyText, useFilterParams, rateText } from "@/pages/analyticsCommon";
 
 const AdminAnalyticsMerchants = () => {
-  const initial = presetRange("30d");
-  const [from, setFrom] = useState(initial.from);
-  const [to, setTo] = useState(initial.to);
+  const { from, to, setRange } = useFilterParams();
   const [sort, setSort] = useState("tx_count");
 
   const topQuery = useQuery({
@@ -70,7 +68,7 @@ const AdminAnalyticsMerchants = () => {
           <h2 className="text-2xl font-bold text-slate-900">Merchants</h2>
           <p className="mt-1 text-sm text-slate-500">Top tenants, signup funnel, dormant and churn risk</p>
         </div>
-        <DateRangePicker from={from} to={to} onChange={(f, t) => { setFrom(f); setTo(t); }} />
+        <DateRangePicker from={from} to={to} onChange={setRange} />
       </div>
 
       <Tabs defaultValue="top" className="mt-4">

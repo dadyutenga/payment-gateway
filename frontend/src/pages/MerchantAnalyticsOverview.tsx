@@ -11,14 +11,11 @@ import {
 import { listMyApps } from "@/lib/merchantApi";
 import { fetchMerchantApps, fetchMerchantOverview } from "@/lib/merchantAnalyticsApi";
 import { AppFilter, AnalyticsSubNav, EnvToggle, SandboxGuide } from "@/pages/merchantAnalyticsCommon";
-import { DateRangePicker, DeltaBadge, moneyText, presetRange, rateText } from "@/pages/analyticsCommon";
+import { DateRangePicker, DeltaBadge, moneyText, useFilterParams, rateText } from "@/pages/analyticsCommon";
 
 const MerchantAnalyticsOverview = () => {
   const { orgId = "" } = useParams();
-  const initial = presetRange("30d");
-  const [from, setFrom] = useState(initial.from);
-  const [to, setTo] = useState(initial.to);
-  const [env, setEnv] = useState<"live" | "sandbox">("live");
+  const { from, to, env, setRange, setEnv } = useFilterParams();
   const [appId, setAppId] = useState("");
 
   const appsQuery = useQuery({ queryKey: ["merchant", "my-apps"], queryFn: () => listMyApps(), staleTime: 30_000 });
@@ -68,7 +65,7 @@ const MerchantAnalyticsOverview = () => {
         <div className="flex flex-wrap items-center gap-2">
           <EnvToggle env={env} onChange={setEnv} />
           <AppFilter apps={appsQuery.data ?? []} value={appId} onChange={setAppId} />
-          <DateRangePicker from={from} to={to} onChange={(f, t) => { setFrom(f); setTo(t); }} />
+          <DateRangePicker from={from} to={to} onChange={setRange} />
         </div>
       </div>
 

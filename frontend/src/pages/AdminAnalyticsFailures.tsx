@@ -7,7 +7,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { fetchFailures } from "@/lib/analyticsApi";
-import { CsvButton, DateRangePicker, presetRange } from "@/pages/analyticsCommon";
+import { CsvButton, DateRangePicker, useFilterParams } from "@/pages/analyticsCommon";
 
 const FAILURE_HELP: Record<string, { en: string; sw: string }> = {
   expired: { en: "Buyer never completed payment before the order TTL.", sw: "Mnunuzi hakumaliza malipo kabla ya muda kuisha." },
@@ -19,9 +19,7 @@ const FAILURE_HELP: Record<string, { en: string; sw: string }> = {
 };
 
 const AdminAnalyticsFailures = () => {
-  const initial = presetRange("30d");
-  const [from, setFrom] = useState(initial.from);
-  const [to, setTo] = useState(initial.to);
+  const { from, to, setRange } = useFilterParams();
   const [expanded, setExpanded] = useState<string | null>(null);
 
   const failuresQuery = useQuery({
@@ -39,7 +37,7 @@ const AdminAnalyticsFailures = () => {
           <p className="mt-1 text-sm text-slate-500">Ranked normalized reasons · live payments only</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <DateRangePicker from={from} to={to} onChange={(f, t) => { setFrom(f); setTo(t); }} />
+          <DateRangePicker from={from} to={to} onChange={setRange} />
           <CsvButton report="failures" query={{ from, to }} />
         </div>
       </div>

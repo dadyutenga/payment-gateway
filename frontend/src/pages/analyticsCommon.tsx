@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { Download } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -74,6 +75,29 @@ export function CsvButton({ report, query }: { report: string; query?: Analytics
       <Download className="h-3.5 w-3.5 mr-1" /> {busy ? "Building..." : "CSV"}
     </Button>
   );
+}
+
+// useFilterParams syncs date range (+env for merchant pages) to the URL
+// so filtered views are shareable and survive refresh.
+export function useFilterParams(defaultPreset: Exclude<RangePreset, "custom"> = "30d") {
+  const [sp, setSp] = useSearchParams();
+  const initial = presetRange(defaultPreset);
+  const from = sp.get("from") || initial.from;
+  const to = sp.get("to") || initial.to;
+  const envRaw = sp.get("env");
+  const env = (envRaw === "sandbox" ? "sandbox" : "live") as "live" | "sandbox";
+  const update = (patch: Record<string, string>) => {
+    const next = new URLSearchParams(sp);
+    Object.entries(patch).forEach(([k, v]) => next.set(k, v));
+    setSp(next, { replace: true });
+  };
+  return {
+    from,
+    to,
+    env,
+    setRange: (f: string, t: string) => update({ from: f, to: t }),
+    setEnv: (e: "live" | "sandbox") => update({ env: e }),
+  };
 }
 
 export function DateRangePicker({

@@ -91,6 +91,87 @@ input → `OTHER`; empty → NULL (untouched).
 dev; set distinctly in production) · thresholds live with each endpoint
 (Block 2/4) and are stated in responses.
 
+## Endpoint reference
+
+All responses are `{data: ...}` with `timezone: "Africa/Dar_es_Salaam"`.
+Common params: `from`/`to` (YYYY-MM-DD, EAT day bounds, default trailing
+30d, max 366d), `granularity` (hour/day/week/month; hour capped to 7d),
+`provider`, `currency`, `org_id` (admin filter), `app_id` (must belong to
+the org), `page`/`per_page` (≤200). Bad input → `400 invalid_request`.
+
+### Admin (`/api/v1/admin/analytics/...`, aud=admin, 60/min per user)
+
+| Endpoint | Returns |
+|---|---|
+| `GET /overview` | TPV/revenue/tx/success/abandonment/median-p90 TTP/active merchants/signups + prev-period deltas + series |
+| `GET /providers` | Per-provider volume/success/failures/latency p50-p95/1h-24h signals/revenue/channels |
+| `GET /merchants/top?sort=` | Orgs by TPV/revenue with trend, success + refund rates, pagination |
+| `GET /merchants/signups` | Funnel series + totals + median step hours |
+| `GET /merchants/dormant?dormant_days=` | Verified orgs silent N days + reason + contact |
+| `GET /merchants/churn-risk?churn_drop_pct&churn_window_days=` | Drop-flagged orgs + reason + contact |
+| `GET /failures` | Ranked (code, provider) + affected orgs + sample order ids |
+| `GET /withdrawals` | Pending/approval queue/aging buckets/failed/avg payout hours |
+| `GET /webhooks` | Success/retry/p95 latency/stuck/offenders |
+| `GET /ops/stuck-orders?stuck_minutes=` | Pending/processing older than N min (cap 200) |
+| `GET /ops/unreconciled` | Paid-without-ledger + ledger-without-paid (cap 200) |
+| `GET /ops/negative-balances` | Sub-zero app balances |
+| `GET /export/:report?format=csv` | CSV for top-merchants/signups/dormant/churn-risk/failures/withdrawals/webhook-offenders/stuck-orders/unreconciled/negative-balances — **audited** |
+
+### Merchant (`/api/v1/orgs/:orgId/...`, aud=customer, org resolved
+server-side, 60/min per user)
+
+| Endpoint | Roles | Returns |
+|---|---|---|
+| `GET /analytics/overview` | all members | Revenue/gross/tx/success/abandon/TTP/avg-order + deltas + series |
+| `GET /analytics/methods` | all members | Channel mix |
+| `GET /analytics/peak-hours` | all members | EAT weekday×hour grid + best/worst labels |
+| `GET /analytics/customers` | all, developers masked | Repeat rate, new-vs-returning, masked top payers |
+| `GET /analytics/failures` | all members | Org failure breakdown |
+| `GET /analytics/apps` | all members | Per-app comparison |
+| `GET /settlements?format=json` | all members | Ledger statement blocks |
+| `GET /settlements?format=csv\|pdf` | owner/finance, 10/min, audited | File download (PDF needs `?currency=`) |
+
+`?environment=live|sandbox` (live default) on every merchant endpoint.
+Viewers cannot export (403); developers get aggregates with
+`payer_detail_hidden: true`.
+
+## Thresholds
+
+Dormant N days (default 30) · churn drop X% over trailing W days
+(defaults 50/14, prior window ≥5 txns to cut noise) · stuck orders N min
+(default 30) · webhook stuck N min (default 30) · withdrawal aging
+buckets <1h/1-6h/6-24h/1-3d/>3d. All overridable per request and echoed
+in responses; churn/dormant rows always state WHY.
+
+## Privacy rules
+
+- Raw payer phones live only in `payment_orders.buyer_phone` (required
+  for provider calls + search). Analytics keys everything by
+  `payer_hash` (HMAC-SHA256, `ANALYTICS_PAYER_SECRET`, TZ-normalized).
+- Masked display (`+255 7** *** 123`) is derived server-side at query
+  time; full numbers never appear in analytics JSON, rollups, CSVs, or
+  PDFs. Verified by grep: only `repository_merchant.go` reads
+  `buyer_phone`, straight into `mask()`.
+- No platform-wide number is ever exposed to customers (org scope
+  enforced in SQL + integration-tested per endpoint).
+- Exports carry merchant data → audited (`audit_log`,
+  `analytics.export` / `settlement-csv|pdf`).
+
+## Rollup design and rebuild
+
+Grain: `analytics_daily_app(day, org, app, env, provider, channel,
+currency)` counts+gross+TTP percentiles; `analytics_daily_app_money`
+fees/refunds per app+currency (separate grain — fees can never
+double-count); `analytics_hourly_app` counts. Worker refreshes
+yesterday+today every reconciliation tick (delete+insert per EAT day =
+idempotent). Dashboards read rollups for whole past days, live tables
+for edges/today, with live fallback for missing days (fresh deploys) —
+proven equal by `TestOverviewRollupLiveEquivalence`.
+Rebuild any range: `go run ./cmd/backfill-analytics -from YYYY-MM-DD
+-to YYYY-MM-DD [-payer-hash-backfill]`. Back up `app.payment_orders`
+first (`pg_dump -t app.payment_orders`); refresh writes only
+`analytics_*` tables.
+
 ## Performance (Block 6 proof, 2026-09-29, dev laptop, 1M orders)
 
 - Overview 30d: ~650–1000ms cold, ~0ms warm (60s TTL service cache).

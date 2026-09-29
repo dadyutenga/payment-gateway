@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -7,12 +7,10 @@ import {
   ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
 import { fetchOverview } from "@/lib/analyticsApi";
-import { CsvButton, DateRangePicker, DeltaBadge, moneyText, presetRange, rateText } from "@/pages/analyticsCommon";
+import { CsvButton, DateRangePicker, DeltaBadge, moneyText, useFilterParams, rateText } from "@/pages/analyticsCommon";
 
 const AdminAnalyticsOverview = () => {
-  const initial = presetRange("30d");
-  const [from, setFrom] = useState(initial.from);
-  const [to, setTo] = useState(initial.to);
+  const { from, to, setRange } = useFilterParams();
 
   const overviewQuery = useQuery({
     queryKey: ["admin", "analytics", "overview", from, to],
@@ -51,7 +49,7 @@ const AdminAnalyticsOverview = () => {
           <p className="mt-1 text-sm text-slate-500">Live payments only · timezone Africa/Dar_es_Salaam</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <DateRangePicker from={from} to={to} onChange={(f, t) => { setFrom(f); setTo(t); }} />
+          <DateRangePicker from={from} to={to} onChange={setRange} />
           <CsvButton report="top-merchants" query={{ from, to }} />
         </div>
       </div>

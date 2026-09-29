@@ -15,6 +15,7 @@ import {
   downloadSettlement, fetchSettlement, type SettlementData,
 } from "@/lib/merchantAnalyticsApi";
 import { AppFilter, AnalyticsSubNav, EnvToggle } from "@/pages/merchantAnalyticsCommon";
+import { useFilterParams } from "@/pages/analyticsCommon";
 
 function eatToday(): string {
   const fmt = new Intl.DateTimeFormat("en-CA", { timeZone: "Africa/Dar_es_Salaam", year: "numeric", month: "2-digit", day: "2-digit" });
@@ -46,7 +47,8 @@ const PERIODS = [
 
 const MerchantSettlements = () => {
   const { orgId = "" } = useParams();
-  const initial = PERIODS[0].get();
+  const urlFilters = useFilterParams();
+  const initial = { from: urlFilters.from, to: urlFilters.to };
   const [from, setFrom] = useState(initial.from);
   const [to, setTo] = useState(initial.to);
   const [env, setEnv] = useState<"live" | "sandbox">("live");
@@ -73,6 +75,7 @@ const MerchantSettlements = () => {
   const generate = (f: string, t: string) => {
     setFrom(f);
     setTo(t);
+    urlFilters.setRange(f, t);
     setApplied({ from: f, to: t });
   };
 
