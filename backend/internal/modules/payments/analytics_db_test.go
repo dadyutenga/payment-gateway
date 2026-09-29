@@ -77,9 +77,15 @@ func TestAnalyticsRollupParity(t *testing.T) {
 		if err != nil {
 			t.Fatalf("insert order %d: %v", i, err)
 		}
-		if _, err := pool.ExecEx(ctx, `INSERT INTO app.payment_status_history (payment_order_id, to_status, source, created_at) VALUES ($1::uuid, $2, 'create_order', $3)`,
-			nil, id, o.status, o.created); err != nil {
+		if _, err := pool.ExecEx(ctx, `INSERT INTO app.payment_status_history (payment_order_id, to_status, source, created_at) VALUES ($1::uuid, 'pending', 'create_order', $2)`,
+			nil, id, o.created); err != nil {
 			t.Fatalf("insert history %d: %v", i, err)
+		}
+		if o.status != "pending" && o.paidAfter == 0 {
+			if _, err := pool.ExecEx(ctx, `INSERT INTO app.payment_status_history (payment_order_id, from_status, to_status, source, created_at) VALUES ($1::uuid, 'pending', $2, 'webhook', $3)`,
+				nil, id, o.status, o.created.Add(time.Second)); err != nil {
+				t.Fatalf("insert final history %d: %v", i, err)
+			}
 		}
 		if o.paidAfter > 0 {
 			if _, err := pool.ExecEx(ctx, `INSERT INTO app.payment_status_history (payment_order_id, from_status, to_status, source, created_at) VALUES ($1::uuid, 'pending', 'paid', 'webhook', $2)`,
