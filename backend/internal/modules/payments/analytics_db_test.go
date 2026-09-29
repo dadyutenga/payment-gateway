@@ -68,12 +68,16 @@ func TestAnalyticsRollupParity(t *testing.T) {
 	var paidTZS string
 	for i, o := range orders {
 		var id string
+		var firstPaid any
+		if o.paidAfter > 0 {
+			firstPaid = o.created.Add(o.paidAfter)
+		}
 		err := pool.QueryRowEx(ctx, `
 			INSERT INTO app.payment_orders
-			  (app_id, provider, amount, currency, buyer_phone, status, environment, channel, failure_code, created_at, updated_at)
-			VALUES ($1::uuid, 'sandbox', $2::numeric, $3, '+255700000001', $4, $5, NULLIF($6, ''), NULLIF($7, ''), $8, $8)
+			  (app_id, provider, amount, currency, buyer_phone, status, environment, channel, failure_code, first_paid_at, created_at, updated_at)
+			VALUES ($1::uuid, 'sandbox', $2::numeric, $3, '+255700000001', $4, $5, NULLIF($6, ''), NULLIF($7, ''), $8, $9, $9)
 			RETURNING id::text`, nil,
-			appID, o.amount, o.currency, o.status, o.env, o.channel, o.failure, o.created).Scan(&id)
+			appID, o.amount, o.currency, o.status, o.env, o.channel, o.failure, firstPaid, o.created).Scan(&id)
 		if err != nil {
 			t.Fatalf("insert order %d: %v", i, err)
 		}
