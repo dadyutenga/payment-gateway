@@ -5,6 +5,12 @@ import AdminRoute from "@/components/AdminRoute";
 import MerchantRoute from "@/components/MerchantRoute";
 import AdminLayout from "@/pages/AdminLayout";
 import AdminDashboard from "@/pages/AdminDashboard";
+import AdminOrgDetail from "@/pages/AdminOrgDetail";
+import AdminAnalyticsOverview from "@/pages/AdminAnalyticsOverview";
+import AdminAnalyticsProviders from "@/pages/AdminAnalyticsProviders";
+import AdminAnalyticsMerchants from "@/pages/AdminAnalyticsMerchants";
+import AdminAnalyticsFailures from "@/pages/AdminAnalyticsFailures";
+import AdminOps from "@/pages/AdminOps";
 import CustomerLayout from "@/pages/CustomerLayout";
 import SignIn from "@/pages/SignIn";
 import AdminPayments from "@/pages/AdminPayments";
@@ -54,6 +60,12 @@ const App = () => (
             }
           >
             <Route index element={<AdminDashboard />} />
+            <Route path="orgs/:orgId" element={<AdminOrgDetail />} />
+            <Route path="analytics" element={<AdminAnalyticsOverview />} />
+            <Route path="analytics/providers" element={<AdminAnalyticsProviders />} />
+            <Route path="analytics/merchants" element={<AdminAnalyticsMerchants />} />
+            <Route path="analytics/failures" element={<AdminAnalyticsFailures />} />
+            <Route path="ops" element={<AdminOps />} />
             <Route path="payments" element={<AdminPayments />} />
             <Route path="payments/apps" element={<AdminPaymentApps />} />
             <Route path="payments/apps/:id" element={<AdminPaymentAppDetail />} />

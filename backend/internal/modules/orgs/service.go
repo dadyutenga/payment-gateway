@@ -244,6 +244,39 @@ func validPositiveDecimal(value string) bool {
 	return true
 }
 
+// AdminOrgDetail is the operator's single-org view (linked from
+// analytics merchant rows): profile, members, verification evidence and
+// history. No actor check — route-gated by RequireAdminAuth.
+type AdminOrgDetail struct {
+	Org       Organization `json:"org"`
+	Members   []OrgMember  `json:"members"`
+	KYC       *KYCSubmission `json:"kyc,omitempty"`
+	Attempts  []KYCAttempt `json:"attempts"`
+}
+
+func (s *Service) AdminOrgDetail(ctx context.Context, orgID string) (AdminOrgDetail, error) {
+	orgID = strings.TrimSpace(orgID)
+	org, err := s.repo.GetOrganization(ctx, orgID)
+	if err != nil {
+		return AdminOrgDetail{}, err
+	}
+	members, err := s.repo.ListMembers(ctx, orgID)
+	if err != nil {
+		return AdminOrgDetail{}, err
+	}
+	var kyc *KYCSubmission
+	if sub, found, err := s.repo.GetKYCSubmission(ctx, orgID); err != nil {
+		return AdminOrgDetail{}, err
+	} else if found {
+		kyc = &sub
+	}
+	attempts, err := s.repo.ListKYCAttempts(ctx, orgID)
+	if err != nil {
+		return AdminOrgDetail{}, err
+	}
+	return AdminOrgDetail{Org: org, Members: members, KYC: kyc, Attempts: attempts}, nil
+}
+
 // AdminGetKYCSubmission loads the evidence row with no actor check —
 // the RequireAdmin route gate replaces membership (document review).
 func (s *Service) AdminGetKYCSubmission(ctx context.Context, orgID string) (KYCSubmission, error) {

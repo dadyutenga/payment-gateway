@@ -662,6 +662,24 @@ func (h *Handler) PlatformStats(w http.ResponseWriter, r *http.Request) {
 	httputil.JSON(w, http.StatusOK, map[string]any{"data": stats})
 }
 
+// AdminOrgDetail serves GET /api/v1/admin/orgs/:id — the operator
+// single-org view linked from analytics rows.
+func (h *Handler) AdminOrgDetail(w http.ResponseWriter, r *http.Request) {
+	if _, _, ok := claimsIdentity(w, r); !ok {
+		return
+	}
+	detail, err := h.service.AdminOrgDetail(r.Context(), r.PathValue("orgID"))
+	if err != nil {
+		if errors.Is(err, ErrOrgNotFound) {
+			httputil.Error(w, http.StatusNotFound, "not_found", "Organization not found.", nil)
+			return
+		}
+		h.fail(w, http.StatusInternalServerError, "internal_error", "Unable to load organization.", err)
+		return
+	}
+	httputil.JSON(w, http.StatusOK, map[string]any{"data": detail})
+}
+
 func (h *Handler) ListKYCQueue(w http.ResponseWriter, r *http.Request) {
 	if _, _, ok := claimsIdentity(w, r); !ok {
 		return

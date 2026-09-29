@@ -310,6 +310,7 @@ func New(ctx context.Context) (*App, error) {
 
 	// ---- Admin: KYC review queue, decisions, per-org live limits ----
 	mux.Handle("GET /api/v1/admin/orgs/kyc-queue", middleware.Chain(http.HandlerFunc(orgHandler.ListKYCQueue), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))
+	mux.Handle("GET /api/v1/admin/orgs/{orgID}", middleware.Chain(http.HandlerFunc(orgHandler.AdminOrgDetail), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))
 	mux.Handle("GET /api/v1/admin/stats", middleware.Chain(http.HandlerFunc(orgHandler.PlatformStats), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))
 
 	// ---- Admin analytics (read-only; exports audited) ----

@@ -6,9 +6,15 @@ import { getAdminMe } from "@/lib/adminApi";
 
 const NAV_ITEMS = [
   { to: "/admin", label: "Home", end: true },
+  { to: "/admin/analytics", label: "Analytics" },
+  { to: "/admin/analytics/providers", label: "Provider stats" },
+  { to: "/admin/analytics/merchants", label: "Merchants" },
+  { to: "/admin/analytics/failures", label: "Failures" },
+  { to: "/admin/ops", label: "Ops" },
+  { to: "/admin/payments", label: "Payments" },
   { to: "/admin/payments/apps", label: "Apps" },
   { to: "/admin/payments/withdrawals", label: "Withdrawals" },
-  { to: "/admin/payments/providers", label: "Providers" },
+  { to: "/admin/payments/providers", label: "Pay providers" },
 ];
 
 const ADMIN_NAV_ITEMS = [
