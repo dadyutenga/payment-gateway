@@ -793,6 +793,7 @@ func (r *PostgresRepository) ApplyWebhookEvent(ctx context.Context, input ApplyW
 		SET status = $2,
 		    provider_status = $3,
 		    provider_transaction_id = COALESCE(NULLIF($4, ''), provider_transaction_id),
+		    first_paid_at = CASE WHEN $2 = 'paid' AND first_paid_at IS NULL THEN NOW() ELSE first_paid_at END,
 		    updated_at = NOW()
 		WHERE id = $1::uuid
 		RETURNING
@@ -3055,16 +3056,17 @@ func (r *PostgresRepository) refreshAnalyticsDay(ctx context.Context, day time.T
 
 	if _, err = tx.ExecEx(ctx, `
 		INSERT INTO app.analytics_daily_app_money
-		  (day, org_id, app_id, currency, fees, refunds, refund_total, updated_at)
+		  (day, org_id, app_id, currency, fees, refunds, refund_total, fee_reversals, updated_at)
 		SELECT $1::date, a.org_id, l.app_id, l.currency,
 		       COALESCE(SUM(l.amount) FILTER (WHERE l.entry_type = 'platform_fee_debit'), 0),
 		       COUNT(*) FILTER (WHERE l.entry_type = 'refund_debit'),
 		       COALESCE(SUM(l.amount) FILTER (WHERE l.entry_type = 'refund_debit'), 0),
+		       COALESCE(SUM(l.amount) FILTER (WHERE l.entry_type = 'refund_fee_reversal_credit'), 0),
 		       NOW()
 		FROM app.payment_ledger_entries l
 		JOIN app.payment_apps a ON a.id = l.app_id
 		WHERE l.created_at >= $2 AND l.created_at < $3
-		  AND l.entry_type IN ('platform_fee_debit', 'refund_debit')
+		  AND l.entry_type IN ('platform_fee_debit', 'refund_debit', 'refund_fee_reversal_credit')
 		GROUP BY a.org_id, l.app_id, l.currency
 	`, nil, dayDate, start, end); err != nil {
 		return fmt.Errorf("refresh money rollup: %w", err)

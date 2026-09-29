@@ -354,7 +354,8 @@ func (r *PostgresRepository) MerchantCustomers(ctx context.Context, p Params, en
 	}
 	topRows, err := r.db.QueryEx(ctx, fmt.Sprintf(`
 		SELECT MAX(o.buyer_phone), COUNT(*), o.currency,
-		       COALESCE(SUM(o.amount), 0)::text, MAX(o.created_at)
+		       COALESCE(SUM(o.amount), 0)::text,
+		       to_char(MAX(o.created_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
 		FROM app.payment_orders o %s WHERE %s
 		GROUP BY o.payer_hash, o.currency ORDER BY COUNT(*) DESC LIMIT 20`, join, where), nil, args...)
 	if err != nil {

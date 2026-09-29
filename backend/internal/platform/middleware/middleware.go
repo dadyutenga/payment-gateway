@@ -3,11 +3,15 @@ package middleware
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"lipago/internal/platform/auth"
@@ -169,6 +173,62 @@ type SpaceChecker interface {
 	CustomerEmailVerified(ctx context.Context, userID string) (bool, error)
 }
 
+// rateBucket is a minimal in-memory sliding-window limiter (per key).
+type rateBucket struct {
+	max    int
+	window time.Duration
+	mu     sync.Mutex
+	hits   map[string][]time.Time
+}
+
+func newRateBucket(max int, window time.Duration) *rateBucket {
+	return &rateBucket{max: max, window: window, hits: map[string][]time.Time{}}
+}
+
+func (l *rateBucket) allow(key string) bool {
+	if l == nil || l.max <= 0 {
+		return true
+	}
+	now := time.Now()
+	cutoff := now.Add(-l.window)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	kept := l.hits[key][:0]
+	for _, t := range l.hits[key] {
+		if t.After(cutoff) {
+			kept = append(kept, t)
+		}
+	}
+	if len(kept) >= l.max {
+		l.hits[key] = kept
+		return false
+	}
+	l.hits[key] = append(kept, now)
+	return true
+}
+
+// RateLimit caps requests per authenticated user (bearer subject), falling
+// back to remote IP for pre-auth routes. Analytics reads are cheap but
+// unbounded ranges are not — 60/min/user keeps dashboards snappy.
+func RateLimit(perMinute int) func(http.Handler) http.Handler {
+	bucket := newRateBucket(perMinute, time.Minute)
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			key := clientIPFromRequest(r)
+			if header := strings.TrimSpace(r.Header.Get("Authorization")); strings.HasPrefix(header, "Bearer ") {
+				if claims, err := parseBearerSubject(header); err == nil && claims != "" {
+					key = "user:" + claims
+				}
+			}
+			if !bucket.allow(key) {
+				httputil.Error(w, http.StatusTooManyRequests, "rate_limited", "Too many requests — slow down and retry.", nil)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // RequireCustomerAuth gates the customer space: customer-audience token +
 // row in app.users. With requireVerified, unverified emails get
 // 403 email_unverified (OTP/me endpoints use false so users can verify).
@@ -264,9 +324,41 @@ func RequireAdminAuth(verifier, otherSpace *auth.Verifier, checker SpaceChecker)
 	}
 }
 
-// verifiesInOtherSpace probes the other space's verifier (failure path
-// only) so cross-space tokens produce a clear invalid_audience error even
-// when the spaces use distinct signing keys.
+// parseBearerSubject extracts the JWT subject without verifying (rate
+// limiting only — auth decisions always verify the signature).
+func parseBearerSubject(header string) (string, error) {
+	token := strings.TrimSpace(strings.TrimPrefix(header, "Bearer "))
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return "", fmt.Errorf("bad token")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return "", err
+	}
+	var claims struct {
+		Subject string `json:"sub"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return "", err
+	}
+	return claims.Subject, nil
+}
+
+func clientIPFromRequest(r *http.Request) string {
+	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
+		if idx := strings.Index(forwarded, ","); idx >= 0 {
+			return strings.TrimSpace(forwarded[:idx])
+		}
+		return forwarded
+	}
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err != nil {
+		return strings.TrimSpace(r.RemoteAddr)
+	}
+	return host
+}
+
 func verifiesInOtherSpace(r *http.Request, otherSpace *auth.Verifier, token string) bool {
 	if otherSpace == nil || token == "" {
 		return false

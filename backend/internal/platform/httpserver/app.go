@@ -314,9 +314,11 @@ func New(ctx context.Context) (*App, error) {
 	mux.Handle("GET /api/v1/admin/orgs/{orgID}", middleware.Chain(http.HandlerFunc(orgHandler.AdminOrgDetail), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))
 	mux.Handle("GET /api/v1/admin/stats", middleware.Chain(http.HandlerFunc(orgHandler.PlatformStats), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))
 
-	// ---- Admin analytics (read-only; exports audited) ----
+	// ---- Admin analytics (read-only; exports audited; per-user rate limit) ----
 	adminAnalytics := func(h http.HandlerFunc) http.Handler {
-		return middleware.Chain(h, middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService))
+		return middleware.Chain(h,
+			middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService),
+			middleware.RateLimit(60))
 	}
 	mux.Handle("GET /api/v1/admin/analytics/overview", adminAnalytics(analyticsHandler.Overview))
 	mux.Handle("GET /api/v1/admin/analytics/providers", adminAnalytics(analyticsHandler.Providers))
@@ -334,7 +336,9 @@ func New(ctx context.Context) (*App, error) {
 
 	// ---- Merchant analytics (customer space, org-scoped server-side) ----
 	merchantAnalytics := func(h http.HandlerFunc) http.Handler {
-		return middleware.Chain(h, middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified))
+		return middleware.Chain(h,
+			middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified),
+			middleware.RateLimit(60))
 	}
 	mux.Handle("GET /api/v1/orgs/{orgID}/analytics/overview", merchantAnalytics(analyticsHandler.MerchantOverview))
 	mux.Handle("GET /api/v1/orgs/{orgID}/analytics/methods", merchantAnalytics(analyticsHandler.MerchantMethods))

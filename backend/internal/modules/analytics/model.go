@@ -114,6 +114,9 @@ func ParseParams(r *http.Request, allowOrgFilter bool) (Params, error) {
 	default:
 		return Params{}, errors.New("granularity must be hour, day, week, or month")
 	}
+	if granularity == GranularityHour && to.Sub(from) > 7*24*time.Hour {
+		return Params{}, errors.New("hour granularity is capped to a 7-day range (use day for longer ranges)")
+	}
 	page := parsePositiveInt(q.Get("page"), 1)
 	perPage := parsePositiveInt(q.Get("per_page"), DefaultLimit)
 	if perPage > MaxLimit {

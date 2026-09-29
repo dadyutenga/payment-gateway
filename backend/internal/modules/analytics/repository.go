@@ -3,9 +3,11 @@ package analytics
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx"
@@ -122,116 +124,564 @@ func pctChange(curr, prev float64) *float64 {
 	return &v
 }
 
+// splitRange divides [from, to) into whole EAT days (rollup-backed) and
+// leftover live edges. Rollup rows cover whole days only — partial edges
+// always read live tables so dashboards never over-count.
+func splitRange(from, to time.Time) (wholeFrom, wholeTo time.Time, hasWhole bool, headFrom, headTo, tailFrom, tailTo time.Time, hasHead, hasTail bool) {
+	loc, err := time.LoadLocation(Timezone)
+	if err != nil {
+		loc = time.UTC
+	}
+	todayStart := time.Now().In(loc)
+	todayStart = time.Date(todayStart.Year(), todayStart.Month(), todayStart.Day(), 0, 0, 0, 0, loc)
+	// Whole days fully inside [from, min(to, todayStart)).
+	end := to
+	if end.After(todayStart) {
+		end = todayStart
+	}
+	fy, fm, fd := from.In(loc).Date()
+	firstDay := time.Date(fy, fm, fd, 0, 0, 0, 0, loc)
+	if firstDay.Before(from) {
+		firstDay = firstDay.Add(24 * time.Hour)
+	}
+	ey, em, ed := end.In(loc).Date()
+	lastDay := time.Date(ey, em, ed, 0, 0, 0, 0, loc)
+	if !lastDay.After(firstDay) && !lastDay.Equal(firstDay) {
+		lastDay = firstDay
+	}
+	// Whole days are [firstDay, lastDay) where lastDay is a day boundary <= end.
+	// Recompute cleanly: iterate day starts d with d >= from-day-ceil and d+24h <= end.
+	wholeFrom, wholeTo = firstDay, firstDay
+	for d := firstDay; !d.After(end.Add(-time.Second)); d = d.Add(24 * time.Hour) {
+		if (d.After(from) || d.Equal(from)) && !d.Add(24*time.Hour).After(end) {
+			if !hasWhole {
+				wholeFrom = d
+				hasWhole = true
+			}
+			wholeTo = d.Add(24 * time.Hour)
+		}
+	}
+	if from.Before(wholeFrom) && hasWhole {
+		headFrom, headTo, hasHead = from, wholeFrom, true
+	} else if !hasWhole && from.Before(end) {
+		headFrom, headTo, hasHead = from, end, true
+	}
+	if hasWhole && wholeTo.Before(to) {
+		tailFrom, tailTo, hasTail = wholeTo, to, true
+	} else if !hasWhole && !hasHead && from.Before(to) {
+		tailFrom, tailTo, hasTail = from, to, true
+	}
+	return wholeFrom, wholeTo, hasWhole, headFrom, headTo, tailFrom, tailTo, hasHead, hasTail
+}
+
 // successRateSQL renders paid/(paid+failed+cancelled+reversed+expired).
 const successRateSQL = `CASE WHEN (COUNT(*) FILTER (WHERE o.status = 'paid') + COUNT(*) FILTER (WHERE o.status IN ('failed','cancelled','reversed','expired'))) = 0 THEN NULL
 	ELSE COUNT(*) FILTER (WHERE o.status = 'paid')::float / (COUNT(*) FILTER (WHERE o.status = 'paid') + COUNT(*) FILTER (WHERE o.status IN ('failed','cancelled','reversed','expired'))) END`
 
 // Overview assembles KPIs, previous-period deltas, and the time series.
+// Whole EAT days read pre-aggregated rollups; partial edges and today
+// read live tables (splitRange); TTP percentiles always read live
+// first_paid_at values (exact). Independent pieces run concurrently.
 func (r *PostgresRepository) Overview(ctx context.Context, p Params) (Overview, error) {
 	out := Overview{Timezone: Timezone, From: p.From, To: p.To}
-
-	type kpis struct {
-		tx                                                                 int64
-		paid, failed, expired                                               int64
-		success, abandon                                                    *float64
-		medianTTP, p90TTP                                                   *float64
-		active                                                              int64
-		signups, orgs                                                       int64
-		tpv, revenue                                                        map[string]string
-	}
-	query := func(from, to time.Time) (kpis, error) {
-		var k kpis
-		k.tpv, k.revenue = map[string]string{}, map[string]string{}
-		b := &condBuilder{}
-		b.orderRange(from, to)
-		b.orderDims(p.Provider, "")
-		joinApps := b.orgScope(p.OrgIDs, p.AppID, "a.org_id")
-		if p.AppID != "" {
-			b.conds = append(b.conds, "o.app_id = "+b.ph(p.AppID)+"::uuid")
-		}
-		join := ""
-		if joinApps {
-			join = "JOIN app.payment_apps a ON a.id = o.app_id"
-		}
-		row := r.db.QueryRowEx(ctx, fmt.Sprintf(`
-			SELECT COUNT(*),
-			       COUNT(*) FILTER (WHERE o.status = 'paid'),
-			       COUNT(*) FILTER (WHERE o.status IN ('failed','cancelled','reversed')),
-			       COUNT(*) FILTER (WHERE o.status = 'expired'),
-			       %s,
-			       COUNT(*) FILTER (WHERE o.status = 'expired')::float / NULLIF(COUNT(*), 0),
-			       percentile_cont(0.5) WITHIN GROUP (ORDER BY fp.ttp_s),
-			       percentile_cont(0.9) WITHIN GROUP (ORDER BY fp.ttp_s),
-			       COUNT(DISTINCT CASE WHEN o.status = 'paid' THEN a2.org_id END)
-			FROM app.payment_orders o
-			%s
-			LEFT JOIN (
-				SELECT h.payment_order_id AS oid, EXTRACT(EPOCH FROM (MIN(h.created_at) - o2.created_at)) AS ttp_s
-				FROM app.payment_status_history h
-				JOIN app.payment_orders o2 ON o2.id = h.payment_order_id
-				WHERE h.to_status = 'paid' AND o2.created_at >= $%d AND o2.created_at < $%d
-				GROUP BY h.payment_order_id, o2.created_at
-			) fp ON fp.oid = o.id
-			LEFT JOIN app.payment_apps a2 ON a2.id = o.app_id
-			WHERE %s`, successRateSQL, join, len(b.args)+1, len(b.args)+2, b.where()), nil, append(b.args, from, to)...)
-		// NOTE: the fp subquery reuses the range bounds appended last.
-		if err := row.Scan(&k.tx, &k.paid, &k.failed, &k.expired, &k.success, &k.abandon, &k.medianTTP, &k.p90TTP, &k.active); err != nil {
-			return k, fmt.Errorf("overview kpis: %w", err)
-		}
-		// Per-currency money: gross from orders, net fees from the ledger.
-		moneyArgs := append([]any{}, b.args...)
-		money, err := r.queryMoneyByCurrency(ctx, fmt.Sprintf(`
-			SELECT o.currency, COALESCE(SUM(o.amount) FILTER (WHERE o.status = 'paid'), 0)::text
-			FROM app.payment_orders o %s WHERE %s GROUP BY o.currency`, join, b.where()), moneyArgs)
-		if err != nil {
-			return k, err
-		}
-		k.tpv = money
-		rev, err := r.ledgerRevenueByCurrency(ctx, from, to, p)
-		if err != nil {
-			return k, err
-		}
-		k.revenue = rev
-		if err := r.db.QueryRowEx(ctx, `SELECT COUNT(*) FROM app.users WHERE created_at >= $1 AND created_at < $2`, nil, from, to).Scan(&k.signups); err != nil {
-			return k, fmt.Errorf("overview signups: %w", err)
-		}
-		if err := r.db.QueryRowEx(ctx, `SELECT COUNT(*) FROM app.organizations WHERE created_at >= $1 AND created_at < $2`, nil, from, to).Scan(&k.orgs); err != nil {
-			return k, fmt.Errorf("overview orgs: %w", err)
-		}
-		return k, nil
-	}
-
-	curr, err := query(p.From, p.To)
-	if err != nil {
-		return out, err
-	}
 	prevFrom, prevTo := p.PreviousPeriod()
-	prev, err := query(prevFrom, prevTo)
-	if err != nil {
-		return out, err
-	}
-	out.TxCount, out.SuccessRate, out.AbandonmentRate = curr.tx, curr.success, curr.abandon
-	out.MedianTTPS, out.P90TTPS = curr.medianTTP, curr.p90TTP
-	out.ActiveMerchants, out.NewSignups, out.NewOrgs = curr.active, curr.signups, curr.orgs
-	out.TPV, out.Revenue = curr.tpv, curr.revenue
-	sumMoney := func(m map[string]string) float64 {
-		var total float64
-		for _, v := range m {
-			var f float64
-			fmt.Sscanf(v, "%f", &f)
-			total += f
+	// Independent pieces run concurrently (pool is goroutine-safe);
+	// first error wins.
+	var currAgg, prevAgg periodSums
+	var currMed, currP90 *float64
+	var currSignups, currOrgs int64
+	var currSeries []OverviewPoint
+	var pipelineErr error
+	var mu sync.Mutex
+	setErr := func(err error) {
+		if err == nil {
+			return
 		}
-		return total
+		mu.Lock()
+		if pipelineErr == nil {
+			pipelineErr = err
+		}
+		mu.Unlock()
 	}
+	var wg sync.WaitGroup
+	run := func(fn func()) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			fn()
+		}()
+	}
+	run(func() { a, err := r.periodAggRange(ctx, p, p.From, p.To); mu.Lock(); currAgg = a; mu.Unlock(); setErr(err) })
+	run(func() { a, err := r.periodAggRange(ctx, p, prevFrom, prevTo); mu.Lock(); prevAgg = a; mu.Unlock(); setErr(err) })
+	run(func() { m, t, err := r.periodTTP(ctx, p, p.From, p.To); mu.Lock(); currMed, currP90 = m, t; mu.Unlock(); setErr(err) })
+	run(func() {
+		su, og, err := r.periodSignups(ctx, p.From, p.To)
+		mu.Lock()
+		currSignups, currOrgs = su, og
+		mu.Unlock()
+		setErr(err)
+	})
+	run(func() { s, err := r.periodSeries(ctx, p, p.From, p.To); mu.Lock(); currSeries = s; mu.Unlock(); setErr(err) })
+	wg.Wait()
+	if pipelineErr != nil {
+		return out, pipelineErr
+	}
+	if currAgg.gross == nil {
+		currAgg.gross = map[string]string{}
+	}
+	if currAgg.revenue == nil {
+		currAgg.revenue = map[string]string{}
+	}
+	out.TxCount, out.SuccessRate, out.AbandonmentRate =
+		currAgg.tx, successFromSums(currAgg.paid, currAgg.failed+currAgg.expired), abandonFromSums(currAgg.expired, currAgg.tx)
+	out.MedianTTPS, out.P90TTPS = currMed, currP90
+	out.ActiveMerchants, out.NewSignups, out.NewOrgs = int64(len(currAgg.orgs)), currSignups, currOrgs
+	out.TPV, out.Revenue = currAgg.gross, currAgg.revenue
+	prevAgg.gross = nonNilMap(prevAgg.gross)
+	prevAgg.revenue = nonNilMap(prevAgg.revenue)
 	out.Delta = OverviewDelta{
-		TPVpct:     pctChange(sumMoney(curr.tpv), sumMoney(prev.tpv)),
-		RevenuePct: pctChange(sumMoney(curr.revenue), sumMoney(prev.revenue)),
-		TxPct:      pctChange(float64(curr.tx), float64(prev.tx)),
+		TPVpct:     pctChange(sumMoney(currAgg.gross), sumMoney(prevAgg.gross)),
+		RevenuePct: pctChange(sumMoney(currAgg.revenue), sumMoney(prevAgg.revenue)),
+		TxPct:      pctChange(float64(currAgg.tx), float64(prevAgg.tx)),
 	}
+	out.Series = currSeries
+	if out.Series == nil {
+		out.Series = []OverviewPoint{}
+	}
+	return out, nil
+}
 
-	// Time series (live orders, EAT buckets).
+func nonNilMap(m map[string]string) map[string]string {
+	if m == nil {
+		return map[string]string{}
+	}
+	return m
+}
+
+// periodSums are exact additive aggregates; rates derive from them so
+// rollup and live chunks merge without rounding drift.
+type periodSums struct {
+	tx, paid, failed, expired int64
+	gross                     map[string]string
+	revenue                   map[string]string
+	orgs                      map[string]bool
+}
+
+type periodAgg struct {
+	sums              periodSums
+	medianTTP, p90TTP *float64
+	signups, orgs     int64
+	series            []OverviewPoint
+}
+
+func successFromSums(paid, bad int64) *float64 {
+	if paid+bad == 0 {
+		return nil
+	}
+	return floatPtr(float64(paid) / float64(paid+bad))
+}
+
+func abandonFromSums(expired, tx int64) *float64 {
+	if tx == 0 {
+		return nil
+	}
+	return floatPtr(float64(expired) / float64(tx))
+}
+
+func addMoneyMap(dst, src map[string]string) {
+	for c, v := range src {
+		var a, b float64
+		fmt.Sscanf(dst[c], "%f", &a)
+		fmt.Sscanf(v, "%f", &b)
+		dst[c] = fmt.Sprintf("%.2f", a+b)
+	}
+}
+
+func sumMoney(m map[string]string) float64 {
+	var total float64
+	for _, v := range m {
+		var f float64
+		fmt.Sscanf(v, "%f", &f)
+		total += f
+	}
+	return total
+}
+
+// liveSums runs the exact live-table aggregates for a (usually small)
+// range: counts, per-currency gross, net revenue, active org set.
+func (r *PostgresRepository) liveSums(ctx context.Context, p Params, from, to time.Time) (periodSums, error) {
+	agg := periodSums{gross: map[string]string{}, revenue: map[string]string{}, orgs: map[string]bool{}}
+	b := &condBuilder{}
+	b.orderRange(from, to)
+	b.orderDims(p.Provider, "")
+	joinApps := b.orgScope(p.OrgIDs, p.AppID, "a.org_id")
+	if p.AppID != "" {
+		b.conds = append(b.conds, "o.app_id = "+b.ph(p.AppID)+"::uuid")
+	}
+	join := ""
+	if joinApps {
+		join = "JOIN app.payment_apps a ON a.id = o.app_id"
+	}
+	row := r.db.QueryRowEx(ctx, fmt.Sprintf(`
+		SELECT COUNT(*),
+		       COUNT(*) FILTER (WHERE o.status = 'paid'),
+		       COUNT(*) FILTER (WHERE o.status IN ('failed','cancelled','reversed','expired')),
+		       COUNT(*) FILTER (WHERE o.status = 'expired')
+		FROM app.payment_orders o %s WHERE %s`, join, b.where()), nil, b.args...)
+	if err := row.Scan(&agg.tx, &agg.paid, &agg.failed, &agg.expired); err != nil {
+		return agg, fmt.Errorf("live sums: %w", err)
+	}
+	gross, err := r.queryMoneyByCurrency(ctx, fmt.Sprintf(`
+		SELECT o.currency, COALESCE(SUM(o.amount) FILTER (WHERE o.status = 'paid'), 0)::text
+		FROM app.payment_orders o %s WHERE %s GROUP BY o.currency`, join, b.where()), append([]any{}, b.args...))
+	if err != nil {
+		return agg, err
+	}
+	agg.gross = gross
+	agg.revenue, err = r.ledgerRevenueByCurrency(ctx, from, to, p)
+	if err != nil {
+		return agg, err
+	}
+	orgRows, err := r.db.QueryEx(ctx, fmt.Sprintf(`
+		SELECT DISTINCT a.org_id::text FROM app.payment_orders o
+		JOIN app.payment_apps a ON a.id = o.app_id
+		WHERE %s AND o.status = 'paid'`, b.where()), nil, b.args...)
+	if err != nil {
+		return agg, fmt.Errorf("live active orgs: %w", err)
+	}
+	defer orgRows.Close()
+	for orgRows.Next() {
+		var orgID string
+		if err := orgRows.Scan(&orgID); err != nil {
+			return agg, fmt.Errorf("scan live active orgs: %w", err)
+		}
+		agg.orgs[orgID] = true
+	}
+	if err := orgRows.Err(); err != nil {
+		return agg, fmt.Errorf("iterate live active orgs: %w", err)
+	}
+	return agg, nil
+}
+
+// periodTTP runs the single exact TTP percentile query over a range
+// (first_paid_at — no history join).
+func (r *PostgresRepository) periodTTP(ctx context.Context, p Params, from, to time.Time) (*float64, *float64, error) {
+	b := &condBuilder{}
+	b.orderRange(from, to)
+	b.orderDims(p.Provider, "")
+	joinApps := b.orgScope(p.OrgIDs, p.AppID, "a.org_id")
+	if p.AppID != "" {
+		b.conds = append(b.conds, "o.app_id = "+b.ph(p.AppID)+"::uuid")
+	}
+	join := ""
+	if joinApps {
+		join = "JOIN app.payment_apps a ON a.id = o.app_id"
+	}
+	var median, p90 *float64
+	err := r.db.QueryRowEx(ctx, fmt.Sprintf(`
+		SELECT percentile_cont(0.5) WITHIN GROUP (
+		         ORDER BY EXTRACT(EPOCH FROM (o.first_paid_at - o.created_at))
+		       ) FILTER (WHERE o.status = 'paid' AND o.first_paid_at IS NOT NULL),
+		       percentile_cont(0.9) WITHIN GROUP (
+		         ORDER BY EXTRACT(EPOCH FROM (o.first_paid_at - o.created_at))
+		       ) FILTER (WHERE o.status = 'paid' AND o.first_paid_at IS NOT NULL)
+		FROM app.payment_orders o %s WHERE %s`, join, b.where()), nil, b.args...).Scan(&median, &p90)
+	if err != nil {
+		return nil, nil, fmt.Errorf("period ttp: %w", err)
+	}
+	return median, p90, nil
+}
+
+// periodSignups counts new users and orgs in a window.
+func (r *PostgresRepository) periodSignups(ctx context.Context, from, to time.Time) (int64, int64, error) {
+	var su, og int64
+	if err := r.db.QueryRowEx(ctx, `SELECT COUNT(*) FROM app.users WHERE created_at >= $1 AND created_at < $2`, nil, from, to).Scan(&su); err != nil {
+		return 0, 0, fmt.Errorf("overview signups: %w", err)
+	}
+	if err := r.db.QueryRowEx(ctx, `SELECT COUNT(*) FROM app.organizations WHERE created_at >= $1 AND created_at < $2`, nil, from, to).Scan(&og); err != nil {
+		return 0, 0, fmt.Errorf("overview orgs: %w", err)
+	}
+	return su, og, nil
+}
+
+// dateList restricts a DATE column to an explicit day list (pgx v3 cannot
+// bind a text slice as a date array, so placeholders are inlined).
+func dateList(b *condBuilder, col string, days []string) {
+	phs := make([]string, 0, len(days))
+	for _, d := range days {
+		phs = append(phs, b.ph(d)+"::date")
+	}
+	b.conds = append(b.conds, col+" IN ("+strings.Join(phs, ",")+")")
+}
+
+// rollupCoverage returns which EAT days in [dayFrom, dayTo) have daily
+// rows FOR THE CURRENT SCOPE (dims included). A day present only for
+// other orgs still falls back to live reads — otherwise scoped queries
+// would silently under-count on fresh/partial rollups.
+func (r *PostgresRepository) rollupCoverage(ctx context.Context, p Params, dayFrom, dayTo time.Time) (map[string]bool, error) {
+	present := map[string]bool{}
+	b := &condBuilder{}
+	b.conds = append(b.conds, "d.day >= "+b.ph(dayFrom.Format("2006-01-02"))+"::date")
+	b.conds = append(b.conds, "d.day < "+b.ph(dayTo.Format("2006-01-02"))+"::date")
+	rollupDimConds(b, p, "d")
+	rows, err := r.db.QueryEx(ctx, fmt.Sprintf(`
+		SELECT DISTINCT d.day::text FROM app.analytics_daily_app d WHERE %s`, b.where()), nil, b.args...)
+	if err != nil {
+		return present, fmt.Errorf("rollup coverage: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var day string
+		if err := rows.Scan(&day); err != nil {
+			return present, fmt.Errorf("scan rollup coverage: %w", err)
+		}
+		present[day] = true
+	}
+	return present, rows.Err()
+}
+
+// rollupDimConds filters rollup rows (daily grain columns).
+func rollupDimConds(b *condBuilder, p Params, alias string) {
+	b.conds = append(b.conds, alias+".environment = 'live'")
+	if p.Provider != "" {
+		b.conds = append(b.conds, alias+".provider = "+b.ph(p.Provider))
+	}
+	if len(p.OrgIDs) == 1 {
+		b.conds = append(b.conds, alias+".org_id = "+b.ph(p.OrgIDs[0])+"::uuid")
+	} else if len(p.OrgIDs) > 1 {
+		b.conds = append(b.conds, alias+".org_id = ANY("+b.ph(p.OrgIDs)+"::uuid[])")
+	}
+	if p.AppID != "" {
+		b.conds = append(b.conds, alias+".app_id = "+b.ph(p.AppID)+"::uuid")
+	}
+}
+
+// rollupSums aggregates whole EAT days (present ones only) from the daily
+// grain: counts, per-currency gross, net revenue, active orgs.
+func (r *PostgresRepository) rollupSums(ctx context.Context, p Params, dayFrom, dayTo time.Time, present map[string]bool) (periodSums, error) {
+	agg := periodSums{gross: map[string]string{}, revenue: map[string]string{}, orgs: map[string]bool{}}
+	days := []string{}
+	for d := dayFrom; d.Before(dayTo); d = d.Add(24 * time.Hour) {
+		if present[d.Format("2006-01-02")] {
+			days = append(days, d.Format("2006-01-02"))
+		}
+	}
+	if len(days) == 0 {
+		return agg, nil
+	}
+	b := &condBuilder{}
+	dateList(b, "d.day", days)
+	rollupDimConds(b, p, "d")
+	var tx, paid, failed, expired int64
+	if err := r.db.QueryRowEx(ctx, fmt.Sprintf(`
+		SELECT COALESCE(SUM(d.created), 0), COALESCE(SUM(d.succeeded), 0),
+		       COALESCE(SUM(d.failed), 0), COALESCE(SUM(d.expired), 0)
+		FROM app.analytics_daily_app d WHERE %s`, b.where()), nil, b.args...).Scan(&tx, &paid, &failed, &expired); err != nil {
+		return agg, fmt.Errorf("rollup sums: %w", err)
+	}
+	agg.tx, agg.paid, agg.failed, agg.expired = tx, paid, failed, expired
+	mb := &condBuilder{}
+	dateList(mb, "d.day", days)
+	rollupDimConds(mb, p, "d")
+	gross, err := r.queryMoneyByCurrency(ctx, fmt.Sprintf(`
+		SELECT d.currency, COALESCE(SUM(d.gross), 0)::text
+		FROM app.analytics_daily_app d WHERE %s GROUP BY d.currency`, mb.where()), append([]any{}, mb.args...))
+	if err != nil {
+		return agg, err
+	}
+	agg.gross = gross
+	rb := &condBuilder{}
+	dateList(rb, "m.day", days)
+	if len(p.OrgIDs) == 1 {
+		rb.conds = append(rb.conds, "m.org_id = "+rb.ph(p.OrgIDs[0])+"::uuid")
+	} else if len(p.OrgIDs) > 1 {
+		rb.conds = append(rb.conds, "m.org_id = ANY("+rb.ph(p.OrgIDs)+"::uuid[])")
+	}
+	if p.AppID != "" {
+		rb.conds = append(rb.conds, "m.app_id = "+rb.ph(p.AppID)+"::uuid")
+	}
+	revRows, err := r.db.QueryEx(ctx, fmt.Sprintf(`
+		SELECT m.currency,
+		       (COALESCE(SUM(m.fees), 0) - COALESCE(SUM(m.fee_reversals), 0))::text
+		FROM app.analytics_daily_app_money m WHERE %s GROUP BY m.currency`, rb.where()), nil, rb.args...)
+	if err != nil {
+		return agg, fmt.Errorf("rollup revenue: %w", err)
+	}
+	for revRows.Next() {
+		var currency, net string
+		if err := revRows.Scan(&currency, &net); err != nil {
+			revRows.Close()
+			return agg, fmt.Errorf("scan rollup revenue: %w", err)
+		}
+		agg.revenue[currency] = net
+	}
+	revRows.Close()
+	if err := revRows.Err(); err != nil {
+		return agg, fmt.Errorf("iterate rollup revenue: %w", err)
+	}
+	orgRows, err := r.db.QueryEx(ctx, fmt.Sprintf(`
+		SELECT DISTINCT d.org_id::text FROM app.analytics_daily_app d WHERE %s AND d.succeeded > 0`, b.where()), nil, b.args...)
+	if err != nil {
+		return agg, fmt.Errorf("rollup active orgs: %w", err)
+	}
+	defer orgRows.Close()
+	for orgRows.Next() {
+		var orgID string
+		if err := orgRows.Scan(&orgID); err != nil {
+			return agg, fmt.Errorf("scan rollup active orgs: %w", err)
+		}
+		agg.orgs[orgID] = true
+	}
+	if err := orgRows.Err(); err != nil {
+		return agg, fmt.Errorf("iterate rollup active orgs: %w", err)
+	}
+	return agg, nil
+}
+
+// periodAggRange merges rollup whole-days (with live fallback for missing
+// days) and live edges for one window.
+func (r *PostgresRepository) periodAggRange(ctx context.Context, p Params, from, to time.Time) (periodSums, error) {
+	agg := periodSums{gross: map[string]string{}, revenue: map[string]string{}, orgs: map[string]bool{}}
+	wf, wt, hasWhole, hf, ht, tf, tt, hasHead, hasTail := splitRange(from, to)
+	merge := func(other periodSums) {
+		agg.tx += other.tx
+		agg.paid += other.paid
+		agg.failed += other.failed
+		agg.expired += other.expired
+		addMoneyMap(agg.gross, other.gross)
+		addMoneyMap(agg.revenue, other.revenue)
+		for o := range other.orgs {
+			agg.orgs[o] = true
+		}
+	}
+	if hasWhole {
+		present, err := r.rollupCoverage(ctx, p, wf, wt)
+		if err != nil {
+			return agg, err
+		}
+		for d := wf; d.Before(wt); d = d.Add(24 * time.Hour) {
+			if present[d.Format("2006-01-02")] {
+				continue
+			}
+			live, err := r.liveSums(ctx, p, d, d.Add(24*time.Hour))
+			if err != nil {
+				return agg, err
+			}
+			merge(live)
+		}
+		rolled, err := r.rollupSums(ctx, p, wf, wt, present)
+		if err != nil {
+			return agg, err
+		}
+		merge(rolled)
+	}
+	for _, edge := range []struct {
+		from, to time.Time
+		has      bool
+	}{{hf, ht, hasHead}, {tf, tt, hasTail}} {
+		if !edge.has {
+			continue
+		}
+		live, err := r.liveSums(ctx, p, edge.from, edge.to)
+		if err != nil {
+			return agg, err
+		}
+		merge(live)
+	}
+	return agg, nil
+}
+
+// eatBucketForDay maps an EAT date to the series bucket label.
+func eatBucketForDay(day time.Time, granularity string) string {
+	loc, err := time.LoadLocation(Timezone)
+	if err != nil {
+		loc = time.UTC
+	}
+	day = day.In(loc)
+	switch granularity {
+	case GranularityWeek:
+		monday := day.AddDate(0, 0, -(int(day.Weekday())+6)%7)
+		return monday.Format("2006-01-02")
+	case GranularityMonth:
+		return day.Format("2006-01")
+	default:
+		return day.Format("2006-01-02")
+	}
+}
+
+// rollupSeriesDayRows reads daily grains for whole days (present only).
+// dayGrain carries raw additive sums so merged rates stay exact.
+type dayGrain struct {
+	tx, paid, bad int64
+	gross         MoneyByCurrency
+}
+
+// rollupDayGrains reads daily grains for whole days (present only).
+func (r *PostgresRepository) rollupDayGrains(ctx context.Context, p Params, dayFrom, dayTo time.Time, present map[string]bool) (map[string]*dayGrain, error) {
+	out := map[string]*dayGrain{}
+	days := []string{}
+	for d := dayFrom; d.Before(dayTo); d = d.Add(24 * time.Hour) {
+		if present[d.Format("2006-01-02")] {
+			days = append(days, d.Format("2006-01-02"))
+		}
+	}
+	if len(days) == 0 {
+		return out, nil
+	}
+	b := &condBuilder{}
+	dateList(b, "d.day", days)
+	rollupDimConds(b, p, "d")
+	rows, err := r.db.QueryEx(ctx, fmt.Sprintf(`
+		SELECT d.day::text, COALESCE(SUM(d.created), 0), COALESCE(SUM(d.succeeded), 0),
+		       COALESCE(SUM(d.failed), 0), COALESCE(SUM(d.expired), 0)
+		FROM app.analytics_daily_app d WHERE %s GROUP BY 1`, b.where()), nil, b.args...)
+	if err != nil {
+		return out, fmt.Errorf("rollup series: %w", err)
+	}
+	for rows.Next() {
+		var day string
+		g := &dayGrain{gross: MoneyByCurrency{}}
+		var expired int64
+		if err := rows.Scan(&day, &g.tx, &g.paid, &g.bad, &expired); err != nil {
+			rows.Close()
+			return out, fmt.Errorf("scan rollup series: %w", err)
+		}
+		g.bad += expired
+		out[day] = g
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return out, fmt.Errorf("iterate rollup series: %w", err)
+	}
+	gb := &condBuilder{}
+	dateList(gb, "d.day", days)
+	rollupDimConds(gb, p, "d")
+	grows, err := r.db.QueryEx(ctx, fmt.Sprintf(`
+		SELECT d.day::text, d.currency, COALESCE(SUM(d.gross), 0)::text
+		FROM app.analytics_daily_app d WHERE %s GROUP BY 1, 2`, gb.where()), nil, gb.args...)
+	if err != nil {
+		return out, fmt.Errorf("rollup series gross: %w", err)
+	}
+	for grows.Next() {
+		var day, currency, gross string
+		if err := grows.Scan(&day, &currency, &gross); err != nil {
+			grows.Close()
+			return out, fmt.Errorf("scan rollup series gross: %w", err)
+		}
+		if g, ok := out[day]; ok {
+			g.gross[currency] = gross
+		}
+	}
+	grows.Close()
+	return out, grows.Err()
+}
+
+// liveSeriesGrains runs the single-round-trip live series query over a
+// range, returning raw grains keyed by bucket.
+func (r *PostgresRepository) liveSeriesGrains(ctx context.Context, p Params, from, to time.Time) (map[string]*dayGrain, error) {
+	out := map[string]*dayGrain{}
 	sb := &condBuilder{}
-	sb.orderRange(p.From, p.To)
+	sb.orderRange(from, to)
 	sb.orderDims(p.Provider, "")
 	joinApps := sb.orgScope(p.OrgIDs, p.AppID, "a.org_id")
 	if p.AppID != "" {
@@ -242,69 +692,123 @@ func (r *PostgresRepository) Overview(ctx context.Context, p Params) (Overview, 
 		join = "JOIN app.payment_apps a ON a.id = o.app_id"
 	}
 	rows, err := r.db.QueryEx(ctx, fmt.Sprintf(`
-		SELECT %s AS bucket, COUNT(*),
-		       %s,
-		       MIN(o.created_at)
-		FROM app.payment_orders o %s WHERE %s
-		GROUP BY 1 ORDER BY MIN(o.created_at)`, bucketExpr(p.Granularity, "o.created_at"), successRateSQL, join, sb.where()), nil, sb.args...)
+		SELECT bucket, SUM(tx_c), SUM(paid_c), SUM(bad_c), jsonb_object_agg(currency, gross)
+		FROM (
+			SELECT %s AS bucket, o.currency,
+			       COUNT(*) AS tx_c,
+			       COUNT(*) FILTER (WHERE o.status = 'paid') AS paid_c,
+			       COUNT(*) FILTER (WHERE o.status IN ('failed','cancelled','reversed','expired')) AS bad_c,
+			       COALESCE(SUM(o.amount) FILTER (WHERE o.status = 'paid'), 0)::text AS gross
+			FROM app.payment_orders o %s WHERE %s GROUP BY 1, 2
+		) g GROUP BY bucket`, bucketExpr(p.Granularity, "o.created_at"), join, sb.where()), nil, sb.args...)
 	if err != nil {
-		return out, fmt.Errorf("overview series: %w", err)
+		return out, fmt.Errorf("live series: %w", err)
 	}
 	defer rows.Close()
-	out.Series = []OverviewPoint{}
 	for rows.Next() {
-		var pt OverviewPoint
-		var minCreated time.Time
-		if err := rows.Scan(&pt.Bucket, &pt.TxCount, &pt.SuccessRate, &minCreated); err != nil {
-			return out, fmt.Errorf("scan overview series: %w", err)
+		var bucket, grossJSON string
+		g := &dayGrain{gross: MoneyByCurrency{}}
+		if err := rows.Scan(&bucket, &g.tx, &g.paid, &g.bad, &grossJSON); err != nil {
+			return out, fmt.Errorf("scan live series: %w", err)
 		}
-		pt.GrossByCurrency = MoneyByCurrency{}
-		out.Series = append(out.Series, pt)
-	}
-	if err := rows.Err(); err != nil {
-		return out, fmt.Errorf("iterate overview series: %w", err)
-	}
-	// Gross per bucket per currency (second pass keeps the main query lean).
-	gb := &condBuilder{}
-	gb.orderRange(p.From, p.To)
-	gb.orderDims(p.Provider, "")
-	gJoinApps := gb.orgScope(p.OrgIDs, p.AppID, "a.org_id")
-	if p.AppID != "" {
-		gb.conds = append(gb.conds, "o.app_id = "+gb.ph(p.AppID)+"::uuid")
-	}
-	gJoin := ""
-	if gJoinApps {
-		gJoin = "JOIN app.payment_apps a ON a.id = o.app_id"
-	}
-	grows, err := r.db.QueryEx(ctx, fmt.Sprintf(`
-		SELECT %s AS bucket, o.currency, COALESCE(SUM(o.amount) FILTER (WHERE o.status = 'paid'), 0)::text
-		FROM app.payment_orders o %s WHERE %s GROUP BY 1, 2`, bucketExpr(p.Granularity, "o.created_at"), gJoin, gb.where()), nil, gb.args...)
-	if err != nil {
-		return out, fmt.Errorf("overview series gross: %w", err)
-	}
-	bucketGross := map[string]MoneyByCurrency{}
-	for grows.Next() {
-		var bucket, currency, gross string
-		if err := grows.Scan(&bucket, &currency, &gross); err != nil {
-			grows.Close()
-			return out, fmt.Errorf("scan overview series gross: %w", err)
+		if err := json.Unmarshal([]byte(grossJSON), &g.gross); err != nil {
+			return out, fmt.Errorf("decode live series gross: %w", err)
 		}
-		if bucketGross[bucket] == nil {
-			bucketGross[bucket] = MoneyByCurrency{}
-		}
-		bucketGross[bucket][currency] = gross
-	}
-	grows.Close()
-	if err := grows.Err(); err != nil {
-		return out, fmt.Errorf("iterate overview series gross: %w", err)
-	}
-	for i := range out.Series {
-		out.Series[i].GrossByCurrency = bucketGross[out.Series[i].Bucket]
-		if out.Series[i].GrossByCurrency == nil {
-			out.Series[i].GrossByCurrency = MoneyByCurrency{}
-		}
+		out[bucket] = g
 	}
 	return out, rows.Err()
+}
+
+// periodSeries merges rollup whole-days (+live fallback for missing days)
+// and live edges into bucketed points. Week/month re-bucket daily grains
+// in Go; hour granularity always reads live (capped to 7 days in params).
+func (r *PostgresRepository) periodSeries(ctx context.Context, p Params, from, to time.Time) ([]OverviewPoint, error) {
+	merged := map[string]*dayGrain{}
+	add := func(bucket string, g *dayGrain) {
+		m, ok := merged[bucket]
+		if !ok {
+			m = &dayGrain{gross: MoneyByCurrency{}}
+			merged[bucket] = m
+		}
+		m.tx += g.tx
+		m.paid += g.paid
+		m.bad += g.bad
+		addMoneyMap(m.gross, g.gross)
+	}
+	bucketOf := func(day time.Time) string {
+		if p.Granularity == GranularityHour {
+			return day.Format("2006-01-02 15:04")
+		}
+		return eatBucketForDay(day, p.Granularity)
+	}
+	if p.Granularity == GranularityHour {
+		live, err := r.liveSeriesGrains(ctx, p, from, to)
+		if err != nil {
+			return nil, err
+		}
+		for bucket, g := range live {
+			add(bucket, g)
+		}
+	} else {
+		wf, wt, hasWhole, hf, ht, tf, tt, hasHead, hasTail := splitRange(from, to)
+		if hasWhole {
+			present, err := r.rollupCoverage(ctx, p, wf, wt)
+			if err != nil {
+				return nil, err
+			}
+			grains, err := r.rollupDayGrains(ctx, p, wf, wt, present)
+			if err != nil {
+				return nil, err
+			}
+			for dayStr, g := range grains {
+				day, err := time.Parse("2006-01-02", dayStr)
+				if err != nil {
+					return nil, fmt.Errorf("parse rollup day: %w", err)
+				}
+				add(bucketOf(day), g)
+			}
+			for d := wf; d.Before(wt); d = d.Add(24 * time.Hour) {
+				if present[d.Format("2006-01-02")] {
+					continue
+				}
+				live, err := r.liveSeriesGrains(ctx, p, d, d.Add(24*time.Hour))
+				if err != nil {
+					return nil, err
+				}
+				for bucket, g := range live {
+					add(bucket, g)
+				}
+			}
+		}
+		for _, edge := range []struct {
+			from, to time.Time
+			has      bool
+		}{{hf, ht, hasHead}, {tf, tt, hasTail}} {
+			if !edge.has {
+				continue
+			}
+			live, err := r.liveSeriesGrains(ctx, p, edge.from, edge.to)
+			if err != nil {
+				return nil, err
+			}
+			for bucket, g := range live {
+				add(bucket, g)
+			}
+		}
+	}
+	points := make([]OverviewPoint, 0, len(merged))
+	for bucket, g := range merged {
+		pt := OverviewPoint{Bucket: bucket, TxCount: g.tx, GrossByCurrency: g.gross}
+		if g.gross == nil {
+			pt.GrossByCurrency = MoneyByCurrency{}
+		}
+		if g.paid+g.bad > 0 {
+			pt.SuccessRate = floatPtr(float64(g.paid) / float64(g.paid+g.bad))
+		}
+		points = append(points, pt)
+	}
+	sort.Slice(points, func(i, j int) bool { return points[i].Bucket < points[j].Bucket })
+	return points, nil
 }
 
 // queryMoneyByCurrency runs a (currency, amount::text) GROUP BY query.
@@ -539,6 +1043,149 @@ func (r *PostgresRepository) ProviderStats(ctx context.Context, p Params) ([]Pro
 	return stats, nil
 }
 
+// topRevenueRow is one org+currency revenue line for TopMerchants.
+type topRevenueRow struct {
+	orgID, currency, net string
+	refunds, credits     int64
+}
+
+// topRevenueFromRollups serves the no-provider-filter case from the money
+// rollup (+ daily succeeded counts for refund rate) with a live-today
+// tail, so the 1.4M-row ledger scan is skipped.
+func (r *PostgresRepository) topRevenueFromRollups(ctx context.Context, p Params) ([]topRevenueRow, error) {
+	loc, err := time.LoadLocation(Timezone)
+	if err != nil {
+		loc = time.UTC
+	}
+	now := time.Now().In(loc)
+	todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+	type key struct{ org, currency string }
+	net := map[key]float64{}
+	refunds := map[string]int64{}
+	credits := map[string]int64{}
+	add := func(org, currency string, n float64, ref, cred int64) {
+		k := key{org, currency}
+		net[k] += n
+		refunds[org] += ref
+		credits[org] += cred
+	}
+	// Whole past days from rollups.
+	eb := &condBuilder{}
+	eb.conds = append(eb.conds, "m.day < "+eb.ph(todayStart.Format("2006-01-02"))+"::date")
+	eb.conds = append(eb.conds, "m.day >= "+eb.ph(p.From.In(loc).Format("2006-01-02"))+"::date")
+	if len(p.OrgIDs) == 1 {
+		eb.conds = append(eb.conds, "m.org_id = "+eb.ph(p.OrgIDs[0])+"::uuid")
+	} else if len(p.OrgIDs) > 1 {
+		eb.conds = append(eb.conds, "m.org_id = ANY("+eb.ph(p.OrgIDs)+"::uuid[])")
+	}
+	if p.AppID != "" {
+		eb.conds = append(eb.conds, "m.app_id = "+eb.ph(p.AppID)+"::uuid")
+	}
+	erows, err := r.db.QueryEx(ctx, fmt.Sprintf(`
+		SELECT m.org_id::text, m.currency,
+		       COALESCE(SUM(m.fees), 0)::text, COALESCE(SUM(m.fee_reversals), 0)::text,
+		       COALESCE(SUM(m.refunds), 0)
+		FROM app.analytics_daily_app_money m WHERE %s GROUP BY 1, 2`, eb.where()), nil, eb.args...)
+	if err != nil {
+		return nil, fmt.Errorf("top revenue rollup: %w", err)
+	}
+	for erows.Next() {
+		var org, currency, fees, reversals string
+		var ref int64
+		if err := erows.Scan(&org, &currency, &fees, &reversals, &ref); err != nil {
+			erows.Close()
+			return nil, fmt.Errorf("scan top revenue rollup: %w", err)
+		}
+		add(org, currency, parseMoney(fees)-parseMoney(reversals), ref, 0)
+	}
+	erows.Close()
+	if err := erows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate top revenue rollup: %w", err)
+	}
+	// Succeeded counts (refund-rate denominator) from the daily grain.
+	sb := &condBuilder{}
+	sb.conds = append(sb.conds, "d.day < "+sb.ph(todayStart.Format("2006-01-02"))+"::date")
+	sb.conds = append(sb.conds, "d.day >= "+sb.ph(p.From.In(loc).Format("2006-01-02"))+"::date")
+	sb.conds = append(sb.conds, "d.environment = 'live'")
+	if len(p.OrgIDs) == 1 {
+		sb.conds = append(sb.conds, "d.org_id = "+sb.ph(p.OrgIDs[0])+"::uuid")
+	} else if len(p.OrgIDs) > 1 {
+		sb.conds = append(sb.conds, "d.org_id = ANY("+sb.ph(p.OrgIDs)+"::uuid[])")
+	}
+	if p.AppID != "" {
+		sb.conds = append(sb.conds, "d.app_id = "+sb.ph(p.AppID)+"::uuid")
+	}
+	srows, err := r.db.QueryEx(ctx, fmt.Sprintf(`
+		SELECT d.org_id::text, COALESCE(SUM(d.succeeded), 0)
+		FROM app.analytics_daily_app d WHERE %s GROUP BY 1`, sb.where()), nil, sb.args...)
+	if err != nil {
+		return nil, fmt.Errorf("top revenue succeeded: %w", err)
+	}
+	for srows.Next() {
+		var org string
+		var n int64
+		if err := srows.Scan(&org, &n); err != nil {
+			srows.Close()
+			return nil, fmt.Errorf("scan top revenue succeeded: %w", err)
+		}
+		credits[org] += n
+	}
+	srows.Close()
+	if err := srows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate top revenue succeeded: %w", err)
+	}
+	// Live tail: today (and any range head before the first whole day is
+	// negligible — ledgers post at settlement, same-day only).
+	lb := &condBuilder{}
+	lb.conds = append(lb.conds, "l.created_at >= "+lb.ph(todayStart.UTC()), "l.created_at < "+lb.ph(p.To))
+	lb.conds = append(lb.conds, "o.environment = 'live'")
+	if len(p.OrgIDs) == 1 {
+		lb.conds = append(lb.conds, "a.org_id = "+lb.ph(p.OrgIDs[0])+"::uuid")
+	} else if len(p.OrgIDs) > 1 {
+		lb.conds = append(lb.conds, "a.org_id = ANY("+lb.ph(p.OrgIDs)+"::uuid[])")
+	}
+	if p.AppID != "" {
+		lb.conds = append(lb.conds, "l.app_id = "+lb.ph(p.AppID)+"::uuid")
+	}
+	lrows, err := r.db.QueryEx(ctx, fmt.Sprintf(`
+		SELECT a.org_id::text, l.currency,
+		       (COALESCE(SUM(l.amount) FILTER (WHERE l.entry_type = 'platform_fee_debit'), 0)
+		        - COALESCE(SUM(l.amount) FILTER (WHERE l.entry_type = 'refund_fee_reversal_credit'), 0))::text,
+		       COUNT(*) FILTER (WHERE l.entry_type = 'refund_debit'),
+		       COUNT(*) FILTER (WHERE l.entry_type = 'payment_credit')
+		FROM app.payment_ledger_entries l
+		JOIN app.payment_orders o ON o.id = l.payment_order_id
+		JOIN app.payment_apps a ON a.id = l.app_id
+		WHERE %s GROUP BY 1, 2`, lb.where()), nil, lb.args...)
+	if err != nil {
+		return nil, fmt.Errorf("top revenue live tail: %w", err)
+	}
+	for lrows.Next() {
+		var org, currency, netStr string
+		var ref, cred int64
+		if err := lrows.Scan(&org, &currency, &netStr, &ref, &cred); err != nil {
+			lrows.Close()
+			return nil, fmt.Errorf("scan top revenue live tail: %w", err)
+		}
+		add(org, currency, parseMoney(netStr), ref, cred)
+	}
+	lrows.Close()
+	if err := lrows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate top revenue live tail: %w", err)
+	}
+	out := []topRevenueRow{}
+	for k, n := range net {
+		out = append(out, topRevenueRow{orgID: k.org, currency: k.currency, net: fmt.Sprintf("%.2f", n), refunds: refunds[k.org], credits: credits[k.org]})
+	}
+	return out, nil
+}
+
+func parseMoney(s string) float64 {
+	var f float64
+	fmt.Sscanf(s, "%f", &f)
+	return f
+}
+
 // TopMerchants ranks orgs with live orders in range. All orgs are fetched
 // (tenant counts are small) and sorted/paginated in Go; TPV/revenue sorts
 // use the requested currency (default TZS) to stay currency-honest.
@@ -555,97 +1202,222 @@ func (r *PostgresRepository) TopMerchants(ctx context.Context, p Params, sortBy 
 		b.conds = append(b.conds, "o.app_id = "+b.ph(p.AppID)+"::uuid")
 	}
 	where, args := b.where(), b.args
-	rows, err := r.db.QueryEx(ctx, fmt.Sprintf(`
-		SELECT a.org_id::text, org.name, org.kyc_status, COUNT(*), %s,
-		       COUNT(*) FILTER (WHERE o.status = 'paid')
-		FROM app.payment_orders o
-		JOIN app.payment_apps a ON a.id = o.app_id
-		JOIN app.organizations org ON org.id = a.org_id
-		WHERE %s GROUP BY 1, 2, 3`, successRateSQL, where), nil, args...)
-	if err != nil {
-		return MerchantList{}, fmt.Errorf("top merchants: %w", err)
+	type topBase struct {
+		row  MerchantRow
+		paid int64
 	}
-	defer rows.Close()
+	type topVol struct{ orgID, currency, gross string }
+	type topRev struct {
+		orgID, currency, net       string
+		refunds, credits           int64
+	}
+	type topTrend struct {
+		orgID      string
+		curr, prev int64
+	}
+	var base []topBase
+	var vols []topVol
+	var revs []topRev
+	var rollupRevs []topRevenueRow
+	var trends []topTrend
+	var topErr error
+	var topMu sync.Mutex
+	topSetErr := func(err error) {
+		if err == nil {
+			return
+		}
+		topMu.Lock()
+		if topErr == nil {
+			topErr = err
+		}
+		topMu.Unlock()
+	}
+	var topWg sync.WaitGroup
+	topRun := func(fn func()) {
+		topWg.Add(1)
+		go func() {
+			defer topWg.Done()
+			fn()
+		}()
+	}
+	// The four aggregations are independent — run concurrently.
+	topRun(func() {
+		rows, err := r.db.QueryEx(ctx, fmt.Sprintf(`
+			SELECT a.org_id::text, org.name, org.kyc_status, COUNT(*), %s,
+			       COUNT(*) FILTER (WHERE o.status = 'paid')
+			FROM app.payment_orders o
+			JOIN app.payment_apps a ON a.id = o.app_id
+			JOIN app.organizations org ON org.id = a.org_id
+			WHERE %s GROUP BY 1, 2, 3`, successRateSQL, where), nil, args...)
+		if err != nil {
+			topSetErr(fmt.Errorf("top merchants: %w", err))
+			return
+		}
+		defer rows.Close()
+		var out []topBase
+		for rows.Next() {
+			var b topBase
+			var paid int64
+			if err := rows.Scan(&b.row.OrgID, &b.row.OrgName, &b.row.KYCStatus, &b.row.TxCount, &b.row.SuccessRate, &paid); err != nil {
+				topSetErr(fmt.Errorf("scan top merchants: %w", err))
+				return
+			}
+			b.row.TPVByCurrency = MoneyByCurrency{}
+			b.row.RevenueByCurrency = MoneyByCurrency{}
+			b.paid = paid
+			out = append(out, b)
+		}
+		if err := rows.Err(); err != nil {
+			topSetErr(fmt.Errorf("iterate top merchants: %w", err))
+			return
+		}
+		topMu.Lock()
+		base = out
+		topMu.Unlock()
+	})
+	topRun(func() {
+		volRows, err := r.db.QueryEx(ctx, fmt.Sprintf(`
+			SELECT a.org_id::text, o.currency, COALESCE(SUM(o.amount) FILTER (WHERE o.status = 'paid'), 0)::text
+			FROM app.payment_orders o
+			JOIN app.payment_apps a ON a.id = o.app_id
+			WHERE %s GROUP BY 1, 2`, where), nil, args...)
+		if err != nil {
+			topSetErr(fmt.Errorf("top merchant volume: %w", err))
+			return
+		}
+		defer volRows.Close()
+		var out []topVol
+		for volRows.Next() {
+			var v topVol
+			if err := volRows.Scan(&v.orgID, &v.currency, &v.gross); err != nil {
+				topSetErr(fmt.Errorf("scan top merchant volume: %w", err))
+				return
+			}
+			out = append(out, v)
+		}
+		if err := volRows.Err(); err != nil {
+			topSetErr(fmt.Errorf("iterate top merchant volume: %w", err))
+			return
+		}
+		topMu.Lock()
+		vols = out
+		topMu.Unlock()
+	})
+	topRun(func() {
+		// Revenue from the money rollup (tiny) unless a provider filter
+		// forces the live ledger path (money grain has no provider dim).
+		if p.Provider == "" {
+			out, err := r.topRevenueFromRollups(ctx, p)
+			if err != nil {
+				topSetErr(err)
+				return
+			}
+			topMu.Lock()
+			rollupRevs = out
+			topMu.Unlock()
+			return
+		}
+		lb := &condBuilder{}
+		lb.conds = append(lb.conds, "l.created_at >= "+lb.ph(p.From), "l.created_at < "+lb.ph(p.To))
+		lb.conds = append(lb.conds, "o.environment = 'live'")
+		if p.Provider != "" {
+			lb.conds = append(lb.conds, "o.provider = "+lb.ph(p.Provider))
+		}
+		if len(p.OrgIDs) == 1 {
+			lb.conds = append(lb.conds, "a.org_id = "+lb.ph(p.OrgIDs[0])+"::uuid")
+		} else if len(p.OrgIDs) > 1 {
+			lb.conds = append(lb.conds, "a.org_id = ANY("+lb.ph(p.OrgIDs)+"::uuid[])")
+		}
+		if p.AppID != "" {
+			lb.conds = append(lb.conds, "l.app_id = "+lb.ph(p.AppID)+"::uuid")
+		}
+		revRows, err := r.db.QueryEx(ctx, fmt.Sprintf(`
+			SELECT a.org_id::text, l.currency,
+			       (COALESCE(SUM(l.amount) FILTER (WHERE l.entry_type = 'platform_fee_debit'), 0)
+			        - COALESCE(SUM(l.amount) FILTER (WHERE l.entry_type = 'refund_fee_reversal_credit'), 0))::text,
+			       COUNT(*) FILTER (WHERE l.entry_type = 'refund_debit'),
+			       COUNT(*) FILTER (WHERE l.entry_type = 'payment_credit')
+			FROM app.payment_ledger_entries l
+			JOIN app.payment_orders o ON o.id = l.payment_order_id
+			JOIN app.payment_apps a ON a.id = l.app_id
+			WHERE %s
+			GROUP BY 1, 2`, lb.where()), nil, lb.args...)
+		if err != nil {
+			topSetErr(fmt.Errorf("top merchant revenue: %w", err))
+			return
+		}
+		defer revRows.Close()
+		var out []topRev
+		for revRows.Next() {
+			var v topRev
+			if err := revRows.Scan(&v.orgID, &v.currency, &v.net, &v.refunds, &v.credits); err != nil {
+				topSetErr(fmt.Errorf("scan top merchant revenue: %w", err))
+				return
+			}
+			out = append(out, v)
+		}
+		if err := revRows.Err(); err != nil {
+			topSetErr(fmt.Errorf("iterate top merchant revenue: %w", err))
+			return
+		}
+		topMu.Lock()
+		revs = out
+		topMu.Unlock()
+	})
+	topRun(func() {
+		prevFrom, prevTo := p.PreviousPeriod()
+		trendRows, err := r.db.QueryEx(ctx, `
+			SELECT a.org_id::text,
+			       COUNT(*) FILTER (WHERE o.created_at >= $1 AND o.created_at < $2),
+			       COUNT(*) FILTER (WHERE o.created_at >= $3 AND o.created_at < $4)
+			FROM app.payment_orders o
+			JOIN app.payment_apps a ON a.id = o.app_id
+			WHERE o.environment = 'live' AND o.created_at >= $3 AND o.created_at < $2
+			GROUP BY 1`, nil, p.From, p.To, prevFrom, prevTo)
+		if err != nil {
+			topSetErr(fmt.Errorf("top merchant trend: %w", err))
+			return
+		}
+		defer trendRows.Close()
+		var out []topTrend
+		for trendRows.Next() {
+			var v topTrend
+			if err := trendRows.Scan(&v.orgID, &v.curr, &v.prev); err != nil {
+				topSetErr(fmt.Errorf("scan top merchant trend: %w", err))
+				return
+			}
+			out = append(out, v)
+		}
+		if err := trendRows.Err(); err != nil {
+			topSetErr(fmt.Errorf("iterate top merchant trend: %w", err))
+			return
+		}
+		topMu.Lock()
+		trends = out
+		topMu.Unlock()
+	})
+	topWg.Wait()
+	if topErr != nil {
+		return MerchantList{}, topErr
+	}
 	byOrg := map[string]*MerchantRow{}
 	order := []string{}
-	for rows.Next() {
-		var row MerchantRow
-		var paid int64
-		if err := rows.Scan(&row.OrgID, &row.OrgName, &row.KYCStatus, &row.TxCount, &row.SuccessRate, &paid); err != nil {
-			return MerchantList{}, fmt.Errorf("scan top merchants: %w", err)
-		}
-		row.TPVByCurrency = MoneyByCurrency{}
-		row.RevenueByCurrency = MoneyByCurrency{}
+	for _, b := range base {
+		row := b.row
 		byOrg[row.OrgID] = &row
 		order = append(order, row.OrgID)
+		_ = b.paid
 	}
-	if err := rows.Err(); err != nil {
-		return MerchantList{}, fmt.Errorf("iterate top merchants: %w", err)
-	}
-	// Per-org per-currency paid gross.
-	volRows, err := r.db.QueryEx(ctx, fmt.Sprintf(`
-		SELECT a.org_id::text, o.currency, COALESCE(SUM(o.amount) FILTER (WHERE o.status = 'paid'), 0)::text
-		FROM app.payment_orders o
-		JOIN app.payment_apps a ON a.id = o.app_id
-		WHERE %s GROUP BY 1, 2`, where), nil, args...)
-	if err != nil {
-		return MerchantList{}, fmt.Errorf("top merchant volume: %w", err)
-	}
-	for volRows.Next() {
-		var orgID, currency, gross string
-		if err := volRows.Scan(&orgID, &currency, &gross); err != nil {
-			volRows.Close()
-			return MerchantList{}, fmt.Errorf("scan top merchant volume: %w", err)
-		}
-		if row, ok := byOrg[orgID]; ok {
-			row.TPVByCurrency[currency] = gross
+	for _, v := range vols {
+		if row, ok := byOrg[v.orgID]; ok {
+			row.TPVByCurrency[v.currency] = v.gross
 		}
 	}
-	volRows.Close()
-	if err := volRows.Err(); err != nil {
-		return MerchantList{}, fmt.Errorf("iterate top merchant volume: %w", err)
-	}
-	// Per-org revenue (ledger fees net of fee reversals) + refund rate.
-	// Separate condition set: ledger timestamps with org scope via apps.
-	lb := &condBuilder{}
-	lb.conds = append(lb.conds, "l.created_at >= "+lb.ph(p.From), "l.created_at < "+lb.ph(p.To))
-	lb.conds = append(lb.conds, "o.environment = 'live'")
-	if p.Provider != "" {
-		lb.conds = append(lb.conds, "o.provider = "+lb.ph(p.Provider))
-	}
-	if len(p.OrgIDs) == 1 {
-		lb.conds = append(lb.conds, "a.org_id = "+lb.ph(p.OrgIDs[0])+"::uuid")
-	} else if len(p.OrgIDs) > 1 {
-		lb.conds = append(lb.conds, "a.org_id = ANY("+lb.ph(p.OrgIDs)+"::uuid[])")
-	}
-	if p.AppID != "" {
-		lb.conds = append(lb.conds, "l.app_id = "+lb.ph(p.AppID)+"::uuid")
-	}
-	revRows, err := r.db.QueryEx(ctx, fmt.Sprintf(`
-		SELECT a.org_id::text, l.currency,
-		       (COALESCE(SUM(l.amount) FILTER (WHERE l.entry_type = 'platform_fee_debit'), 0)
-		        - COALESCE(SUM(l.amount) FILTER (WHERE l.entry_type = 'refund_fee_reversal_credit'), 0))::text,
-		       COUNT(*) FILTER (WHERE l.entry_type = 'refund_debit'),
-		       COUNT(*) FILTER (WHERE l.entry_type = 'payment_credit')
-		FROM app.payment_ledger_entries l
-		JOIN app.payment_orders o ON o.id = l.payment_order_id
-		JOIN app.payment_apps a ON a.id = l.app_id
-		WHERE %s
-		GROUP BY 1, 2`, lb.where()), nil, lb.args...)
-	if err != nil {
-		return MerchantList{}, fmt.Errorf("top merchant revenue: %w", err)
-	}
-	for revRows.Next() {
-		var orgID, currency, net string
-		var refunds, credits int64
-		if err := revRows.Scan(&orgID, &currency, &net, &refunds, &credits); err != nil {
-			revRows.Close()
-			return MerchantList{}, fmt.Errorf("scan top merchant revenue: %w", err)
-		}
-		if row, ok := byOrg[orgID]; ok {
-			row.RevenueByCurrency[currency] = net
-			if credits > 0 {
-				rate := float64(refunds) / float64(credits)
+	for _, v := range rollupRevs {
+		if row, ok := byOrg[v.orgID]; ok {
+			row.RevenueByCurrency[v.currency] = v.net
+			if v.credits > 0 {
+				rate := float64(v.refunds) / float64(v.credits)
 				if row.RefundRate == nil {
 					row.RefundRate = &rate
 				} else {
@@ -655,37 +1427,24 @@ func (r *PostgresRepository) TopMerchants(ctx context.Context, p Params, sortBy 
 			}
 		}
 	}
-	revRows.Close()
-	if err := revRows.Err(); err != nil {
-		return MerchantList{}, fmt.Errorf("iterate top merchant revenue: %w", err)
-	}
-	// Count-based trend (currency-free): this window vs previous window.
-	prevFrom, prevTo := p.PreviousPeriod()
-	trendRows, err := r.db.QueryEx(ctx, `
-		SELECT a.org_id::text,
-		       COUNT(*) FILTER (WHERE o.created_at >= $1 AND o.created_at < $2),
-		       COUNT(*) FILTER (WHERE o.created_at >= $3 AND o.created_at < $4)
-		FROM app.payment_orders o
-		JOIN app.payment_apps a ON a.id = o.app_id
-		WHERE o.environment = 'live' AND o.created_at >= $3 AND o.created_at < $2
-		GROUP BY 1`, nil, p.From, p.To, prevFrom, prevTo)
-	if err != nil {
-		return MerchantList{}, fmt.Errorf("top merchant trend: %w", err)
-	}
-	for trendRows.Next() {
-		var orgID string
-		var curr, prev int64
-		if err := trendRows.Scan(&orgID, &curr, &prev); err != nil {
-			trendRows.Close()
-			return MerchantList{}, fmt.Errorf("scan top merchant trend: %w", err)
-		}
-		if row, ok := byOrg[orgID]; ok {
-			row.TrendPct = pctChange(float64(curr), float64(prev))
+	for _, v := range revs {
+		if row, ok := byOrg[v.orgID]; ok {
+			row.RevenueByCurrency[v.currency] = v.net
+			if v.credits > 0 {
+				rate := float64(v.refunds) / float64(v.credits)
+				if row.RefundRate == nil {
+					row.RefundRate = &rate
+				} else {
+					combined := (*row.RefundRate + rate) / 2
+					row.RefundRate = &combined
+				}
+			}
 		}
 	}
-	trendRows.Close()
-	if err := trendRows.Err(); err != nil {
-		return MerchantList{}, fmt.Errorf("iterate top merchant trend: %w", err)
+	for _, v := range trends {
+		if row, ok := byOrg[v.orgID]; ok {
+			row.TrendPct = pctChange(float64(v.curr), float64(v.prev))
+		}
 	}
 	out := MerchantList{Page: p.Page, PerPage: p.PerPage}
 	items := []MerchantRow{}

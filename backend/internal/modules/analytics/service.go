@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -16,6 +17,27 @@ import (
 type Service struct {
 	repo Repository
 	log  *slog.Logger
+
+	// dashCache is a short-TTL in-process cache for the two expensive
+	// dashboard calls (Block 1 strategy: keyed by scope, invalidated by
+	// time only — 60s). Dashboards poll repeatedly; first load computes.
+	mu    sync.Mutex
+	cache map[string]cacheEntry
+}
+
+type cacheEntry struct {
+	data   any
+	expiry time.Time
+}
+
+// dashboardTTL bounds staleness for cached dashboard reads.
+const dashboardTTL = time.Minute
+
+func paramsKey(prefix string, p Params, extra ...string) string {
+	return fmt.Sprintf("%s|%s|%s|%s|%s|%s|%v|%d|%d|%s",
+		prefix, p.From.UTC().Format(time.RFC3339), p.To.UTC().Format(time.RFC3339),
+		p.Granularity, p.Provider, p.Currency, p.OrgIDs, p.Page, p.PerPage,
+		strings.Join(extra, "|"))
 }
 
 func NewService(repo Repository, logger *slog.Logger) *Service {
@@ -26,7 +48,47 @@ func NewService(repo Repository, logger *slog.Logger) *Service {
 }
 
 func (s *Service) Overview(ctx context.Context, p Params) (Overview, error) {
-	return s.repo.Overview(ctx, p)
+	key := paramsKey("overview", p)
+	if v, ok := s.cachedRaw(key); ok {
+		return v.(Overview), nil
+	}
+	out, err := s.repo.Overview(ctx, p)
+	if err != nil {
+		return out, err
+	}
+	s.storeRaw(key, out)
+	return out, nil
+}
+
+func (s *Service) cachedRaw(key string) (any, bool) {
+	now := time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cache == nil {
+		s.cache = map[string]cacheEntry{}
+	}
+	e, ok := s.cache[key]
+	if !ok || !now.Before(e.expiry) {
+		return nil, false
+	}
+	return e.data, true
+}
+
+func (s *Service) storeRaw(key string, data any) {
+	now := time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cache == nil {
+		s.cache = map[string]cacheEntry{}
+	}
+	if len(s.cache) > 512 {
+		for k, e := range s.cache {
+			if now.After(e.expiry) {
+				delete(s.cache, k)
+			}
+		}
+	}
+	s.cache[key] = cacheEntry{data: data, expiry: now.Add(dashboardTTL)}
 }
 
 func (s *Service) ProviderStats(ctx context.Context, p Params) ([]ProviderStat, error) {
@@ -34,7 +96,16 @@ func (s *Service) ProviderStats(ctx context.Context, p Params) ([]ProviderStat, 
 }
 
 func (s *Service) TopMerchants(ctx context.Context, p Params, sortBy string) (MerchantList, error) {
-	return s.repo.TopMerchants(ctx, p, sortBy)
+	key := paramsKey("top", p, sortBy)
+	if v, ok := s.cachedRaw(key); ok {
+		return v.(MerchantList), nil
+	}
+	out, err := s.repo.TopMerchants(ctx, p, sortBy)
+	if err != nil {
+		return out, err
+	}
+	s.storeRaw(key, out)
+	return out, nil
 }
 
 func (s *Service) SignupFunnel(ctx context.Context, p Params) (Funnel, error) {

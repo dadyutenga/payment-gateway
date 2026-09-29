@@ -90,3 +90,19 @@ input → `OTHER`; empty → NULL (untouched).
 `ANALYTICS_PAYER_SECRET` (falls back to the delivery signing secret in
 dev; set distinctly in production) · thresholds live with each endpoint
 (Block 2/4) and are stated in responses.
+
+## Performance (Block 6 proof, 2026-09-29, dev laptop, 1M orders)
+
+- Overview 30d: ~650–1000ms cold, ~0ms warm (60s TTL service cache).
+- Top merchants: ~0.7–1.8s cold, ~0ms warm. Simple queries 200–500ms.
+- Design: whole EAT days read pre-aggregated rollups; partial edges +
+  today read live; TTP percentiles read `first_paid_at` (no history
+  join); independent queries run concurrently; per-user rate limit
+  (60/min) + range caps (366d, hour ≤ 7d) guard the DB.
+- Honest note: the 500ms cold target is not fully met on 1M rows on dev
+  iron (noisy box, ±2x run variance); warm-cache p95 is ~0ms and every
+  simple endpoint is in budget. Next levers if cold must drop further:
+  approximate TTP from rollup percentiles, or a read replica.
+- Seed: `go run ./cmd/seed-analytics -orgs 200 -orders 1000000
+  -payer-secret ...` (idempotent, `analytics-seed-` prefix, NEVER on
+  prod). Bench: same command with `-seed=false`.
