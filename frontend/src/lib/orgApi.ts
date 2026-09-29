@@ -1,4 +1,4 @@
-import { getAccessToken as readAccessToken } from "@/lib/auth";
+import { getCustomerToken } from "@/lib/auth";
 
 type ApiEnvelope<T> = {
   data: T;
@@ -39,7 +39,7 @@ async function request<T>(
     formData?: FormData;
   },
 ): Promise<{ data: T }> {
-  const token = readAccessToken();
+  const token = getCustomerToken();
   if (!token) {
     throw new OrgApiError(401, "You need to sign in to continue.", "unauthorized");
   }
@@ -270,82 +270,11 @@ export async function resolveLogoSrc(orgId: string, logoUrl?: string): Promise<s
   const loc = (logoUrl ?? "").trim();
   if (!loc) return "";
   if (/^https?:\/\//i.test(loc)) return loc;
-  const token = readAccessToken();
+  const token = getCustomerToken();
   if (!token) throw new OrgApiError(401, "You need to sign in to continue.", "unauthorized");
   const response = await fetch(`${apiBaseUrl}/api/v1/orgs/${orgId}/logo`, {
     headers: { Authorization: `Bearer ${token}` },
   });
   if (!response.ok) throw new OrgApiError(response.status, "Unable to load the logo.");
   return URL.createObjectURL(await response.blob());
-}
-
-// ---------- Admin: KYC review queue, decisions, live limits ----------
-
-export type KYCQueueItem = {
-  org_id: string;
-  org_name: string;
-  slug: string;
-  kyc_status: string;
-  business_name: string;
-  tin: string;
-  has_document: boolean;
-  submitted_at: string;
-  rejection_reason?: string;
-  owner_email?: string;
-  owner_name?: string;
-  owner_phone?: string;
-};
-
-export async function listKYCQueue(status?: string) {
-  const query = status ? `?status=${encodeURIComponent(status)}` : "";
-  return (await request<KYCQueueItem[]>(`/api/v1/admin/orgs/kyc-queue${query}`)).data;
-}
-
-export async function approveKYC(orgId: string) {
-  return (await request<Organization>(`/api/v1/admin/orgs/${orgId}/kyc/approve`, { method: "POST" })).data;
-}
-
-export async function rejectKYC(orgId: string, reason: string) {
-  return (
-    await request<Organization>(`/api/v1/admin/orgs/${orgId}/kyc/reject`, { method: "POST", body: { reason } })
-  ).data;
-}
-
-export async function updateOrgLimits(orgId: string, input: { live_max_txn_amount?: string; live_daily_volume_cap?: string }) {
-  return (
-    await request<Organization>(`/api/v1/admin/orgs/${orgId}/limits`, { method: "PATCH", body: input })
-  ).data;
-}
-
-// ---------- Admin: platform stats (home dashboard) ----------
-
-export type PlatformStats = {
-  customers: number;
-  admins: number;
-  organizations: number;
-  orgs_by_kyc: Record<string, number>;
-  kyc_awaiting_review: number;
-  apps: number;
-  withdrawals_by_status: Record<string, number>;
-};
-
-export async function getPlatformStats() {
-  return (await request<PlatformStats>("/api/v1/admin/stats")).data;
-}
-
-// fetchKYCDocument downloads an org's ID document as a blob (admin review
-// path — the member route requires org membership reviewers don't have).
-export async function fetchKYCDocument(orgId: string): Promise<{ blob: Blob; contentType: string }> {
-  const token = readAccessToken();
-  if (!token) {
-    throw new OrgApiError(401, "You need to sign in to continue.", "unauthorized");
-  }
-  const response = await fetch(`${apiBaseUrl}/api/v1/admin/orgs/${orgId}/kyc/document`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  if (!response.ok) {
-    throw new OrgApiError(response.status, "Unable to load the verification document.");
-  }
-  const blob = await response.blob();
-  return { blob, contentType: response.headers.get("content-type") ?? "application/octet-stream" };
 }

@@ -1,4 +1,4 @@
-import { getAccessToken as readAccessToken } from "@/lib/auth";
+import { getCustomerToken } from "@/lib/auth";
 
 type ApiEnvelope<T> = { data: T };
 type ApiErrorEnvelope = { error?: { code?: string; message?: string; details?: Record<string, string> } };
@@ -63,7 +63,7 @@ export type MeResult = {
 async function request<T>(path: string, options?: { method?: "GET" | "POST" | "PATCH" | "DELETE"; body?: unknown; auth?: boolean; formData?: FormData }): Promise<T> {
   const headers: Record<string, string> = { Accept: "application/json" };
   if (options?.auth !== false) {
-    const token = readAccessToken();
+    const token = getCustomerToken();
     if (!token) throw new SignupApiError(401, "You need to sign in to continue.", "unauthorized");
     headers.Authorization = `Bearer ${token}`;
   }

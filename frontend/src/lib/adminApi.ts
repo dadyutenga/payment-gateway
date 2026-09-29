@@ -1,4 +1,4 @@
-import { getAccessToken as readAccessToken } from "@/lib/auth";
+import { getAdminToken } from "@/lib/auth";
 
 type ApiEnvelope<T> = {
   data: T;
@@ -48,7 +48,7 @@ function createApiUrl(path: string, query?: Record<string, string | undefined>) 
 }
 
 async function getAccessToken() {
-  const token = readAccessToken();
+  const token = getAdminToken();
   if (!token) {
     throw new AdminApiError(401, "You need to sign in to continue.", "unauthorized");
   }

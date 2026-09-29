@@ -351,6 +351,44 @@ func (s *Service) SetOrgLogoURL(ctx context.Context, userID, orgID, logoURL stri
 	return s.repo.UpdateOrgLogo(ctx, strings.TrimSpace(orgID), strings.TrimSpace(logoURL))
 }
 
+// SuspendOrg freezes an org's live money movement. No actor check —
+// route-gated; the handler audits with the reviewer's identity. Reason
+// required (shown to the org).
+func (s *Service) SuspendOrg(ctx context.Context, orgID, reason string) (Organization, validation.Errors, error) {
+	orgID = strings.TrimSpace(orgID)
+	reason = strings.TrimSpace(reason)
+	errs := validation.Errors{}
+	validation.Required(reason, "A suspension reason is required.", errs, "reason")
+	validation.MaxRunes(reason, 500, "Reason must be 500 characters or fewer.", errs, "reason")
+	if errs.Any() {
+		return Organization{}, errs, nil
+	}
+	org, err := s.repo.SuspendOrg(ctx, orgID, reason)
+	return org, nil, err
+}
+
+// UnsuspendOrg lifts a suspension (route-gated, audited by the handler).
+func (s *Service) UnsuspendOrg(ctx context.Context, orgID string) (Organization, error) {
+	return s.repo.UnsuspendOrg(ctx, strings.TrimSpace(orgID))
+}
+
+// OrgSuspensionStatus resolves an app to its org's suspension state with
+// no actor check — money-movement gates calling it are already authorized
+// via key or membership.
+func (s *Service) OrgSuspensionStatus(ctx context.Context, appID string) (bool, string, error) {
+	return s.repo.OrgSuspensionByApp(ctx, strings.TrimSpace(appID))
+}
+
+// WriteAudit records an admin mutation (best-effort by convention).
+func (s *Service) WriteAudit(ctx context.Context, actorID, actorEmail, action, targetType, targetID, ip string, before, after map[string]any) error {
+	return s.repo.WriteAudit(ctx, actorID, actorEmail, action, targetType, targetID, ip, before, after)
+}
+
+// ListAudit returns the admin trail newest-first (route-gated).
+func (s *Service) ListAudit(ctx context.Context, action, actor string, limit, offset int) ([]AuditEntry, error) {
+	return s.repo.ListAudit(ctx, action, actor, limit, offset)
+}
+
 // OrgKYCStatus returns an app's org KYC status with no actor check —
 // callers (order/key gates) are already authorized via key or membership.
 func (s *Service) OrgKYCStatus(ctx context.Context, appID string) (string, error) {

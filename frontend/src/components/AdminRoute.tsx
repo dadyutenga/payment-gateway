@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Navigate, useLocation } from "react-router-dom";
-import { getAccessToken, signOut } from "@/lib/auth";
+import { getAdminToken, signOutAdmin } from "@/lib/auth";
 import { getAdminMe } from "@/lib/adminApi";
 
 type GateState = "loading" | "allowed" | "signed-out" | "not-admin";
@@ -15,7 +15,7 @@ const AdminRoute = ({ children }: { children: JSX.Element }) => {
     let mounted = true;
     (async () => {
       try {
-        if (!getAccessToken()) {
+        if (!getAdminToken()) {
           if (mounted) setState("signed-out");
           return;
         }
@@ -49,7 +49,7 @@ const AdminRoute = ({ children }: { children: JSX.Element }) => {
         <button
           type="button"
           className="mt-2 text-sm font-medium text-blue-600 hover:underline"
-          onClick={() => { signOut(); window.location.assign("/admin/login"); }}
+          onClick={() => { signOutAdmin(); window.location.assign("/admin/login"); }}
         >
           Sign out
         </button>

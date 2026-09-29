@@ -111,6 +111,7 @@ func New(ctx context.Context) (*App, error) {
 	orgService := orgs.NewService(orgRepo, logger)
 	orgHandler := orgs.NewHandler(orgService, logger)
 	paymentHandler.SetOrgService(orgService)
+	paymentHandler.SetAuditWriter(pgAuditWriter{repo: orgRepo})
 
 	analyticsRepo := analytics.NewPostgresRepository(db)
 	analyticsService := analytics.NewService(analyticsRepo, logger)
@@ -351,6 +352,9 @@ func New(ctx context.Context) (*App, error) {
 	mux.Handle("POST /api/v1/admin/orgs/{orgID}/kyc/reject", middleware.Chain(http.HandlerFunc(orgHandler.RejectKYC), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))
 	mux.Handle("GET /api/v1/admin/orgs/{orgID}/kyc/document", middleware.Chain(http.HandlerFunc(orgHandler.AdminServeKYCDocument), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))
 	mux.Handle("PATCH /api/v1/admin/orgs/{orgID}/limits", middleware.Chain(http.HandlerFunc(orgHandler.UpdateOrgLiveLimits), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))
+	mux.Handle("POST /api/v1/admin/orgs/{orgID}/suspend", middleware.Chain(http.HandlerFunc(orgHandler.SuspendOrg), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))
+	mux.Handle("POST /api/v1/admin/orgs/{orgID}/unsuspend", middleware.Chain(http.HandlerFunc(orgHandler.UnsuspendOrg), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))
+	mux.Handle("GET /api/v1/admin/audit-log", middleware.Chain(http.HandlerFunc(orgHandler.ListAudit), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))
 
 	// ---- Admin: withdrawals ----
 	mux.Handle("/api/v1/admin/payments/withdrawals", middleware.Chain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

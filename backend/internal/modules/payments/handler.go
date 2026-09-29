@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -15,12 +16,14 @@ import (
 	"lipago/internal/modules/orgs"
 	"lipago/internal/modules/payments/provider"
 	"lipago/internal/platform/middleware"
+	"lipago/internal/shared/audit"
 	"lipago/internal/shared/httputil"
 )
 
 type Handler struct {
 	service      *Service
 	orgs         *orgs.Service
+	audit        audit.Writer
 	maxBodyBytes int64
 	logger       *slog.Logger
 }
@@ -44,6 +47,46 @@ func (h *Handler) SetLogger(logger *slog.Logger) {
 // closed rather than guessing access.
 func (h *Handler) SetOrgService(service *orgs.Service) {
 	h.orgs = service
+}
+
+// SetAuditWriter wires the admin-action trail. Optional — mutations
+// succeed regardless; failures only warn server-side.
+func (h *Handler) SetAuditWriter(w audit.Writer) {
+	h.audit = w
+}
+
+// auditAdmin records an admin mutation best-effort (never fails the
+// request). Callers are admin-space handlers; claims are guaranteed by
+// RequireAdminAuth.
+func (h *Handler) auditAdmin(r *http.Request, action, targetType, targetID string, metadata map[string]any) {
+	if h.audit == nil {
+		return
+	}
+	claims, ok := middleware.ClaimsFromContext(r.Context())
+	if !ok {
+		return
+	}
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	metadata["ip"] = requestIP(r)
+	if err := h.audit.LogAdminAction(r.Context(), claims.Subject, claims.Email, action, targetType, targetID, metadata); err != nil {
+		h.log().Warn("audit write failed", "action", action, "target", targetID, "error", err)
+	}
+}
+
+func requestIP(r *http.Request) string {
+	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
+		if idx := strings.Index(forwarded, ","); idx >= 0 {
+			return strings.TrimSpace(forwarded[:idx])
+		}
+		return forwarded
+	}
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err != nil {
+		return strings.TrimSpace(r.RemoteAddr)
+	}
+	return host
 }
 
 // requireOrgRole resolves the caller's active role for the path app and
@@ -227,6 +270,44 @@ func (h *Handler) requireLiveKYC(w http.ResponseWriter, r *http.Request, appID, 
 	if status != "verified" {
 		httputil.Error(w, http.StatusForbidden, "kyc_required",
 			"Live payments require a verified organization. Submit your verification documents first; sandbox mode remains available.", nil)
+		return false
+	}
+	// Suspended orgs move no live money until an operator unsuspends them.
+	suspended, reason, err := h.orgs.OrgSuspensionStatus(r.Context(), appID)
+	if err != nil {
+		h.fail(w, http.StatusInternalServerError, "internal_error", "Unable to check organization status.", err)
+		return false
+	}
+	if suspended {
+		msg := "Live payments are paused for this organization while it is under review."
+		if reason != "" {
+			msg = "Live payments are paused for this organization: " + reason
+		}
+		httputil.Error(w, http.StatusForbidden, "org_suspended", msg, nil)
+		return false
+	}
+	return true
+}
+
+// requireNotSuspended blocks money-moving (non-live-gated) operations for
+// suspended orgs: withdrawal requests and approvals.
+func (h *Handler) requireNotSuspended(w http.ResponseWriter, r *http.Request, appID string) bool {
+	if h.orgs == nil {
+		h.log().Error("org service not wired for suspension gate", "path", r.URL.Path)
+		httputil.Error(w, http.StatusInternalServerError, "internal_error", "Organization gate is not configured.", nil)
+		return false
+	}
+	suspended, reason, err := h.orgs.OrgSuspensionStatus(r.Context(), appID)
+	if err != nil {
+		h.fail(w, http.StatusInternalServerError, "internal_error", "Unable to check organization status.", err)
+		return false
+	}
+	if suspended {
+		msg := "This organization is suspended — withdrawals are paused while it is under review."
+		if reason != "" {
+			msg = "This organization is suspended: " + reason
+		}
+		httputil.Error(w, http.StatusForbidden, "org_suspended", msg, nil)
 		return false
 	}
 	return true
@@ -487,6 +568,7 @@ func (h *Handler) DeletePaymentApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.auditAdmin(r, "app.delete", "payment_app", app.ID, map[string]any{"name": app.Name})
 	httputil.JSON(w, http.StatusOK, map[string]any{"data": app})
 }
 
@@ -538,6 +620,9 @@ func (h *Handler) CreateWithdrawal(w http.ResponseWriter, r *http.Request) {
 	if handled {
 		return
 	}
+	if !h.requireNotSuspended(w, r, strings.TrimSpace(in.AppID)) {
+		return
+	}
 
 	withdrawal, vErrs, err := h.service.CreateWithdrawal(r.Context(), claims.Subject, CreateWithdrawalInput{
 		AppID:              in.AppID,
@@ -560,6 +645,9 @@ func (h *Handler) CreateWithdrawal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.auditAdmin(r, "withdrawal.create", "payment_withdrawal", withdrawal.ID, map[string]any{
+		"app_id": withdrawal.AppID, "amount": withdrawal.Amount, "currency": withdrawal.Currency,
+	})
 	h.writeJSON(state, w, r, http.StatusCreated, map[string]any{"data": withdrawal})
 }
 
@@ -583,11 +671,20 @@ func (h *Handler) ApproveWithdrawal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if current, err := h.service.GetWithdrawal(r.Context(), r.PathValue("id")); err == nil {
+		if !h.requireNotSuspended(w, r, current.AppID) {
+			return
+		}
+	}
+
 	withdrawal, err := h.service.ApproveWithdrawal(r.Context(), r.PathValue("id"), claims.Subject)
 	if err != nil {
 		h.withdrawalTransitionError(w, err, "approved")
 		return
 	}
+	h.auditAdmin(r, "withdrawal.approve", "payment_withdrawal", withdrawal.ID, map[string]any{
+		"app_id": withdrawal.AppID, "amount": withdrawal.Amount, "currency": withdrawal.Currency,
+	})
 	httputil.JSON(w, http.StatusOK, map[string]any{"data": withdrawal})
 }
 
@@ -597,6 +694,9 @@ func (h *Handler) RejectWithdrawal(w http.ResponseWriter, r *http.Request) {
 		h.withdrawalTransitionError(w, err, "rejected")
 		return
 	}
+	h.auditAdmin(r, "withdrawal.reject", "payment_withdrawal", withdrawal.ID, map[string]any{
+		"app_id": withdrawal.AppID, "amount": withdrawal.Amount, "currency": withdrawal.Currency,
+	})
 	httputil.JSON(w, http.StatusOK, map[string]any{"data": withdrawal})
 }
 
@@ -606,6 +706,9 @@ func (h *Handler) MarkWithdrawalPaid(w http.ResponseWriter, r *http.Request) {
 		h.withdrawalTransitionError(w, err, "marked paid")
 		return
 	}
+	h.auditAdmin(r, "withdrawal.mark_paid", "payment_withdrawal", withdrawal.ID, map[string]any{
+		"app_id": withdrawal.AppID, "amount": withdrawal.Amount, "currency": withdrawal.Currency,
+	})
 	httputil.JSON(w, http.StatusOK, map[string]any{"data": withdrawal})
 }
 
@@ -622,6 +725,9 @@ func (h *Handler) MarkWithdrawalFailed(w http.ResponseWriter, r *http.Request) {
 		h.withdrawalTransitionError(w, err, "marked failed")
 		return
 	}
+	h.auditAdmin(r, "withdrawal.mark_failed", "payment_withdrawal", withdrawal.ID, map[string]any{
+		"app_id": withdrawal.AppID, "amount": withdrawal.Amount, "currency": withdrawal.Currency,
+	})
 	httputil.JSON(w, http.StatusOK, map[string]any{"data": withdrawal})
 }
 
@@ -660,6 +766,9 @@ func (h *Handler) RetryWithdrawalPayout(w http.ResponseWriter, r *http.Request) 
 		})
 		return
 	}
+	h.auditAdmin(r, "withdrawal.retry_payout", "payment_withdrawal", withdrawal.ID, map[string]any{
+		"app_id": withdrawal.AppID, "amount": withdrawal.Amount, "currency": withdrawal.Currency,
+	})
 	httputil.JSON(w, http.StatusOK, map[string]any{"data": withdrawal})
 }
 
@@ -783,6 +892,9 @@ func (h *Handler) CreateProviderAccount(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	h.auditAdmin(r, "provider.create", "payment_provider_account", account.ID, map[string]any{
+		"provider": account.Provider, "name": account.Name, "environment": account.Environment,
+	})
 	httputil.JSON(w, http.StatusCreated, map[string]any{"data": account})
 }
 
@@ -813,6 +925,9 @@ func (h *Handler) UpdateProviderAccount(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	h.auditAdmin(r, "provider.update", "payment_provider_account", account.ID, map[string]any{
+		"provider": account.Provider, "name": account.Name, "environment": account.Environment,
+	})
 	httputil.JSON(w, http.StatusOK, map[string]any{"data": account})
 }
 
@@ -831,6 +946,7 @@ func (h *Handler) DeleteProviderAccount(w http.ResponseWriter, r *http.Request) 
 		httputil.Error(w, http.StatusInternalServerError, "delete_failed", "Unable to delete payment provider.", nil)
 		return
 	}
+	h.auditAdmin(r, "provider.delete", "payment_provider_account", r.PathValue("id"), nil)
 	httputil.JSON(w, http.StatusOK, map[string]any{"data": map[string]any{"deleted": true}})
 }
 
@@ -849,6 +965,7 @@ func (h *Handler) SetDefaultProviderAccount(w http.ResponseWriter, r *http.Reque
 		httputil.Error(w, http.StatusInternalServerError, "update_failed", "Unable to set default payment provider.", nil)
 		return
 	}
+	h.auditAdmin(r, "provider.set_default", "payment_provider_account", r.PathValue("id"), nil)
 	httputil.JSON(w, http.StatusOK, map[string]any{"data": map[string]any{"updated": true}})
 }
 
@@ -948,6 +1065,9 @@ func (h *Handler) RefundOrder(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	h.auditAdmin(r, "order.refund", "payment_order", r.PathValue("id"), map[string]any{
+		"amount": amount, "currency": in.Currency, "reason": in.Reason,
+	})
 	httputil.JSON(w, http.StatusOK, map[string]any{"data": result})
 }
 
@@ -1439,6 +1559,9 @@ func (h *Handler) MerchantCreateWithdrawal(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
+	if !h.requireNotSuspended(w, r, appID) {
+		return
+	}
 
 	var in createWithdrawalHTTPInput
 	rawBody, ok := readBodyJSON(w, r, h.maxBodyBytes, &in, "Unable to decode request body.")
@@ -1484,6 +1607,9 @@ func (h *Handler) MerchantApproveWithdrawal(w http.ResponseWriter, r *http.Reque
 	appID := r.PathValue("id")
 	userID, ok := h.requireOrgRole(w, r, appID, orgs.PermWithdraw)
 	if !ok {
+		return
+	}
+	if !h.requireNotSuspended(w, r, appID) {
 		return
 	}
 

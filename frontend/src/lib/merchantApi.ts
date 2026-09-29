@@ -1,4 +1,4 @@
-import { getAccessToken as readAccessToken } from "@/lib/auth";
+import { getCustomerToken } from "@/lib/auth";
 
 type ApiEnvelope<T> = {
   data: T;
@@ -51,7 +51,7 @@ async function request<T>(
     query?: Record<string, string | undefined>;
   },
 ): Promise<{ data: T; meta?: { total: number; limit: number; offset: number } }> {
-  const token = readAccessToken();
+  const token = getCustomerToken();
   if (!token) {
     throw new MerchantApiError(401, "You need to sign in to continue.", "unauthorized");
   }
@@ -387,4 +387,10 @@ export async function listMerchantDeliveries(appId: string, query?: { status?: s
 
 export async function replayMerchantDelivery(appId: string, deliveryId: string) {
   await request<unknown>(`/api/v1/merchant/apps/${appId}/deliveries/${deliveryId}/replay`, { method: "POST" });
+}
+
+// ---------- Identity ----------
+
+export async function getCustomerMe() {
+  return (await request<{ email: string; is_admin: boolean; user: any; email_verified: boolean; phone: string; phone_verified: boolean }>("/api/v1/auth/me")).data;
 }

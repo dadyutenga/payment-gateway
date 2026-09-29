@@ -113,6 +113,26 @@ func (r *fakeOrgRepository) UpdateOrgLogo(_ context.Context, orgID, logoURL stri
 	return Organization{ID: orgID, LogoURL: logoURL}, nil
 }
 
+func (r *fakeOrgRepository) SuspendOrg(_ context.Context, orgID, reason string) (Organization, error) {
+	return Organization{ID: orgID}, nil
+}
+
+func (r *fakeOrgRepository) UnsuspendOrg(_ context.Context, orgID string) (Organization, error) {
+	return Organization{ID: orgID}, nil
+}
+
+func (r *fakeOrgRepository) OrgSuspensionByApp(_ context.Context, _ string) (bool, string, error) {
+	return false, "", nil
+}
+
+func (r *fakeOrgRepository) WriteAudit(_ context.Context, _, _, _, _, _, _ string, _, _ map[string]any) error {
+	return nil
+}
+
+func (r *fakeOrgRepository) ListAudit(_ context.Context, _, _ string, _, _ int) ([]AuditEntry, error) {
+	return []AuditEntry{}, nil
+}
+
 func (r *fakeOrgRepository) DeleteOrganization(_ context.Context, _ string) error { return nil }
 
 func (r *fakeOrgRepository) CountApps(_ context.Context, _ string) (int64, error) { return r.apps, nil }

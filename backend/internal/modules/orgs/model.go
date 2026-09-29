@@ -91,6 +91,9 @@ type Organization struct {
 	ContactEmail  string    `json:"contact_email,omitempty"`
 	LogoURL       string    `json:"logo_url,omitempty"`
 	PrimaryColor  string    `json:"primary_color,omitempty"`
+	// Suspended orgs cannot move live money until unsuspended.
+	Suspended       bool      `json:"suspended"`
+	SuspendedReason string    `json:"suspended_reason,omitempty"`
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
 }

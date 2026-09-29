@@ -22,7 +22,7 @@ import {
   rejectKYC,
   updateOrgLimits,
   type KYCQueueItem,
-} from "@/lib/orgApi";
+} from "@/lib/adminOrgApi";
 
 const STATUS_TABS = ["submitted", "all", "verified", "rejected"] as const;
 

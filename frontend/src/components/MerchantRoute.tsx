@@ -1,10 +1,8 @@
 import { useEffect, useState } from "react";
 import { Navigate, useLocation } from "react-router-dom";
-import { getAccessToken, signOut } from "@/lib/auth";
-import { getAdminMe } from "@/lib/adminApi";
+import { getCustomerToken, signOutCustomer } from "@/lib/auth";
+import { getCustomerMe } from "@/lib/merchantApi";
 
-// Any signed-in user may use merchant self-service (admins included) —
-// per-app access is enforced server-side via membership, never here.
 const MerchantRoute = ({ children }: { children: JSX.Element }) => {
   const [state, setState] = useState<"loading" | "allowed" | "signed-out">("loading");
   const location = useLocation();
@@ -13,11 +11,11 @@ const MerchantRoute = ({ children }: { children: JSX.Element }) => {
     let mounted = true;
     (async () => {
       try {
-        if (!getAccessToken()) {
+        if (!getCustomerToken()) {
           if (mounted) setState("signed-out");
           return;
         }
-        await getAdminMe();
+        await getCustomerMe();
         if (mounted) setState("allowed");
       } catch {
         if (mounted) setState("signed-out");

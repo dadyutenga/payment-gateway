@@ -5,9 +5,11 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx"
 )
@@ -57,6 +59,17 @@ type Repository interface {
 	GetNotificationPrefs(ctx context.Context, orgID string) (NotificationPrefs, error)
 	// UpdateOrgLogo sets the org's logo location (uploaded path or URL).
 	UpdateOrgLogo(ctx context.Context, orgID, logoURL string) (Organization, error)
+	// SuspendOrg freezes live money movement (reason required); UnsuspendOrg
+	// lifts it. Both are admin-only and audited by the caller.
+	SuspendOrg(ctx context.Context, orgID, reason string) (Organization, error)
+	UnsuspendOrg(ctx context.Context, orgID string) (Organization, error)
+	// OrgSuspensionByApp resolves an app to its org's suspension state for
+	// money-movement gates.
+	OrgSuspensionByApp(ctx context.Context, appID string) (suspended bool, reason string, err error)
+	// WriteAudit records an admin mutation (best-effort by convention).
+	WriteAudit(ctx context.Context, actorID, actorEmail, action, targetType, targetID, ip string, before, after map[string]any) error
+	// ListAudit returns the trail newest-first (admin viewer).
+	ListAudit(ctx context.Context, action, actor string, limit, offset int) ([]AuditEntry, error)
 	// UpsertNotificationPrefs replaces the org's toggles.
 	UpsertNotificationPrefs(ctx context.Context, prefs NotificationPrefs) (NotificationPrefs, error)
 	// PlatformStats counts tenants and workload for the admin dashboard.
@@ -77,10 +90,12 @@ func scanOrganization(row interface {
 	var org Organization
 	var businessName, tin, maxTxn, dailyCap sql.NullString
 	var address, phone, contactEmail, logoURL, primaryColor sql.NullString
+	var suspendedReason sql.NullString
 	if err := row.Scan(
 		&org.ID, &org.Name, &org.Slug, &org.KYCStatus,
 		&businessName, &tin, &maxTxn, &dailyCap,
 		&address, &phone, &contactEmail, &logoURL, &primaryColor,
+		&org.Suspended, &suspendedReason,
 		&org.CreatedAt, &org.UpdatedAt,
 	); err != nil {
 		return Organization{}, err
@@ -94,6 +109,7 @@ func scanOrganization(row interface {
 	org.ContactEmail = contactEmail.String
 	org.LogoURL = logoURL.String
 	org.PrimaryColor = primaryColor.String
+	org.SuspendedReason = suspendedReason.String
 	return org, nil
 }
 
@@ -101,6 +117,7 @@ const organizationSelect = `
 	SELECT id::text, name, slug, kyc_status,
 	       business_name, tin, live_max_txn_amount, live_daily_volume_cap,
 	       address, phone, contact_email, logo_url, primary_color,
+	       suspended, COALESCE(suspended_reason, ''),
 	       created_at, updated_at
 	FROM app.organizations
 `
@@ -167,6 +184,7 @@ func (r *PostgresRepository) CreateOrganization(ctx context.Context, name, slug,
 		RETURNING id::text, name, slug, kyc_status, business_name, tin,
 		          live_max_txn_amount, live_daily_volume_cap,
 		          address, phone, contact_email, logo_url, primary_color,
+		          suspended, COALESCE(suspended_reason, ''),
 		          created_at, updated_at
 	`, nil, name, slug, valueOrNil(businessName)))
 	if err != nil {
@@ -207,6 +225,7 @@ func (r *PostgresRepository) ListOrganizationsForUser(ctx context.Context, userI
 		SELECT o.id::text, o.name, o.slug, o.kyc_status,
 		       o.business_name, o.tin, o.live_max_txn_amount, o.live_daily_volume_cap,
 		       o.address, o.phone, o.contact_email, o.logo_url, o.primary_color,
+		       o.suspended, COALESCE(o.suspended_reason, ''),
 		       o.created_at, o.updated_at,
 		       m.role, m.status
 		FROM app.org_members m
@@ -224,11 +243,13 @@ func (r *PostgresRepository) ListOrganizationsForUser(ctx context.Context, userI
 		var item OrganizationWithRole
 		var businessName, tin, maxTxn, dailyCap sql.NullString
 		var address, phone, contactEmail, logoURL, primaryColor sql.NullString
+		var suspendedReason sql.NullString
 		var role, status string
 		if err := rows.Scan(
 			&item.ID, &item.Name, &item.Slug, &item.KYCStatus,
 			&businessName, &tin, &maxTxn, &dailyCap,
 			&address, &phone, &contactEmail, &logoURL, &primaryColor,
+			&item.Suspended, &suspendedReason,
 			&item.CreatedAt, &item.UpdatedAt,
 			&role, &status,
 		); err != nil {
@@ -243,6 +264,7 @@ func (r *PostgresRepository) ListOrganizationsForUser(ctx context.Context, userI
 		item.ContactEmail = contactEmail.String
 		item.LogoURL = logoURL.String
 		item.PrimaryColor = primaryColor.String
+		item.SuspendedReason = suspendedReason.String
 		item.Role = Role(role)
 		item.Status = MemberStatus(status)
 		orgs = append(orgs, item)
@@ -262,6 +284,7 @@ func (r *PostgresRepository) UpdateOrganization(ctx context.Context, orgID strin
 		RETURNING id::text, name, slug, kyc_status, business_name, tin,
 		          live_max_txn_amount, live_daily_volume_cap,
 		          address, phone, contact_email, logo_url, primary_color,
+		          suspended, COALESCE(suspended_reason, ''),
 		          created_at, updated_at
 	`, nil, orgID, upd.Name, valueOrNil(upd.BusinessName), valueOrNil(upd.TIN),
 		valueOrNil(upd.Address), valueOrNil(upd.Phone), valueOrNil(upd.ContactEmail),
@@ -621,6 +644,7 @@ func (r *PostgresRepository) ReviewKYC(ctx context.Context, orgID, status, revie
 		RETURNING id::text, name, slug, kyc_status, business_name, tin,
 		          live_max_txn_amount, live_daily_volume_cap,
 		          address, phone, contact_email, logo_url, primary_color,
+		          suspended, COALESCE(suspended_reason, ''),
 		          created_at, updated_at
 	`, nil, orgID, status))
 	if err != nil {
@@ -872,6 +896,7 @@ func (r *PostgresRepository) UpdateOrgLogo(ctx context.Context, orgID, logoURL s
 		RETURNING id::text, name, slug, kyc_status, business_name, tin,
 		          live_max_txn_amount, live_daily_volume_cap,
 		          address, phone, contact_email, logo_url, primary_color,
+		          suspended, COALESCE(suspended_reason, ''),
 		          created_at, updated_at
 	`, nil, orgID, strings.TrimSpace(logoURL)))
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -881,6 +906,149 @@ func (r *PostgresRepository) UpdateOrgLogo(ctx context.Context, orgID, logoURL s
 		return Organization{}, fmt.Errorf("update org logo: %w", err)
 	}
 	return org, nil
+}
+
+// SuspendOrg freezes an org's live money movement (reason required).
+func (r *PostgresRepository) SuspendOrg(ctx context.Context, orgID, reason string) (Organization, error) {
+	org, err := scanOrganization(r.db.QueryRowEx(ctx, `
+		UPDATE app.organizations
+		SET suspended = true, suspended_reason = $2, suspended_at = NOW(), updated_at = NOW()
+		WHERE id = $1::uuid
+		RETURNING id::text, name, slug, kyc_status, business_name, tin,
+		          live_max_txn_amount, live_daily_volume_cap,
+		          address, phone, contact_email, logo_url, primary_color,
+		          suspended, COALESCE(suspended_reason, ''),
+		          created_at, updated_at
+	`, nil, orgID, strings.TrimSpace(reason)))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Organization{}, ErrOrgNotFound
+	}
+	if err != nil {
+		return Organization{}, fmt.Errorf("suspend org: %w", err)
+	}
+	return org, nil
+}
+
+// UnsuspendOrg lifts a suspension.
+func (r *PostgresRepository) UnsuspendOrg(ctx context.Context, orgID string) (Organization, error) {
+	org, err := scanOrganization(r.db.QueryRowEx(ctx, `
+		UPDATE app.organizations
+		SET suspended = false, suspended_reason = '', suspended_at = NULL, updated_at = NOW()
+		WHERE id = $1::uuid
+		RETURNING id::text, name, slug, kyc_status, business_name, tin,
+		          live_max_txn_amount, live_daily_volume_cap,
+		          address, phone, contact_email, logo_url, primary_color,
+		          suspended, COALESCE(suspended_reason, ''),
+		          created_at, updated_at
+	`, nil, orgID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Organization{}, ErrOrgNotFound
+	}
+	if err != nil {
+		return Organization{}, fmt.Errorf("unsuspend org: %w", err)
+	}
+	return org, nil
+}
+
+// AuditEntry is one admin-action trail row.
+type AuditEntry struct {
+	ID        string `json:"id"`
+	ActorID   string `json:"actor_id"`
+	ActorEmail string `json:"actor_email"`
+	Action    string `json:"action"`
+	TargetType string `json:"target_type"`
+	TargetID  string `json:"target_id"`
+	Before    string `json:"before,omitempty"`
+	After     string `json:"after,omitempty"`
+	IP        string `json:"ip,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// WriteAudit records an admin mutation. Best-effort by convention:
+// callers log but never fail the mutation on audit errors.
+func (r *PostgresRepository) WriteAudit(ctx context.Context, actorID, actorEmail, action, targetType, targetID, ip string, before, after map[string]any) error {
+	var beforeJSON, afterJSON *string
+	if before != nil {
+		if raw, err := json.Marshal(before); err == nil {
+			str := string(raw)
+			beforeJSON = &str
+		}
+	}
+	if after != nil {
+		if raw, err := json.Marshal(after); err == nil {
+			str := string(raw)
+			afterJSON = &str
+		}
+	}
+	_, err := r.db.ExecEx(ctx, `INSERT INTO app.audit_log (actor_id, actor_email, action, target_type, target_id, before_data, after_data, ip)
+		VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8)`,
+		nil, actorID, actorEmail, action, targetType, targetID, beforeJSON, afterJSON, ip)
+	if err != nil {
+		return fmt.Errorf("write audit log: %w", err)
+	}
+	return nil
+}
+
+// ListAudit returns the trail newest-first (admin viewer), paginated.
+func (r *PostgresRepository) ListAudit(ctx context.Context, action, actor string, limit, offset int) ([]AuditEntry, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	conds := []string{}
+	args := []any{}
+	if action != "" {
+		args = append(args, action)
+		conds = append(conds, fmt.Sprintf("action = $%d", len(args)))
+	}
+	if actor != "" {
+		args = append(args, "%"+actor+"%")
+		conds = append(conds, fmt.Sprintf("actor_email ILIKE $%d", len(args)))
+	}
+	where := "TRUE"
+	if len(conds) > 0 {
+		where = strings.Join(conds, " AND ")
+	}
+	rows, err := r.db.QueryEx(ctx, fmt.Sprintf(`
+		SELECT id::text, actor_id, actor_email, action, target_type, target_id,
+		       COALESCE(before_data::text, ''), COALESCE(after_data::text, ''), COALESCE(ip, ''),
+		       created_at
+		FROM app.audit_log WHERE %s ORDER BY created_at DESC LIMIT %d OFFSET %d`, where, limit, offset), nil, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list audit log: %w", err)
+	}
+	defer rows.Close()
+	out := []AuditEntry{}
+	for rows.Next() {
+		var e AuditEntry
+		if err := rows.Scan(&e.ID, &e.ActorID, &e.ActorEmail, &e.Action, &e.TargetType, &e.TargetID,
+			&e.Before, &e.After, &e.IP, &e.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan audit log: %w", err)
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// OrgSuspensionByApp resolves an app to its org's suspension state for
+// money-movement gates. Unknown apps error (fail closed).
+func (r *PostgresRepository) OrgSuspensionByApp(ctx context.Context, appID string) (bool, string, error) {
+	var suspended bool
+	var reason sql.NullString
+	err := r.db.QueryRowEx(ctx, `
+		SELECT o.suspended, o.suspended_reason
+		FROM app.payment_apps a
+		JOIN app.organizations o ON o.id = a.org_id
+		WHERE a.id = $1::uuid`, nil, appID).Scan(&suspended, &reason)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, "", ErrOrgNotFound
+	}
+	if err != nil {
+		return false, "", fmt.Errorf("org suspension by app: %w", err)
+	}
+	return suspended, reason.String, nil
 }
 
 // UpdateOrgLiveLimits sets per-org live caps; empty clears to platform
@@ -893,7 +1061,10 @@ func (r *PostgresRepository) UpdateOrgLiveLimits(ctx context.Context, orgID, max
 		    updated_at = NOW()
 		WHERE id = $1::uuid
 		RETURNING id::text, name, slug, kyc_status, business_name, tin,
-		          live_max_txn_amount, live_daily_volume_cap, created_at, updated_at
+		          live_max_txn_amount, live_daily_volume_cap,
+		          address, phone, contact_email, logo_url, primary_color,
+		          suspended, COALESCE(suspended_reason, ''),
+		          created_at, updated_at
 	`, nil, orgID, strings.TrimSpace(maxTxn), strings.TrimSpace(dailyCap)))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Organization{}, ErrOrgNotFound

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -644,7 +645,33 @@ func (h *Handler) ServeOrgLogo(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, clean)
 }
 
-// ---------- Admin: KYC review queue, decisions, live limits ----------
+// auditAdmin records an admin mutation best-effort (never fails the
+// request). Callers are RequireAdminAuth-gated; identity comes from the
+// verified claims, never client input.
+func (h *Handler) auditAdmin(r *http.Request, action, targetType, targetID string, before, after map[string]any) {
+	claims, ok := middleware.ClaimsFromContext(r.Context())
+	if !ok {
+		return
+	}
+	ip := requestIP(r)
+	if err := h.service.WriteAudit(r.Context(), claims.Subject, claims.Email, action, targetType, targetID, ip, before, after); err != nil {
+		h.logger.Warn("audit write failed", "action", action, "target", targetID, "error", err)
+	}
+}
+
+func requestIP(r *http.Request) string {
+	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
+		if idx := strings.Index(forwarded, ","); idx >= 0 {
+			return strings.TrimSpace(forwarded[:idx])
+		}
+		return forwarded
+	}
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err != nil {
+		return strings.TrimSpace(r.RemoteAddr)
+	}
+	return host
+}
 // All routes carry RequireAdmin; handlers use claimsIdentity (no org
 // membership needed) and record the reviewer's email on decisions.
 
@@ -710,6 +737,8 @@ func (h *Handler) ApproveKYC(w http.ResponseWriter, r *http.Request) {
 		httputil.Error(w, http.StatusUnprocessableEntity, "validation_failed", "Please check your review.", vErrs)
 		return
 	}
+	h.auditAdmin(r, "kyc.approve", "organization", org.ID,
+		map[string]any{"kyc_status": "submitted"}, map[string]any{"kyc_status": "verified"})
 	httputil.JSON(w, http.StatusOK, map[string]any{"data": org})
 }
 
@@ -737,6 +766,9 @@ func (h *Handler) RejectKYC(w http.ResponseWriter, r *http.Request) {
 		httputil.Error(w, http.StatusUnprocessableEntity, "validation_failed", "A rejection reason is required.", vErrs)
 		return
 	}
+	h.auditAdmin(r, "kyc.reject", "organization", org.ID,
+		map[string]any{"kyc_status": "submitted"},
+		map[string]any{"kyc_status": "rejected", "reason": in.Reason})
 	httputil.JSON(w, http.StatusOK, map[string]any{"data": org})
 }
 
@@ -779,7 +811,89 @@ func (h *Handler) UpdateOrgLiveLimits(w http.ResponseWriter, r *http.Request) {
 		httputil.Error(w, http.StatusUnprocessableEntity, "validation_failed", "Limits must be positive numbers, or empty for the platform default.", vErrs)
 		return
 	}
+	h.auditAdmin(r, "org.update_limits", "organization", org.ID, nil, map[string]any{
+		"live_max_txn_amount": in.LiveMaxTxnAmount, "live_daily_volume_cap": in.LiveDailyVolumeCap,
+	})
 	httputil.JSON(w, http.StatusOK, map[string]any{"data": org})
+}
+
+type suspendOrgHTTPInput struct {
+	Reason string `json:"reason"`
+}
+
+// SuspendOrg freezes an org's live money movement (reason required).
+func (h *Handler) SuspendOrg(w http.ResponseWriter, r *http.Request) {
+	if _, _, ok := claimsIdentity(w, r); !ok {
+		return
+	}
+	var in suspendOrgHTTPInput
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil && !errors.Is(err, io.EOF) {
+		httputil.Error(w, http.StatusBadRequest, "invalid_request", "Unable to decode request body.", nil)
+		return
+	}
+	org, vErrs, err := h.service.SuspendOrg(r.Context(), r.PathValue("orgID"), in.Reason)
+	if err != nil {
+		if errors.Is(err, ErrOrgNotFound) {
+			httputil.Error(w, http.StatusNotFound, "not_found", "Organization not found.", nil)
+			return
+		}
+		h.fail(w, http.StatusInternalServerError, "internal_error", "Unable to suspend organization.", err)
+		return
+	}
+	if vErrs.Any() {
+		httputil.Error(w, http.StatusUnprocessableEntity, "validation_failed", "A suspension reason is required.", vErrs)
+		return
+	}
+	h.auditAdmin(r, "org.suspend", "organization", org.ID,
+		map[string]any{"suspended": false},
+		map[string]any{"suspended": true, "reason": in.Reason})
+	httputil.JSON(w, http.StatusOK, map[string]any{"data": org})
+}
+
+// UnsuspendOrg lifts an org suspension.
+func (h *Handler) UnsuspendOrg(w http.ResponseWriter, r *http.Request) {
+	if _, _, ok := claimsIdentity(w, r); !ok {
+		return
+	}
+	org, err := h.service.UnsuspendOrg(r.Context(), r.PathValue("orgID"))
+	if err != nil {
+		if errors.Is(err, ErrOrgNotFound) {
+			httputil.Error(w, http.StatusNotFound, "not_found", "Organization not found.", nil)
+			return
+		}
+		h.fail(w, http.StatusInternalServerError, "internal_error", "Unable to unsuspend organization.", err)
+		return
+	}
+	h.auditAdmin(r, "org.unsuspend", "organization", org.ID,
+		map[string]any{"suspended": true}, map[string]any{"suspended": false})
+	httputil.JSON(w, http.StatusOK, map[string]any{"data": org})
+}
+
+// ListAudit serves the admin audit trail viewer (paginated, filterable).
+func (h *Handler) ListAudit(w http.ResponseWriter, r *http.Request) {
+	if _, _, ok := claimsIdentity(w, r); !ok {
+		return
+	}
+	q := r.URL.Query()
+	limit, offset := 50, 0
+	if raw := strings.TrimSpace(q.Get("limit")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 && n <= 200 {
+			limit = n
+		}
+	}
+	if raw := strings.TrimSpace(q.Get("offset")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n >= 0 {
+			offset = n
+		}
+	}
+	entries, err := h.service.ListAudit(r.Context(),
+		strings.TrimSpace(q.Get("action")), strings.TrimSpace(q.Get("actor")), limit, offset)
+	if err != nil {
+		h.fail(w, http.StatusInternalServerError, "internal_error", "Unable to load audit log.", err)
+		return
+	}
+	httputil.JSON(w, http.StatusOK, map[string]any{"data": entries})
 }
 
 // AdminServeKYCDocument streams an org's ID document without a membership

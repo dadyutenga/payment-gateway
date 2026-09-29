@@ -1,4 +1,4 @@
-import { getAccessToken as readAccessToken } from "@/lib/auth";
+import { getAdminToken } from "@/lib/auth";
 
 export class AnalyticsApiError extends Error {
   status: number;
@@ -41,7 +41,7 @@ function toQueryString(q?: AnalyticsQuery): string {
 }
 
 async function get<T>(path: string, q?: AnalyticsQuery): Promise<T> {
-  const token = readAccessToken();
+  const token = getAdminToken();
   if (!token) throw new AnalyticsApiError(401, "You need to sign in to continue.", "unauthorized");
   const response = await fetch(`${apiBaseUrl}${path}${toQueryString(q)}`, {
     headers: { Accept: "application/json", Authorization: `Bearer ${token}` },
@@ -54,7 +54,7 @@ async function get<T>(path: string, q?: AnalyticsQuery): Promise<T> {
 }
 
 export async function downloadReportCSV(report: string, q?: AnalyticsQuery) {
-  const token = readAccessToken();
+  const token = getAdminToken();
   if (!token) throw new AnalyticsApiError(401, "You need to sign in to continue.", "unauthorized");
   const response = await fetch(`${apiBaseUrl}/api/v1/admin/analytics/export/${report}?format=csv${toQueryString(q).replace("?", "&")}`, {
     headers: { Authorization: `Bearer ${token}` },
