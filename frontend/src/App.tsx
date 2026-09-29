@@ -28,6 +28,13 @@ import MerchantWebhooks from "@/pages/MerchantWebhooks";
 import MerchantApiKeys from "@/pages/MerchantApiKeys";
 import MerchantDeliveries from "@/pages/MerchantDeliveries";
 import MerchantSettings from "@/pages/MerchantSettings";
+import MerchantAnalyticsOverview from "@/pages/MerchantAnalyticsOverview";
+import MerchantAnalyticsMethods from "@/pages/MerchantAnalyticsMethods";
+import MerchantAnalyticsPeakHours from "@/pages/MerchantAnalyticsPeakHours";
+import MerchantAnalyticsCustomers from "@/pages/MerchantAnalyticsCustomers";
+import MerchantAnalyticsFailures from "@/pages/MerchantAnalyticsFailures";
+import MerchantSettlements from "@/pages/MerchantSettlements";
+import { MerchantAnalyticsIndex, MerchantSettlementsIndex } from "@/pages/MerchantAnalyticsIndex";
 import CreateOrg from "@/pages/CreateOrg";
 import OrgMembers from "@/pages/OrgMembers";
 import OrgSettings from "@/pages/OrgSettings";
@@ -89,6 +96,8 @@ const App = () => (
             <Route path="webhooks" element={<MerchantWebhooks />} />
             <Route path="api-keys" element={<MerchantApiKeys />} />
             <Route path="deliveries" element={<MerchantDeliveries />} />
+            <Route path="analytics" element={<MerchantAnalyticsIndex />} />
+            <Route path="settlements" element={<MerchantSettlementsIndex />} />
             <Route path="settings" element={<MerchantSettings />} />
           </Route>
           <Route
@@ -111,6 +120,12 @@ const App = () => (
           >
             <Route path="members" element={<OrgMembers />} />
             <Route path="settings" element={<OrgSettings />} />
+            <Route path="analytics" element={<MerchantAnalyticsOverview />} />
+            <Route path="analytics/methods" element={<MerchantAnalyticsMethods />} />
+            <Route path="analytics/peak-hours" element={<MerchantAnalyticsPeakHours />} />
+            <Route path="analytics/customers" element={<MerchantAnalyticsCustomers />} />
+            <Route path="analytics/failures" element={<MerchantAnalyticsFailures />} />
+            <Route path="settlements" element={<MerchantSettlements />} />
           </Route>
           <Route
             path="/onboarding/kyc/:orgId"

@@ -6,6 +6,8 @@ import SandboxModeBanner from "@/components/SandboxModeBanner";
 const NAV_ITEMS: { to: string; label: string; end?: boolean }[] = [
   { to: "/merchant", label: "Home", end: true },
   { to: "/merchant/apps", label: "My Apps" },
+  { to: "/merchant/analytics", label: "Analytics" },
+  { to: "/merchant/settlements", label: "Settlements" },
   { to: "/merchant/payments", label: "Payments" },
   { to: "/merchant/withdrawals", label: "Withdrawals" },
   { to: "/merchant/webhooks", label: "Webhooks" },
