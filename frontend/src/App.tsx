@@ -34,7 +34,7 @@ import MerchantAnalyticsPeakHours from "@/pages/MerchantAnalyticsPeakHours";
 import MerchantAnalyticsCustomers from "@/pages/MerchantAnalyticsCustomers";
 import MerchantAnalyticsFailures from "@/pages/MerchantAnalyticsFailures";
 import MerchantSettlements from "@/pages/MerchantSettlements";
-import { MerchantAnalyticsIndex, MerchantSettlementsIndex } from "@/pages/MerchantAnalyticsIndex";
+import { MerchantAnalyticsIndex, MerchantSettlementsIndex, MerchantTeamIndex } from "@/pages/MerchantAnalyticsIndex";
 import CreateOrg from "@/pages/CreateOrg";
 import OrgMembers from "@/pages/OrgMembers";
 import OrgSettings from "@/pages/OrgSettings";
@@ -97,7 +97,12 @@ const App = () => (
             <Route path="api-keys" element={<MerchantApiKeys />} />
             <Route path="deliveries" element={<MerchantDeliveries />} />
             <Route path="analytics" element={<MerchantAnalyticsIndex />} />
+            <Route path="analytics/methods" element={<MerchantAnalyticsMethodsIndex />} />
+            <Route path="analytics/peak-hours" element={<MerchantAnalyticsPeakHoursIndex />} />
+            <Route path="analytics/customers" element={<MerchantAnalyticsCustomersIndex />} />
+            <Route path="analytics/failures" element={<MerchantAnalyticsFailuresIndex />} />
             <Route path="settlements" element={<MerchantSettlementsIndex />} />
+            <Route path="team" element={<MerchantTeamIndex />} />
             <Route path="settings" element={<MerchantSettings />} />
           </Route>
           <Route

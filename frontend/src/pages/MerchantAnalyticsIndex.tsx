@@ -26,4 +26,9 @@ function Redirect({ to }: { to: (orgId: string) => string }) {
 }
 
 export const MerchantAnalyticsIndex = () => <Redirect to={(id) => `/org/${id}/analytics`} />;
+export const MerchantAnalyticsMethodsIndex = () => <Redirect to={(id) => `/org/${id}/analytics/methods`} />;
+export const MerchantAnalyticsPeakHoursIndex = () => <Redirect to={(id) => `/org/${id}/analytics/peak-hours`} />;
+export const MerchantAnalyticsCustomersIndex = () => <Redirect to={(id) => `/org/${id}/analytics/customers`} />;
+export const MerchantAnalyticsFailuresIndex = () => <Redirect to={(id) => `/org/${id}/analytics/failures`} />;
 export const MerchantSettlementsIndex = () => <Redirect to={(id) => `/org/${id}/settlements`} />;
+export const MerchantTeamIndex = () => <Redirect to={(id) => `/org/${id}/members`} />;
