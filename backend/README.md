@@ -120,9 +120,41 @@ until `AUTH_ADMIN_TOKEN_TTL` expires.
   `PAYMENTS_LIVE_DAILY_VOLUME_CAP` (ledger-summed per app/currency/UTC
   day) return `422 live_txn_cap_exceeded` / `422 live_daily_cap_exceeded`.
   Sandbox orders skip both.
+- **Creator risk posture (tighter than merchants):** creator-kind orgs
+  resolve the same caps from stricter platform defaults —
+  `PAYMENTS_CREATOR_LIVE_MAX_TXN_AMOUNT` (default `1000000`) and
+  `PAYMENTS_CREATOR_LIVE_DAILY_VOLUME_CAP` (default `10000000`).
+  Resolution order per org is admin override, then kind default
+  (creator vs merchant). A creator stays below the merchant tier until
+  an admin raises that org via `PATCH .../limits`; the onboarding
+  survey's self-reported bands only feed the admin risk signal, never
+  limits. The public support page's max amount is clamped to the same
+  creator tier even for pre-verification (sandbox) orders.
 - Frontend: `/signup` (email + OTP verify), `/onboarding/kyc/{orgID}`
   (business name, TIN, document upload), and a sandbox-mode banner while
   the active org is unverified.
+
+## Creator risk posture (Part 5)
+
+- **Expected vs actual:** `GET /api/v1/admin/analytics/merchants/volume-vs-expected[?volume_days=N]`
+  (default 14) flags creator orgs whose paid live volume in their first
+  N days live exceeds the survey band ceiling — surface-only, same
+  posture as churn-risk (never blocks), CSV-exportable as
+  `volume-vs-expected`, shown under Merchants → Volume vs expected.
+- **Payout destinations:** one saved mobile-money destination per
+  creator org (`GET|POST /api/v1/merchant/orgs/{orgID}/payout-destination`).
+  Saves require a fresh OTP (`purpose=payout_destination`, standard OTP
+  endpoints) and a verified identity whose name the attested account
+  name must match (token-subset compare; mismatch is `422`). Changes
+  take effect after a 24h cooling period; creator withdrawals
+  (merchant and admin paths alike) must target the effective
+  destination (`422 destination_mismatch` / `409 destination_cooling`),
+  mobile money only. Merchant per-request destinations are unchanged.
+- **Provider name lookup:** no adapter implements
+  `provider.AccountNameResolver`, so saves record
+  `name_match=unavailable` with the reason explicitly — surfaced in
+  Settings and never skipped silently. Register the kind in
+  `accountNameResolverKinds` when such an adapter lands.
 
 ## Admin: KYC review & per-org live limits
 

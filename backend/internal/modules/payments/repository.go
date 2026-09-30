@@ -82,6 +82,12 @@ type Repository interface {
 	CreateWithdrawal(ctx context.Context, input CreateWithdrawalInput) (PaymentWithdrawal, error)
 	ListWithdrawals(ctx context.Context, filter WithdrawalListFilter) (WithdrawalListResult, error)
 	GetWithdrawalByID(ctx context.Context, id string) (PaymentWithdrawal, error)
+	// GetCreatorPayoutDestination loads an org's saved payout destination;
+	// found=false when none was ever saved.
+	GetCreatorPayoutDestination(ctx context.Context, orgID string) (CreatorPayoutDestination, bool, error)
+	// UpsertCreatorPayoutDestination writes the destination row (cooling
+	// already computed by the service).
+	UpsertCreatorPayoutDestination(ctx context.Context, orgID string, dest CreatorPayoutDestination) (CreatorPayoutDestination, error)
 	ApproveWithdrawal(ctx context.Context, id, approvedBy string) (PaymentWithdrawal, error)
 	RejectWithdrawal(ctx context.Context, id string) (PaymentWithdrawal, error)
 	MarkWithdrawalPaid(ctx context.Context, id string) (PaymentWithdrawal, error)
@@ -108,6 +114,10 @@ type Repository interface {
 	// GetOrgLiveLimits returns an org's per-org live caps; empty strings
 	// mean "platform default". Unknown orgs error.
 	GetOrgLiveLimits(ctx context.Context, orgID string) (maxTxn, dailyCap string, err error)
+	// GetOrgAccountKind returns an org's account kind (merchant|creator,
+	// defaulting to merchant for rows predating the creator track).
+	// Unknown orgs error.
+	GetOrgAccountKind(ctx context.Context, orgID string) (string, error)
 
 	GetPaymentOrderByID(ctx context.Context, paymentOrderID string) (PaymentOrder, error)
 	GetPaymentEventByID(ctx context.Context, eventID string) (PaymentEvent, error)
@@ -273,6 +283,23 @@ func (r *PostgresRepository) GetOrgLiveLimits(ctx context.Context, orgID string)
 		return "", "", fmt.Errorf("get org live limits: %w", err)
 	}
 	return maxTxn.String, dailyCap.String, nil
+}
+
+// GetOrgAccountKind returns an org's account kind for kind-aware guardrail
+// defaults (Part 5 risk posture). Unknown orgs error.
+func (r *PostgresRepository) GetOrgAccountKind(ctx context.Context, orgID string) (string, error) {
+	var kind sql.NullString
+	err := r.db.QueryRowEx(ctx, `
+		SELECT COALESCE(account_kind, 'merchant')
+		FROM app.organizations WHERE id = $1::uuid
+	`, nil, orgID).Scan(&kind)
+	if err != nil {
+		return "", fmt.Errorf("get org account kind: %w", err)
+	}
+	if strings.TrimSpace(kind.String) == "" {
+		return "merchant", nil
+	}
+	return kind.String, nil
 }
 
 func (r *PostgresRepository) GetPaymentAppByID(ctx context.Context, appID string) (PaymentApp, error) {
@@ -2426,6 +2453,84 @@ func (r *PostgresRepository) CreateWithdrawal(ctx context.Context, input CreateW
 
 	row := r.db.QueryRowEx(ctx, q, nil, input.AppID, input.Amount, input.Currency, input.DestinationType, string(details), input.RequestedBy, input.Notes)
 	return scanWithdrawal(row)
+}
+
+// scanCreatorPayoutDestination maps one saved-destination row.
+func scanCreatorPayoutDestination(row interface{ Scan(dest ...interface{}) error }) (CreatorPayoutDestination, error) {
+	var d CreatorPayoutDestination
+	var otpVerifiedAt sql.NullTime
+	if err := row.Scan(
+		&d.ID, &d.OrgID, &d.Provider, &d.Phone, &d.AccountName,
+		&d.NameMatch, &d.NameMatchDetail,
+		&otpVerifiedAt, &d.EffectiveAt, &d.CreatedAt, &d.UpdatedAt,
+	); err != nil {
+		return CreatorPayoutDestination{}, err
+	}
+	if otpVerifiedAt.Valid {
+		t := otpVerifiedAt.Time
+		d.OTPVerifiedAt = &t
+	}
+	return d, nil
+}
+
+const creatorPayoutDestinationColumns = `
+	id::text, org_id::text, provider, phone, account_name,
+	name_match, name_match_detail,
+	otp_verified_at, effective_at, created_at, updated_at
+`
+
+// GetCreatorPayoutDestination loads an org's saved payout destination;
+// found=false when none was ever saved.
+func (r *PostgresRepository) GetCreatorPayoutDestination(ctx context.Context, orgID string) (CreatorPayoutDestination, bool, error) {
+	dest, err := scanCreatorPayoutDestination(r.db.QueryRowEx(ctx, fmt.Sprintf(`
+		SELECT %s FROM app.creator_payout_destinations WHERE org_id = $1::uuid
+	`, creatorPayoutDestinationColumns), nil, orgID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return CreatorPayoutDestination{}, false, nil
+	}
+	if err != nil {
+		return CreatorPayoutDestination{}, false, fmt.Errorf("get creator payout destination: %w", err)
+	}
+	return dest, true, nil
+}
+
+// UpsertCreatorPayoutDestination writes the destination row (cooling
+// already computed by the service).
+func (r *PostgresRepository) UpsertCreatorPayoutDestination(ctx context.Context, orgID string, dest CreatorPayoutDestination) (CreatorPayoutDestination, error) {
+	var out CreatorPayoutDestination
+	var otpVerifiedAt sql.NullTime
+	if dest.OTPVerifiedAt != nil {
+		otpVerifiedAt = sql.NullTime{Time: *dest.OTPVerifiedAt, Valid: true}
+	}
+	err := r.db.QueryRowEx(ctx, fmt.Sprintf(`
+		INSERT INTO app.creator_payout_destinations
+		  (org_id, provider, phone, account_name, name_match, name_match_detail, otp_verified_at, effective_at, updated_at)
+		VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, NOW())
+		ON CONFLICT (org_id) DO UPDATE SET
+		  provider = EXCLUDED.provider,
+		  phone = EXCLUDED.phone,
+		  account_name = EXCLUDED.account_name,
+		  name_match = EXCLUDED.name_match,
+		  name_match_detail = EXCLUDED.name_match_detail,
+		  otp_verified_at = EXCLUDED.otp_verified_at,
+		  effective_at = EXCLUDED.effective_at,
+		  updated_at = NOW()
+		RETURNING %s
+	`, creatorPayoutDestinationColumns), nil,
+		orgID, dest.Provider, dest.Phone, dest.AccountName,
+		dest.NameMatch, dest.NameMatchDetail, otpVerifiedAt, dest.EffectiveAt).Scan(
+		&out.ID, &out.OrgID, &out.Provider, &out.Phone, &out.AccountName,
+		&out.NameMatch, &out.NameMatchDetail,
+		&otpVerifiedAt, &out.EffectiveAt, &out.CreatedAt, &out.UpdatedAt,
+	)
+	if err != nil {
+		return CreatorPayoutDestination{}, fmt.Errorf("upsert creator payout destination: %w", err)
+	}
+	if otpVerifiedAt.Valid {
+		t := otpVerifiedAt.Time
+		out.OTPVerifiedAt = &t
+	}
+	return out, nil
 }
 
 func (r *PostgresRepository) ListWithdrawals(ctx context.Context, filter WithdrawalListFilter) (WithdrawalListResult, error) {

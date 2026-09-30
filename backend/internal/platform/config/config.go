@@ -115,6 +115,13 @@ type PaymentConfig struct {
 	// disables the respective check (defaults applied in payments.NewService).
 	LiveMaxTxnAmount   string
 	LiveDailyVolumeCap string
+	// CreatorLiveMaxTxnAmount / CreatorLiveDailyVolumeCap are the
+	// stricter default tiers for creator accounts (Part 5 risk posture):
+	// lower than the merchant defaults above, applied when the org has no
+	// admin-set override. Admin overrides still win for either kind, so a
+	// creator can be raised manually — never by self-reported survey data.
+	CreatorLiveMaxTxnAmount   string
+	CreatorLiveDailyVolumeCap string
 	// PayerHashSecret keys analytics payer hashing. Empty falls back to
 	// the delivery signing secret (dev convenience); production should
 	// set a distinct ANALYTICS_PAYER_SECRET.
@@ -186,6 +193,8 @@ func Load() (Config, error) {
 			ExpiryInterval:                 mustDuration("PAYMENTS_EXPIRY_INTERVAL", "1m"),
 			LiveMaxTxnAmount:               strings.TrimSpace(os.Getenv("PAYMENTS_LIVE_MAX_TXN_AMOUNT")),
 			LiveDailyVolumeCap:             strings.TrimSpace(os.Getenv("PAYMENTS_LIVE_DAILY_VOLUME_CAP")),
+			CreatorLiveMaxTxnAmount:        strings.TrimSpace(os.Getenv("PAYMENTS_CREATOR_LIVE_MAX_TXN_AMOUNT")),
+			CreatorLiveDailyVolumeCap:      strings.TrimSpace(os.Getenv("PAYMENTS_CREATOR_LIVE_DAILY_VOLUME_CAP")),
 			PayerHashSecret:                strings.TrimSpace(os.Getenv("ANALYTICS_PAYER_SECRET")),
 		},
 	}

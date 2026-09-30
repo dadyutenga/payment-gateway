@@ -16,10 +16,12 @@ import {
   getLimitsUsage,
   getNotificationPrefs,
   getOrg,
+  getPayoutDestination,
   getSupportSettings,
   listKYCAttempts,
   listOrgMembers,
   resolveLogoSrc,
+  savePayoutDestination,
   updateNotificationPrefs,
   updateOrg,
   updateSupportSettings,
@@ -28,7 +30,7 @@ import {
   type Organization,
 } from "@/lib/orgApi";
 import CreatorSurveyForm, { loadCreatorSurvey } from "@/components/CreatorSurveyForm";
-import { changePassword, getKYC, getOwnProfile, updateOwnProfile } from "@/lib/signupApi";
+import { changePassword, getKYC, getOwnProfile, requestOTP, updateOwnProfile } from "@/lib/signupApi";
 import { listMerchantWithdrawals, listMyApps } from "@/lib/merchantApi";
 
 function errorMessage(err: unknown, fallback: string) {
@@ -336,6 +338,9 @@ const LimitsTab = ({ org }: { org: Organization }) => {
       <p className="text-xs text-slate-500">
         Read-only — caps are set by platform defaults or an admin override. Ask an admin to adjust them.
         Volume is computed live from the ledger, live environment only.
+        {isCreatorOrg(org) && (
+          <> Creator accounts start on a stricter tier than businesses — an admin can raise your org individually.</>
+        )}
       </p>
       {usageQuery.isLoading && <p className="text-sm text-slate-500">Loading limits…</p>}
       {usageQuery.error && <p className="text-sm text-red-600">Unable to load limits right now.</p>}
@@ -349,13 +354,13 @@ const LimitsTab = ({ org }: { org: Organization }) => {
             <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
               <div className="rounded-lg bg-slate-50 px-3 py-2.5">
                 <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
-                  Max per transaction · {app.max_txn_source === "org_override" ? "org override" : "platform default"}
+                  Max per transaction · {sourceLabel(app.max_txn_source)}
                 </p>
                 <p className="mt-0.5 text-base font-extrabold text-slate-900">{app.max_txn || "—"}</p>
               </div>
               <div className="rounded-lg bg-slate-50 px-3 py-2.5">
                 <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
-                  Daily volume cap · {app.daily_cap_source === "org_override" ? "org override" : "platform default"}
+                  Daily volume cap · {sourceLabel(app.daily_cap_source)}
                 </p>
                 <p className="mt-0.5 text-base font-extrabold text-slate-900">{app.daily_cap || "—"}</p>
               </div>
@@ -388,6 +393,12 @@ const LimitsTab = ({ org }: { org: Organization }) => {
     </div>
   );
 };
+
+function sourceLabel(source: string) {
+  if (source === "org_override") return "org override";
+  if (source === "platform_creator") return "creator tier default";
+  return "platform default";
+}
 
 // ---------- Security tab (own profile + own password) ----------
 
@@ -735,7 +746,10 @@ function destinationSummary(w: { destination_type: string; destination_details: 
   return [d.bank_name, d.account_number].filter(Boolean).join(" · ") || "Bank transfer";
 }
 
-const PayoutsTab = () => {
+const PayoutsTab = ({ org, isOwner }: { org: Organization; isOwner: boolean }) => {
+  if (org && isCreatorOrg(org)) {
+    return <CreatorPayoutDestinationCard org={org} isOwner={isOwner} />;
+  }
   const appsQuery = useQuery({ queryKey: ["merchant", "my-apps"], queryFn: () => listMyApps(), staleTime: 30_000 });
   const apps = appsQuery.data ?? [];
   const withdrawalQueries = useQueries({
@@ -788,6 +802,147 @@ const PayoutsTab = () => {
               ))}
             </TableBody>
           </Table>
+        )}
+      </CardContent>
+    </Card>
+  );
+};
+
+// ---------- Creator payout destination (OTP-gated, 24h cooling) ----------
+
+const MOBILE_PROVIDERS = ["mpesa", "tigo", "airtel", "halotel"] as const;
+
+const CreatorPayoutDestinationCard = ({ org, isOwner }: { org: Organization; isOwner: boolean }) => {
+  const queryClient = useQueryClient();
+  const destQuery = useQuery({
+    queryKey: ["orgs", org.id, "payout-destination"],
+    queryFn: () => getPayoutDestination(org.id),
+    staleTime: 15_000,
+  });
+  const dest = destQuery.data ?? null;
+  const cooling = dest ? new Date(dest.effective_at).getTime() > Date.now() : false;
+
+  const [provider, setProvider] = useState("mpesa");
+  const [phone, setPhone] = useState("");
+  const [accountName, setAccountName] = useState("");
+  const [channel, setChannel] = useState<"sms" | "email">("sms");
+  const [otpPhone, setOtpPhone] = useState("");
+  const [code, setCode] = useState("");
+  const [codeSent, setCodeSent] = useState(false);
+  const [working, setWorking] = useState(false);
+
+  const reload = () => queryClient.invalidateQueries({ queryKey: ["orgs", org.id, "payout-destination"] });
+
+  const handleRequestCode = async () => {
+    setWorking(true);
+    try {
+      await requestOTP({ channel, purpose: "payout_destination", phone: channel === "sms" ? otpPhone.trim() || undefined : undefined });
+      setCodeSent(true);
+      toast.success(channel === "sms" ? "Code sent by SMS — it expires in 10 minutes." : "Code sent by email — it expires in 10 minutes.");
+    } catch (err) {
+      toast.error(errorMessage(err, "Unable to send a code."));
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  const handleSave = async (event: FormEvent) => {
+    event.preventDefault();
+    setWorking(true);
+    try {
+      await savePayoutDestination(org.id, {
+        provider,
+        phone: phone.trim(),
+        account_name: accountName.trim(),
+        otp_channel: channel,
+        otp_code: code.trim(),
+      });
+      toast.success(dest ? "Destination change saved — 24h cooling applies." : "Payout destination saved.");
+      setCode("");
+      setCodeSent(false);
+      reload();
+    } catch (err) {
+      toast.error(errorMessage(err, "Unable to save the payout destination."));
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  return (
+    <Card className="mt-4">
+      <CardContent className="p-4 sm:p-6">
+        <h3 className="text-sm font-bold text-slate-800">Payout destination</h3>
+        <p className="mt-1 text-xs text-slate-500">
+          One personal mobile-money number, tied to your verified identity. Changes need an OTP code and
+          take effect after a 24h cooling period — withdrawals must target the effective destination.
+        </p>
+
+        {destQuery.isLoading ? (
+          <p className="mt-3 text-sm text-slate-500">Loading…</p>
+        ) : dest ? (
+          <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm">
+            <p className="font-semibold text-slate-900">{dest.phone} <Badge variant="outline">{dest.provider}</Badge></p>
+            <p className="mt-1 text-slate-600">{dest.account_name}</p>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              <Badge variant="secondary">identity: matched</Badge>
+              <Badge variant="outline" title={dest.name_match_detail || undefined}>
+                provider name check: {dest.name_match === "unavailable" ? "unavailable" : dest.name_match}
+              </Badge>
+              {cooling && <Badge variant="secondary">cooling until {formatDate(dest.effective_at)}</Badge>}
+            </div>
+            {dest.name_match === "unavailable" && dest.name_match_detail && (
+              <p className="mt-2 text-xs text-slate-400">{dest.name_match_detail}</p>
+            )}
+          </div>
+        ) : (
+          <p className="mt-3 text-sm text-slate-500">No payout destination yet — withdrawals stay blocked until you save one.</p>
+        )}
+
+        {!isOwner ? (
+          <p className="mt-3 text-sm text-slate-500">Only owners can change the payout destination.</p>
+        ) : org.kyc_status !== "verified" ? (
+          <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-900">
+            Verify your identity first — the destination must match your verified name.
+          </p>
+        ) : (
+          <form onSubmit={handleSave} className="mt-4 space-y-4">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <div>
+                <label className="text-sm font-medium text-slate-700">Provider</label>
+                <select value={provider} onChange={(e) => setProvider(e.target.value)} className="mt-1 h-10 w-full rounded-md border border-slate-300 bg-white px-2 text-sm">
+                  {MOBILE_PROVIDERS.map((p) => (
+                    <option key={p} value={p}>{p}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="text-sm font-medium text-slate-700">Mobile-money number</label>
+                <Input value={phone} onChange={(e) => setPhone(e.target.value)} required inputMode="tel" placeholder={dest?.phone || "+255712345678"} className="mt-1" />
+              </div>
+            </div>
+            <div>
+              <label className="text-sm font-medium text-slate-700">Registered account name</label>
+              <Input value={accountName} onChange={(e) => setAccountName(e.target.value)} required maxLength={120} placeholder="Exactly as on your ID" className="mt-1" />
+              <p className="mt-1 text-xs text-slate-400">Must match your verified identity name — saves are refused on mismatch.</p>
+            </div>
+            <div className="rounded-lg border border-slate-200 p-3">
+              <p className="text-sm font-medium text-slate-700">Confirm with a code {dest ? "(required for every change)" : ""}</p>
+              <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-3">
+                <select value={channel} onChange={(e) => { setChannel(e.target.value as "sms" | "email"); setCodeSent(false); }} className="h-10 rounded-md border border-slate-300 bg-white px-2 text-sm">
+                  <option value="sms">SMS</option>
+                  <option value="email">Email</option>
+                </select>
+                {channel === "sms" && (
+                  <Input value={otpPhone} onChange={(e) => setOtpPhone(e.target.value)} inputMode="tel" placeholder="Code to +255…" className="sm:col-span-1" />
+                )}
+                <Button type="button" variant="outline" disabled={working} onClick={handleRequestCode}>
+                  {working && !codeSent ? "Sending…" : codeSent ? "Resend code" : "Send code"}
+                </Button>
+              </div>
+              <Input value={code} onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))} required inputMode="numeric" maxLength={6} placeholder="6-digit code" className="mt-2" />
+            </div>
+            <Button type="submit" disabled={working}>{working ? "Saving…" : dest ? "Change destination (24h cooling)" : "Save destination"}</Button>
+          </form>
         )}
       </CardContent>
     </Card>
@@ -1056,7 +1211,7 @@ const OrgSettings = () => {
           <TabsContent value="security"><SecurityTab /></TabsContent>
           <TabsContent value="notifications"><NotificationsTab org={org} isOwner={!!isOwner} /></TabsContent>
           <TabsContent value="branding"><BrandingTab org={org} isOwner={!!isOwner} /></TabsContent>
-          <TabsContent value="payouts"><PayoutsTab /></TabsContent>
+          <TabsContent value="payouts"><PayoutsTab org={org} isOwner={!!isOwner} /></TabsContent>
           <TabsContent value="danger"><DangerTab org={org} isOwner={!!isOwner} /></TabsContent>
         </Tabs>
       ) : (

@@ -23,6 +23,7 @@ import (
 type Handler struct {
 	service      *Service
 	orgs         *orgs.Service
+	auth         OTPVerifier
 	audit        audit.Writer
 	maxBodyBytes int64
 	logger       *slog.Logger
@@ -635,6 +636,9 @@ func (h *Handler) CreateWithdrawal(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, ErrInsufficientBalance) {
 			h.writeError(state, w, r, http.StatusUnprocessableEntity, "insufficient_balance", "This app's available balance doesn't cover that amount.", nil)
+			return
+		}
+		if h.withdrawalDestinationError(state, w, r, err) {
 			return
 		}
 		h.failIdempotent(state, w, r, http.StatusInternalServerError, "create_failed", "Unable to create withdrawal.", err)
@@ -1587,6 +1591,9 @@ func (h *Handler) MerchantCreateWithdrawal(w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		if errors.Is(err, ErrInsufficientBalance) {
 			h.writeError(state, w, r, http.StatusUnprocessableEntity, "insufficient_balance", "This app's available balance doesn't cover that amount.", nil)
+			return
+		}
+		if h.withdrawalDestinationError(state, w, r, err) {
 			return
 		}
 		h.failIdempotent(state, w, r, http.StatusInternalServerError, "create_failed", "Unable to create withdrawal.", err)

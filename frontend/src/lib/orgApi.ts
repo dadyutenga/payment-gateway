@@ -228,6 +228,8 @@ export async function listKYCAttempts(orgId: string) {
 
 // ---------- Limits usage (effective caps + today's live volume + fees) ----------
 
+export type LimitSource = "org_override" | "platform" | "platform_creator";
+
 export type OrgAppUsage = {
   app_id: string;
   name: string;
@@ -235,22 +237,51 @@ export type OrgAppUsage = {
   fee_percent: string;
   fee_fixed: string;
   max_txn: string;
-  max_txn_source: "org_override" | "platform";
+  max_txn_source: LimitSource;
   daily_cap: string;
-  daily_cap_source: "org_override" | "platform";
+  daily_cap_source: LimitSource;
   today_volume: Record<string, string>;
 };
 
 export type OrgLimitsUsage = {
   max_txn: string;
-  max_txn_source: "org_override" | "platform";
+  max_txn_source: LimitSource;
   daily_cap: string;
-  daily_cap_source: "org_override" | "platform";
+  daily_cap_source: LimitSource;
   apps: OrgAppUsage[];
 };
 
 export async function getLimitsUsage(orgId: string) {
   return (await request<OrgLimitsUsage>(`/api/v1/merchant/orgs/${orgId}/limits-usage`)).data;
+}
+
+// ---------- Creator payout destinations (OTP-gated, 24h cooling) ----------
+
+export type PayoutDestination = {
+  id: string;
+  org_id: string;
+  provider: string;
+  phone: string;
+  account_name: string;
+  name_match: "unavailable" | "matched" | "mismatched";
+  name_match_detail?: string;
+  otp_verified_at?: string;
+  effective_at: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export async function getPayoutDestination(orgId: string): Promise<PayoutDestination | null> {
+  return (await request<PayoutDestination | null>(`/api/v1/merchant/orgs/${orgId}/payout-destination`)).data;
+}
+
+export async function savePayoutDestination(
+  orgId: string,
+  input: { provider: string; phone: string; account_name: string; otp_channel: string; otp_code: string },
+) {
+  return (
+    await request<PayoutDestination>(`/api/v1/merchant/orgs/${orgId}/payout-destination`, { method: "POST", body: input })
+  ).data;
 }
 
 // ---------- Notification preferences ----------

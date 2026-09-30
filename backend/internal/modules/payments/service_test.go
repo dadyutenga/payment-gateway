@@ -192,6 +192,8 @@ type fakePaymentRepository struct {
 	orgLiveMaxTxn           string
 	orgLiveDailyCap         string
 	orgLimitsErr            error
+	orgAccountKind          string
+	payoutDestination       *CreatorPayoutDestination
 	appsByOrg               []PaymentApp
 	appsByOrgErr            error
 	providerAccountList     []PaymentProviderAccount
@@ -289,6 +291,13 @@ func (r *fakePaymentRepository) GetOrgLiveLimits(_ context.Context, _ string) (s
 		return "", "", r.orgLimitsErr
 	}
 	return r.orgLiveMaxTxn, r.orgLiveDailyCap, nil
+}
+
+func (r *fakePaymentRepository) GetOrgAccountKind(_ context.Context, _ string) (string, error) {
+	if r.orgAccountKind != "" {
+		return r.orgAccountKind, nil
+	}
+	return "merchant", nil
 }
 
 func (r *fakePaymentRepository) CreatePaymentAPIKey(_ context.Context, appID, _, prefix, environment, label string) error {
@@ -731,6 +740,20 @@ func (r *fakePaymentRepository) ListLedgerEntries(_ context.Context, filter Ledg
 
 func (r *fakePaymentRepository) CreateWithdrawal(_ context.Context, input CreateWithdrawalInput) (PaymentWithdrawal, error) {
 	return PaymentWithdrawal{ID: "wd_test", AppID: input.AppID, Amount: input.Amount, Currency: input.Currency, DestinationType: input.DestinationType, Status: WithdrawalStatusRequested, RequestedBy: input.RequestedBy}, nil
+}
+
+func (r *fakePaymentRepository) GetCreatorPayoutDestination(_ context.Context, _ string) (CreatorPayoutDestination, bool, error) {
+	if r.payoutDestination != nil {
+		return *r.payoutDestination, true, nil
+	}
+	return CreatorPayoutDestination{}, false, nil
+}
+
+func (r *fakePaymentRepository) UpsertCreatorPayoutDestination(_ context.Context, orgID string, dest CreatorPayoutDestination) (CreatorPayoutDestination, error) {
+	dest.ID = "dest_test"
+	dest.OrgID = orgID
+	r.payoutDestination = &dest
+	return dest, nil
 }
 
 func (r *fakePaymentRepository) ListWithdrawals(_ context.Context, filter WithdrawalListFilter) (WithdrawalListResult, error) {

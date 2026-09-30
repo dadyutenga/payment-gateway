@@ -13,7 +13,7 @@ import {
 } from "recharts";
 import { toast } from "@/components/ui/sonner";
 import {
-  fetchChurn, fetchDormant, fetchFunnel, fetchTopMerchants,
+  fetchChurn, fetchDormant, fetchFunnel, fetchTopMerchants, fetchVolumeVsExpected,
 } from "@/lib/analyticsApi";
 import { CsvButton, DateRangePicker, moneyText, useFilterParams, rateText } from "@/pages/analyticsCommon";
 
@@ -41,6 +41,12 @@ const AdminAnalyticsMerchants = () => {
     queryFn: () => fetchChurn(),
     staleTime: 60_000,
   });
+  const [volumeDays, setVolumeDays] = useState(14);
+  const volumeQuery = useQuery({
+    queryKey: ["admin", "analytics", "volume-vs-expected", volumeDays],
+    queryFn: () => fetchVolumeVsExpected({ volume_days: volumeDays }),
+    staleTime: 60_000,
+  });
 
   const copyEmail = (email?: string) => {
     if (!email) {
@@ -66,7 +72,7 @@ const AdminAnalyticsMerchants = () => {
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h2 className="text-2xl font-bold text-slate-900">Merchants</h2>
-          <p className="mt-1 text-sm text-slate-500">Top tenants, signup funnel, dormant and churn risk</p>
+          <p className="mt-1 text-sm text-slate-500">Top tenants, signup funnel, dormant, churn risk, and creator volume vs expected</p>
         </div>
         <DateRangePicker from={from} to={to} onChange={setRange} />
       </div>
@@ -77,6 +83,7 @@ const AdminAnalyticsMerchants = () => {
           <TabsTrigger value="signups">Signups funnel</TabsTrigger>
           <TabsTrigger value="dormant">Dormant ({(dormantQuery.data ?? []).length})</TabsTrigger>
           <TabsTrigger value="churn">Churn risk ({(churnQuery.data ?? []).length})</TabsTrigger>
+          <TabsTrigger value="volume">Volume vs expected ({(volumeQuery.data ?? []).length})</TabsTrigger>
         </TabsList>
 
         <TabsContent value="top">
@@ -244,6 +251,59 @@ const AdminAnalyticsMerchants = () => {
                 ))}
                 {(churnQuery.data ?? []).length === 0 && !churnQuery.isLoading && (
                   <TableRow><TableCell colSpan={4} className="text-center text-slate-500">No churn-risk merchants.</TableCell></TableRow>
+                )}
+              </TableBody>
+            </Table>
+          </CardContent></Card>
+        </TabsContent>
+
+        <TabsContent value="volume">
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            <select
+              aria-label="Early-live window"
+              className="h-9 rounded-md border border-slate-300 px-2 text-sm"
+              value={volumeDays}
+              onChange={(e) => setVolumeDays(Number(e.target.value))}
+            >
+              {[7, 14, 30].map((d) => (
+                <option key={d} value={d}>First {d} days live</option>
+              ))}
+            </select>
+            <CsvButton report="volume-vs-expected" query={{ volume_days: volumeDays }} />
+          </div>
+          <p className="mb-3 text-xs text-slate-500">
+            Creator orgs whose paid live volume in their first {volumeDays} days exceeds the survey band.
+            Surface-only — nothing here blocks money movement.
+          </p>
+          <Card><CardContent className="overflow-x-auto p-0">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Organization</TableHead>
+                  <TableHead>Why flagged</TableHead>
+                  <TableHead>Actual vs stated</TableHead>
+                  <TableHead>Contact</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {(volumeQuery.data ?? []).map((m) => (
+                  <TableRow key={m.org_id}>
+                    <TableCell>
+                      <Link to={`/admin/orgs/${m.org_id}`} className="font-medium text-blue-600 hover:underline">{m.org_name}</Link>
+                    </TableCell>
+                    <TableCell className="max-w-md text-xs text-slate-600">{m.reason}</TableCell>
+                    <TableCell className="font-bold text-rose-600">
+                      {m.recent_gross ?? "—"} <span className="font-normal text-slate-400">/ stated ≤ {m.prior_gross ?? "—"}</span>
+                    </TableCell>
+                    <TableCell>
+                      <Button size="sm" variant="outline" onClick={() => copyEmail(m.contact_email)}>
+                        <Copy className="h-3.5 w-3.5 mr-1" /> Copy email
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                ))}
+                {(volumeQuery.data ?? []).length === 0 && !volumeQuery.isLoading && (
+                  <TableRow><TableCell colSpan={4} className="text-center text-slate-500">No creator over band.</TableCell></TableRow>
                 )}
               </TableBody>
             </Table>

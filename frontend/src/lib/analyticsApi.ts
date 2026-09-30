@@ -27,6 +27,8 @@ export type AnalyticsQuery = {
   per_page?: number;
   dormant_days?: number;
   churn_drop_pct?: number;
+  churn_window_days?: number;
+  volume_days?: number;
   stuck_minutes?: number;
 };
 
@@ -135,6 +137,8 @@ export type FlaggedMerchant = {
   reason: string;
   last_txn_at?: string;
   drop_pct?: number;
+  recent_gross?: string;
+  prior_gross?: string;
   contact_email?: string;
 };
 
@@ -199,6 +203,7 @@ export const fetchTopMerchants = (q?: AnalyticsQuery) => get<MerchantList>(`${BA
 export const fetchFunnel = (q?: AnalyticsQuery) => get<FunnelData>(`${BASE}/merchants/signups`, q);
 export const fetchDormant = (q?: AnalyticsQuery) => get<FlaggedMerchant[]>(`${BASE}/merchants/dormant`, q);
 export const fetchChurn = (q?: AnalyticsQuery) => get<FlaggedMerchant[]>(`${BASE}/merchants/churn-risk`, q);
+export const fetchVolumeVsExpected = (q?: AnalyticsQuery) => get<FlaggedMerchant[]>(`${BASE}/merchants/volume-vs-expected`, q);
 export const fetchFailures = (q?: AnalyticsQuery) => get<FailureRow[]>(`${BASE}/failures`, q);
 export const fetchWithdrawalStats = (q?: AnalyticsQuery) => get<WithdrawalStats>(`${BASE}/withdrawals`, q);
 export const fetchWebhookHealth = (q?: AnalyticsQuery) => get<WebhookHealth>(`${BASE}/webhooks`, q);

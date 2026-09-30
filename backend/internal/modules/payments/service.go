@@ -64,6 +64,11 @@ type Service struct {
 	// currency) for verified orgs. Empty disables the check.
 	liveMaxTxnAmount   string
 	liveDailyVolumeCap string
+	// creatorLiveMaxTxnAmount / creatorLiveDailyVolumeCap are the
+	// stricter platform defaults applied to creator-kind orgs without an
+	// admin override (Part 5 risk posture).
+	creatorLiveMaxTxnAmount   string
+	creatorLiveDailyVolumeCap string
 	// payerHashSecret keys analytics payer hashing (see PayerHashSecret).
 	payerHashSecret string
 	http           *http.Client
@@ -152,6 +157,12 @@ type ServiceOptions struct {
 	// effectiveLiveCaps.
 	LiveMaxTxnAmount    string
 	LiveDailyVolumeCap  string
+	// CreatorLiveMaxTxnAmount / CreatorLiveDailyVolumeCap are the
+	// stricter platform defaults for creator accounts (Part 5 risk
+	// posture): lower than the merchant defaults above. Resolution order
+	// per org is admin override, then kind default (creator vs merchant).
+	CreatorLiveMaxTxnAmount   string
+	CreatorLiveDailyVolumeCap string
 	// PayerHashSecret keys the analytics payer HMAC. Empty falls back to
 	// the delivery signing secret (dev convenience) — production should
 	// set ANALYTICS_PAYER_SECRET distinctly. Empty entirely disables
@@ -197,6 +208,15 @@ func NewService(repo Repository, registry map[string]provider.Constructor, ciphe
 	if strings.TrimSpace(opts.LiveDailyVolumeCap) == "" {
 		opts.LiveDailyVolumeCap = "50000000"
 	}
+	// Creator defaults sit strictly below the merchant tier (documented in
+	// backend README "Creator risk posture"). An admin override can still
+	// raise an individual creator — self-reported survey data never can.
+	if strings.TrimSpace(opts.CreatorLiveMaxTxnAmount) == "" {
+		opts.CreatorLiveMaxTxnAmount = "1000000"
+	}
+	if strings.TrimSpace(opts.CreatorLiveDailyVolumeCap) == "" {
+		opts.CreatorLiveDailyVolumeCap = "10000000"
+	}
 	if opts.AutomatedPayoutsEnabled {
 		logger.Warn("automated payouts are enabled with an unverified payout provider contract — verify SonicPesa disbursement endpoints against your own account first")
 	}
@@ -223,6 +243,8 @@ func NewService(repo Repository, registry map[string]provider.Constructor, ciphe
 		orderExpiryTTL:                 opts.OrderExpiryTTL,
 		liveMaxTxnAmount:               strings.TrimSpace(opts.LiveMaxTxnAmount),
 		liveDailyVolumeCap:             strings.TrimSpace(opts.LiveDailyVolumeCap),
+		creatorLiveMaxTxnAmount:        strings.TrimSpace(opts.CreatorLiveMaxTxnAmount),
+		creatorLiveDailyVolumeCap:      strings.TrimSpace(opts.CreatorLiveDailyVolumeCap),
 		payerHashSecret:                payerSecret,
 		http:                           opts.HTTPClient,
 		log:                            logger,
@@ -613,16 +635,26 @@ func (s *Service) OrgLimitsUsage(ctx context.Context, orgID string) (OrgLimitsUs
 	if err != nil {
 		return OrgLimitsUsage{}, err
 	}
+	// Platform defaults are kind-aware (creator tier is stricter); the
+	// source label tells Settings which tier is in effect.
+	platformMaxTxn, platformDailyCap := s.liveMaxTxnAmount, s.liveDailyVolumeCap
+	platformMaxSource, platformDailySource := "platform", "platform"
+	if kind, kindErr := s.repo.GetOrgAccountKind(ctx, orgID); kindErr != nil {
+		return OrgLimitsUsage{}, kindErr
+	} else if kind == "creator" {
+		platformMaxTxn, platformDailyCap = s.creatorLiveMaxTxnAmount, s.creatorLiveDailyVolumeCap
+		platformMaxSource, platformDailySource = "platform_creator", "platform_creator"
+	}
 	out := OrgLimitsUsage{Apps: []OrgAppUsage{}}
 	if orgMaxTxn != "" {
 		out.MaxTxn, out.MaxTxnSource = orgMaxTxn, "org_override"
 	} else {
-		out.MaxTxn, out.MaxTxnSource = s.liveMaxTxnAmount, "platform"
+		out.MaxTxn, out.MaxTxnSource = platformMaxTxn, platformMaxSource
 	}
 	if orgDailyCap != "" {
 		out.DailyCap, out.DailyCapSource = orgDailyCap, "org_override"
 	} else {
-		out.DailyCap, out.DailyCapSource = s.liveDailyVolumeCap, "platform"
+		out.DailyCap, out.DailyCapSource = platformDailyCap, platformDailySource
 	}
 	for _, app := range apps {
 		usage := OrgAppUsage{
@@ -680,6 +712,16 @@ func (s *Service) CreateWithdrawal(ctx context.Context, requestedBy string, inpu
 		return PaymentWithdrawal{}, errs, nil
 	}
 
+	// Creator withdrawals must target the saved, effective payout
+	// destination (Part 5 risk posture): personal mobile money, OTP-gated
+	// at save time, 24h cooling on changes. Enforced here so merchant and
+	// admin withdrawal paths share the rule.
+	if vErrs, err := s.checkCreatorWithdrawalDestination(ctx, input); err != nil {
+		return PaymentWithdrawal{}, nil, err
+	} else if vErrs.Any() {
+		return PaymentWithdrawal{}, vErrs, nil
+	}
+
 	balance, err := s.repo.GetAppBalance(ctx, input.AppID)
 	if err != nil {
 		return PaymentWithdrawal{}, nil, fmt.Errorf("load app balance: %w", err)
@@ -705,6 +747,180 @@ func (s *Service) CreateWithdrawal(ctx context.Context, requestedBy string, inpu
 
 	withdrawal, err := s.repo.CreateWithdrawal(ctx, input)
 	return withdrawal, nil, err
+}
+
+// ---------- Creator payout destinations (Part 5 risk posture) ----------
+
+// accountNameResolverKinds names provider kinds with an adapter
+// implementing provider.AccountNameResolver. Empty today: no adapter can
+// confirm a payout number's registered name, so saves record
+// name_match='unavailable' explicitly (with the reason) instead of
+// skipping silently. Register the kind here when such an adapter lands.
+var accountNameResolverKinds = map[string]bool{}
+
+// matchIdentityName reports whether an attested payout account name
+// matches the verified identity name: every token of the shorter name
+// must appear in the longer (order-insensitive, case-insensitive).
+func matchIdentityName(attested, verified string) bool {
+	tokens := func(s string) []string {
+		var out []string
+		for _, tok := range strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
+			return !(r >= 'a' && r <= 'z')
+		}) {
+			if tok != "" {
+				out = append(out, tok)
+			}
+		}
+		return out
+	}
+	a, v := tokens(attested), tokens(verified)
+	if len(a) == 0 || len(v) == 0 {
+		return false
+	}
+	short, long := a, v
+	if len(v) < len(a) {
+		short, long = v, a
+	}
+	in := map[string]bool{}
+	for _, tok := range long {
+		in[tok] = true
+	}
+	for _, tok := range short {
+		if !in[tok] {
+			return false
+		}
+	}
+	return true
+}
+
+// destinationNameMatch runs the provider account-name lookup when an
+// adapter supports it, else returns the explicit unavailable status.
+func (s *Service) destinationNameMatch(providerName, phone string) (status, detail string) {
+	if accountNameResolverKinds[normalizeProviderName(providerName)] {
+		return "unavailable", "Registered resolver kind has no live check wired yet."
+	}
+	_ = phone
+	return "unavailable", "No payout provider adapter supports account-name lookup; attested name compared against the verified identity instead."
+}
+
+// SaveCreatorPayoutDestination stores (or changes) a creator org's payout
+// destination. The handler verifies the OTP before this call. Identity
+// must already be verified (verifiedFullName from the KYC file); the
+// attested account name must match it. Changes take effect after
+// PayoutDestinationCoolingPeriod; an identical re-save stays effective
+// immediately.
+func (s *Service) SaveCreatorPayoutDestination(ctx context.Context, orgID, verifiedFullName string, input SavePayoutDestinationInput) (CreatorPayoutDestination, validation.Errors, error) {
+	orgID = strings.TrimSpace(orgID)
+	input.Provider = strings.TrimSpace(input.Provider)
+	input.Phone = strings.TrimSpace(input.Phone)
+	input.AccountName = strings.TrimSpace(input.AccountName)
+
+	errs := validation.Errors{}
+	if kind, err := s.repo.GetOrgAccountKind(ctx, orgID); err != nil {
+		return CreatorPayoutDestination{}, nil, err
+	} else if kind != "creator" {
+		return CreatorPayoutDestination{}, nil, orgs.ErrNotCreatorOrg
+	}
+	if strings.TrimSpace(verifiedFullName) == "" {
+		return CreatorPayoutDestination{}, nil, ErrCreatorIdentityUnverified
+	}
+	validation.Required(input.Provider, "Provider is required.", errs, "provider")
+	validation.MaxRunes(input.Provider, 40, "Provider must be 40 characters or fewer.", errs, "provider")
+	if !validTanzanianPhone(input.Phone) {
+		errs.Add("phone", "Phone must be a Tanzanian mobile number like +255712345678.")
+	}
+	validation.Required(input.AccountName, "Account name is required.", errs, "account_name")
+	validation.MaxRunes(input.AccountName, 120, "Account name must be 120 characters or fewer.", errs, "account_name")
+	if errs.Any() {
+		return CreatorPayoutDestination{}, errs, nil
+	}
+	if !matchIdentityName(input.AccountName, verifiedFullName) {
+		errs.Add("account_name", "Account name must match your verified identity name.")
+		return CreatorPayoutDestination{}, errs, nil
+	}
+
+	now := time.Now().UTC()
+	effectiveAt := now
+	if existing, found, err := s.repo.GetCreatorPayoutDestination(ctx, orgID); err != nil {
+		return CreatorPayoutDestination{}, nil, err
+	} else if found && (existing.Phone != input.Phone || existing.Provider != input.Provider) {
+		effectiveAt = now.Add(PayoutDestinationCoolingPeriod)
+	}
+	nameMatch, nameDetail := s.destinationNameMatch(input.Provider, input.Phone)
+	dest, err := s.repo.UpsertCreatorPayoutDestination(ctx, orgID, CreatorPayoutDestination{
+		Provider: input.Provider, Phone: input.Phone, AccountName: input.AccountName,
+		NameMatch: nameMatch, NameMatchDetail: nameDetail,
+		OTPVerifiedAt: &now, EffectiveAt: effectiveAt,
+	})
+	return dest, nil, err
+}
+
+// GetCreatorPayoutDestination returns an org's saved payout destination;
+// found=false when none was ever saved.
+func (s *Service) GetCreatorPayoutDestination(ctx context.Context, orgID string) (CreatorPayoutDestination, bool, error) {
+	return s.repo.GetCreatorPayoutDestination(ctx, strings.TrimSpace(orgID))
+}
+
+// validTanzanianPhone mirrors auth.ValidTanzanianPhone (+255 followed by
+// 9 digits starting 6/7) without importing the auth module — the auth
+// package remains the canonical validator for signup flows.
+func validTanzanianPhone(phone string) bool {
+	phone = strings.TrimSpace(phone)
+	if len(phone) != 13 || !strings.HasPrefix(phone, "+255") {
+		return false
+	}
+	if phone[4] != '6' && phone[4] != '7' {
+		return false
+	}
+	for _, r := range phone[5:] {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// checkCreatorWithdrawalDestination enforces the saved-destination rule
+// for creator orgs; merchant orgs pass through untouched.
+func (s *Service) checkCreatorWithdrawalDestination(ctx context.Context, input CreateWithdrawalInput) (validation.Errors, error) {
+	errs := validation.Errors{}
+	app, err := s.repo.GetPaymentAppByID(ctx, strings.TrimSpace(input.AppID))
+	if err != nil {
+		return nil, err
+	}
+	kind, err := s.repo.GetOrgAccountKind(ctx, app.OrgID)
+	if err != nil {
+		return nil, err
+	}
+	if kind != "creator" {
+		return errs, nil
+	}
+	if input.DestinationType != "mobile_money" {
+		errs.Add("destination_type", "Creator payouts go to mobile money only.")
+		return errs, nil
+	}
+	dest, found, err := s.repo.GetCreatorPayoutDestination(ctx, app.OrgID)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		errs.Add("destination", "Save a payout destination first (OTP-verified).")
+		return errs, nil
+	}
+	want := strings.ReplaceAll(strings.TrimSpace(dest.Phone), " ", "")
+	got := ""
+	if input.DestinationDetails != nil {
+		if phone, ok := input.DestinationDetails["phone"].(string); ok {
+			got = strings.ReplaceAll(strings.TrimSpace(phone), " ", "")
+		}
+	}
+	if got == "" || got != want {
+		return nil, ErrWithdrawalDestinationMismatch
+	}
+	if time.Now().UTC().Before(dest.EffectiveAt) {
+		return nil, ErrWithdrawalDestinationCooling
+	}
+	return errs, nil
 }
 
 func (s *Service) ListWithdrawals(ctx context.Context, filter WithdrawalListFilter) (WithdrawalListResult, error) {
@@ -2737,13 +2953,20 @@ func normalizeAmount(value string) (string, error) {
 
 // effectiveLiveCaps resolves the live guardrails for an order: per-org
 // overrides win when set to a positive decimal, otherwise the platform
-// defaults apply. Unparseable stored values fall back to the default with
-// a warning (admin writes are validated, so this is theoretical) —
-// failing open to zero would forbid all live volume over a typo.
+// defaults apply — merchant tier for merchant orgs, the stricter creator
+// tier for creator orgs (Part 5 risk posture). Unparseable stored values
+// fall back to the default with a warning (admin writes are validated, so
+// this is theoretical) — failing open to zero would forbid all live
+// volume over a typo.
 func (s *Service) effectiveLiveCaps(ctx context.Context, app PaymentApp) (maxTxn, dailyCap string, err error) {
 	maxTxn, dailyCap = s.liveMaxTxnAmount, s.liveDailyVolumeCap
 	if strings.TrimSpace(app.OrgID) == "" {
 		return maxTxn, dailyCap, nil
+	}
+	if kind, kindErr := s.repo.GetOrgAccountKind(ctx, app.OrgID); kindErr != nil {
+		return "", "", kindErr
+	} else if kind == "creator" {
+		maxTxn, dailyCap = s.creatorLiveMaxTxnAmount, s.creatorLiveDailyVolumeCap
 	}
 	orgMax, orgDaily, err := s.repo.GetOrgLiveLimits(ctx, app.OrgID)
 	if err != nil {

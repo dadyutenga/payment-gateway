@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"sort"
 	"strings"
 	"sync"
@@ -24,6 +25,10 @@ type Repository interface {
 	SignupFunnel(ctx context.Context, p Params) (Funnel, error)
 	DormantMerchants(ctx context.Context, p Params) ([]FlaggedMerchant, error)
 	ChurnRiskMerchants(ctx context.Context, p Params) ([]FlaggedMerchant, error)
+	// VolumeVsExpected flags creator orgs whose actual paid live volume in
+	// the first N days exceeds their survey's stated band. Surface-only:
+	// never blocks, following the churn-risk pattern.
+	VolumeVsExpected(ctx context.Context, days int) ([]FlaggedMerchant, error)
 	FailureBreakdown(ctx context.Context, p Params) ([]FailureRow, error)
 	WithdrawalStats(ctx context.Context, p Params) (WithdrawalStats, error)
 	WebhookHealth(ctx context.Context, p Params) (WebhookHealth, error)
@@ -1663,6 +1668,81 @@ func (r *PostgresRepository) ChurnRiskMerchants(ctx context.Context, p Params) (
 			m.DropPct = &drop
 			out = append(out, m)
 		}
+	}
+	return out, rows.Err()
+}
+
+// volumeBandCeilings maps survey volume bands to TZS ceilings. The top
+// band has no ceiling and never flags (nothing to exceed).
+var volumeBandCeilings = map[string]string{
+	"under_100k": "100000",
+	"100k_1m":    "1000000",
+	"1m_10m":     "10000000",
+	"10m_100m":   "100000000",
+}
+
+// VolumeVsExpected flags creator orgs whose actual paid live volume in
+// the first `days` days of live activity exceeds their survey's stated
+// band. Surface-only signal for the admin risk queue — it never blocks
+// money movement (same posture as the churn-risk list).
+func (r *PostgresRepository) VolumeVsExpected(ctx context.Context, days int) ([]FlaggedMerchant, error) {
+	if days <= 0 {
+		days = 14
+	}
+	rows, err := r.db.QueryEx(ctx, fmt.Sprintf(`
+		WITH firsts AS (
+			SELECT a.org_id, MIN(po.created_at) AS first_paid
+			FROM app.payment_apps a
+			JOIN app.payment_orders po ON po.app_id = a.id
+			WHERE a.status != 'deleted' AND po.status = 'paid' AND po.environment = 'live'
+			GROUP BY a.org_id
+		)
+		SELECT o.id::text, o.name, sv.expected_volume_band, f.first_paid,
+		       COALESCE((
+		         SELECT SUM(po2.amount)::text
+		         FROM app.payment_apps a2
+		         JOIN app.payment_orders po2 ON po2.app_id = a2.id
+		         WHERE a2.org_id = o.id AND a2.status != 'deleted'
+		           AND po2.status = 'paid' AND po2.environment = 'live'
+		           AND po2.created_at >= f.first_paid
+		           AND po2.created_at < f.first_paid + ($1 * INTERVAL '1 day')
+		       ), '0'),
+		       %s
+		FROM app.organizations o
+		JOIN app.creator_onboarding_surveys sv ON sv.org_id = o.id
+		JOIN firsts f ON f.org_id = o.id
+		WHERE o.account_kind = 'creator'
+		  AND sv.expected_volume_band IN ('under_100k', '100k_1m', '1m_10m', '10m_100m')
+		ORDER BY f.first_paid DESC
+	`, ownerContactSQL), nil, days)
+	if err != nil {
+		return nil, fmt.Errorf("volume vs expected: %w", err)
+	}
+	defer rows.Close()
+
+	out := []FlaggedMerchant{}
+	for rows.Next() {
+		var m FlaggedMerchant
+		var band, actual string
+		var firstPaid time.Time
+		if err := rows.Scan(&m.OrgID, &m.OrgName, &band, &firstPaid, &actual, &m.ContactEmail); err != nil {
+			return nil, fmt.Errorf("scan volume vs expected: %w", err)
+		}
+		ceiling, ok := volumeBandCeilings[band]
+		if !ok {
+			continue
+		}
+		actualRat, okA := new(big.Rat).SetString(strings.TrimSpace(actual))
+		ceilingRat, okC := new(big.Rat).SetString(ceiling)
+		if !okA || !okC || actualRat.Cmp(ceilingRat) <= 0 {
+			continue
+		}
+		t := firstPaid
+		m.LastTxnAt = &t
+		m.RecentGross = strings.TrimSpace(actual)
+		m.PriorGross = ceiling
+		m.Reason = fmt.Sprintf("Stated %s max/month in survey; %s actual paid live volume in the first %d days live.", ceiling, strings.TrimSpace(actual), days)
+		out = append(out, m)
 	}
 	return out, rows.Err()
 }

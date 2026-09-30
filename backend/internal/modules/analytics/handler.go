@@ -130,6 +130,22 @@ func (h *Handler) ChurnRiskMerchants(w http.ResponseWriter, r *http.Request) {
 	httputil.JSON(w, http.StatusOK, map[string]any{"data": out})
 }
 
+// VolumeVsExpected serves the creator expected-vs-actual risk queue:
+// survey band vs paid live volume in the first volume_days days live
+// (?volume_days=N, default 14). Flags surface for review; nothing blocks.
+func (h *Handler) VolumeVsExpected(w http.ResponseWriter, r *http.Request) {
+	p, ok := h.params(w, r)
+	if !ok {
+		return
+	}
+	out, err := h.service.VolumeVsExpected(r.Context(), p)
+	if err != nil {
+		h.fail(w, http.StatusInternalServerError, "internal_error", "Unable to load volume-vs-expected flags.", err)
+		return
+	}
+	httputil.JSON(w, http.StatusOK, map[string]any{"data": out})
+}
+
 func (h *Handler) Failures(w http.ResponseWriter, r *http.Request) {
 	p, ok := h.params(w, r)
 	if !ok {

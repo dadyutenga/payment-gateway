@@ -120,6 +120,12 @@ func (s *Service) ChurnRiskMerchants(ctx context.Context, p Params) ([]FlaggedMe
 	return s.repo.ChurnRiskMerchants(ctx, p)
 }
 
+// VolumeVsExpected flags creator orgs whose early live volume exceeds
+// their survey band. Surface-only (no blocking), like churn-risk.
+func (s *Service) VolumeVsExpected(ctx context.Context, p Params) ([]FlaggedMerchant, error) {
+	return s.repo.VolumeVsExpected(ctx, p.VolumeWindowDays)
+}
+
 func (s *Service) FailureBreakdown(ctx context.Context, p Params) ([]FailureRow, error) {
 	return s.repo.FailureBreakdown(ctx, p)
 }
@@ -184,7 +190,7 @@ func (s *Service) MerchantSettlements(ctx context.Context, p Params, env, curren
 
 // ExportReports are the CSV-exportable list reports.
 var ExportReports = []string{
-	"top-merchants", "signups", "dormant", "churn-risk", "failures",
+	"top-merchants", "signups", "dormant", "churn-risk", "volume-vs-expected", "failures",
 	"withdrawals", "webhook-offenders", "stuck-orders", "unreconciled",
 	"negative-balances",
 }
@@ -242,6 +248,15 @@ func (s *Service) ExportCSV(ctx context.Context, report string, p Params) (filen
 		write([][]string{{"org_id", "org_name", "reason", "drop_pct", "last_txn_at", "contact_email"}})
 		for _, m := range items {
 			write([][]string{{m.OrgID, m.OrgName, m.Reason, rateStr(m.DropPct), timeStr(m.LastTxnAt), m.ContactEmail}})
+		}
+	case "volume-vs-expected":
+		items, err := s.repo.VolumeVsExpected(ctx, p.VolumeWindowDays)
+		if err != nil {
+			return "", nil, err
+		}
+		write([][]string{{"org_id", "org_name", "reason", "actual_gross", "band_ceiling", "first_live_txn_at", "contact_email"}})
+		for _, m := range items {
+			write([][]string{{m.OrgID, m.OrgName, m.Reason, m.RecentGross, m.PriorGross, timeStr(m.LastTxnAt), m.ContactEmail}})
 		}
 	case "failures":
 		items, err := s.repo.FailureBreakdown(ctx, p)

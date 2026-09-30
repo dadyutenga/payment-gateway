@@ -641,6 +641,11 @@ const (
 	OTPPurposeEmailVerify = "email_verify"
 	OTPPurposePhoneVerify = "phone_verify"
 	OTPPurposeLogin2FA    = "login_2fa"
+	// OTPPurposePayoutDestination gates creator payout-destination saves
+	// and changes (Part 5 risk posture): the code is verified before the
+	// destination row is written. No side effects on verify beyond
+	// consuming the code.
+	OTPPurposePayoutDestination = "payout_destination"
 
 	otpCodeLength  = 6
 	otpTTL         = 10 * time.Minute
@@ -703,7 +708,7 @@ func (s *Service) RequestOTP(ctx context.Context, userID, channel, purpose, phon
 		return OTPRequest{}, errors.New("channel must be email or sms")
 	}
 	switch purpose {
-	case OTPPurposeEmailVerify, OTPPurposePhoneVerify, OTPPurposeLogin2FA:
+	case OTPPurposeEmailVerify, OTPPurposePhoneVerify, OTPPurposeLogin2FA, OTPPurposePayoutDestination:
 	default:
 		return OTPRequest{}, errors.New("unknown otp purpose")
 	}

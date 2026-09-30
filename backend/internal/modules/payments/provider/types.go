@@ -106,6 +106,15 @@ type Disburser interface {
 	CheckPayoutStatus(ctx context.Context, providerPayoutID string) (DisburseResult, error)
 }
 
+// AccountNameResolver is optionally implemented by adapters whose API can
+// confirm which registered name owns a payout number (creator payout
+// destination integrity, Part 5). No adapter implements it today —
+// callers must record and surface "unavailable" explicitly rather than
+// skipping the check silently.
+type AccountNameResolver interface {
+	LookupAccountName(ctx context.Context, phone string) (string, error)
+}
+
 // ErrRefundNotSupported is returned by Refunder implementations whose
 // provider documents no refund API. Callers fall back to a local ledger
 // reversal (manual attestation) instead of failing the refund.

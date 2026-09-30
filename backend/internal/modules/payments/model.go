@@ -712,6 +712,37 @@ type CreateWithdrawalInput struct {
 	RequestedBy        string
 }
 
+// CreatorPayoutDestination is one creator org's saved payout destination:
+// a personal mobile-money number tied to the verified identity. Cooling
+// and OTP rules live on writes; withdrawals must target the effective
+// destination (see Service.CreateWithdrawal).
+type CreatorPayoutDestination struct {
+	ID              string    `json:"id"`
+	OrgID           string    `json:"org_id"`
+	Provider        string    `json:"provider"`
+	Phone           string    `json:"phone"`
+	AccountName     string    `json:"account_name"`
+	NameMatch       string    `json:"name_match"`
+	NameMatchDetail string    `json:"name_match_detail,omitempty"`
+	OTPVerifiedAt   *time.Time `json:"otp_verified_at,omitempty"`
+	EffectiveAt     time.Time `json:"effective_at"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+}
+
+// SavePayoutDestinationInput carries a creator destination save/change.
+// The OTP code was verified by the handler before this call.
+type SavePayoutDestinationInput struct {
+	Provider    string
+	Phone       string
+	AccountName string
+}
+
+// PayoutDestinationCoolingPeriod holds withdrawals to a changed
+// destination until the change ages out (same posture as the merchant
+// destination-change rule this mirrors).
+const PayoutDestinationCoolingPeriod = 24 * time.Hour
+
 type WithdrawalListFilter struct {
 	AppID  string
 	Status string
@@ -741,6 +772,9 @@ var ErrLiveTxnCapExceeded = errors.New("order amount exceeds the live per-transa
 var ErrLiveDailyCapExceeded = errors.New("order would exceed the live daily volume cap")
 var ErrSupportAmountTooSmall = errors.New("support amount is below this page's minimum")
 var ErrSupportAmountTooLarge = errors.New("support amount is above this page's maximum")
+var ErrWithdrawalDestinationMismatch = errors.New("withdrawal destination does not match the verified payout destination")
+var ErrWithdrawalDestinationCooling = errors.New("payout destination change is still in its cooling period")
+var ErrCreatorIdentityUnverified = errors.New("creator identity must be verified before saving a payout destination")
 
 // Webhook event types delivered to merchant endpoints. Endpoints subscribe
 // via event_types (default: all three for new endpoints).

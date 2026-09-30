@@ -17,8 +17,30 @@ func TestParseParamsDefaults(t *testing.T) {
 	if p.DormantDays != DefaultDormantDays || p.ChurnDropPct != DefaultChurnDropPct || p.StuckMinutes != DefaultStuckMinutes {
 		t.Fatalf("threshold defaults wrong: %+v", p)
 	}
+	if p.VolumeWindowDays != DefaultVolumeWindowDays {
+		t.Fatalf("volume window default wrong: %+v", p)
+	}
 	if !p.To.After(p.From) {
 		t.Fatal("to must be after from")
+	}
+}
+
+func TestParseParamsVolumeDays(t *testing.T) {
+	r := httptest.NewRequest("GET", "/?volume_days=30", nil)
+	p, err := ParseParams(r, true)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if p.VolumeWindowDays != 30 {
+		t.Fatalf("volume_days wrong: %+v", p.VolumeWindowDays)
+	}
+	r2 := httptest.NewRequest("GET", "/?volume_days=banana", nil)
+	p2, err := ParseParams(r2, true)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if p2.VolumeWindowDays != DefaultVolumeWindowDays {
+		t.Fatalf("bad volume_days must fall back to default: %+v", p2.VolumeWindowDays)
 	}
 }
 

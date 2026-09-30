@@ -97,6 +97,8 @@ func New(ctx context.Context) (*App, error) {
 		OrderExpiryTTL:                 cfg.Payments.OrderTTL,
 		LiveMaxTxnAmount:               cfg.Payments.LiveMaxTxnAmount,
 		LiveDailyVolumeCap:             cfg.Payments.LiveDailyVolumeCap,
+		CreatorLiveMaxTxnAmount:        cfg.Payments.CreatorLiveMaxTxnAmount,
+		CreatorLiveDailyVolumeCap:      cfg.Payments.CreatorLiveDailyVolumeCap,
 		PayerHashSecret:                cfg.Payments.PayerHashSecret,
 	}, logger)
 	// SMS success notifications, admin alerts, and an audit trail are all
@@ -111,6 +113,7 @@ func New(ctx context.Context) (*App, error) {
 	orgService := orgs.NewService(orgRepo, logger)
 	orgHandler := orgs.NewHandler(orgService, logger)
 	paymentHandler.SetOrgService(orgService)
+	paymentHandler.SetAuthService(authService)
 	paymentHandler.SetAuditWriter(pgAuditWriter{repo: orgRepo})
 
 	analyticsRepo := analytics.NewPostgresRepository(db)
@@ -282,6 +285,9 @@ func New(ctx context.Context) (*App, error) {
 	mux.Handle("POST /api/v1/merchant/orgs/{orgID}/support-page/enable", middleware.Chain(http.HandlerFunc(paymentHandler.EnableSupportPage), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
 	mux.Handle("GET /api/v1/merchant/orgs/{orgID}/support-settings", middleware.Chain(http.HandlerFunc(paymentHandler.GetSupportSettings), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
 	mux.Handle("PUT /api/v1/merchant/orgs/{orgID}/support-settings", middleware.Chain(http.HandlerFunc(paymentHandler.UpdateSupportSettings), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	// ---- Creator payout destinations (OTP-gated saves, 24h cooling) ----
+	mux.Handle("GET /api/v1/merchant/orgs/{orgID}/payout-destination", middleware.Chain(http.HandlerFunc(paymentHandler.GetPayoutDestination), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("POST /api/v1/merchant/orgs/{orgID}/payout-destination", middleware.Chain(http.HandlerFunc(paymentHandler.SavePayoutDestination), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
 
 	// ---- Organizations & roles (session-authenticated; role checks run
 	// inside the handlers/services against the member's own row) ----
@@ -344,6 +350,7 @@ func New(ctx context.Context) (*App, error) {
 	mux.Handle("GET /api/v1/admin/analytics/merchants/signups", adminAnalytics(analyticsHandler.SignupFunnel))
 	mux.Handle("GET /api/v1/admin/analytics/merchants/dormant", adminAnalytics(analyticsHandler.DormantMerchants))
 	mux.Handle("GET /api/v1/admin/analytics/merchants/churn-risk", adminAnalytics(analyticsHandler.ChurnRiskMerchants))
+	mux.Handle("GET /api/v1/admin/analytics/merchants/volume-vs-expected", adminAnalytics(analyticsHandler.VolumeVsExpected))
 	mux.Handle("GET /api/v1/admin/analytics/failures", adminAnalytics(analyticsHandler.Failures))
 	mux.Handle("GET /api/v1/admin/analytics/withdrawals", adminAnalytics(analyticsHandler.Withdrawals))
 	mux.Handle("GET /api/v1/admin/analytics/webhooks", adminAnalytics(analyticsHandler.Webhooks))

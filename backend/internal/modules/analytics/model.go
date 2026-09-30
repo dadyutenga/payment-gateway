@@ -36,6 +36,9 @@ const (
 	DefaultChurnWindowDays  = 14
 	DefaultStuckMinutes     = 30
 	DefaultWebhookStuckMins = 30
+	// DefaultVolumeWindowDays sizes the creator "first N days live"
+	// expected-vs-actual window.
+	DefaultVolumeWindowDays = 14
 )
 
 // Params are the common analytics query filters. OrgIDs scopes a query to
@@ -58,6 +61,9 @@ type Params struct {
 	ChurnDropPct    float64
 	ChurnWindowDays int
 	StuckMinutes    int
+	// VolumeWindowDays sizes the "first N days live" window for the
+	// creator expected-vs-actual flag.
+	VolumeWindowDays int
 }
 
 // PreviousPeriod returns the immediately preceding window of equal length.
@@ -131,6 +137,7 @@ func ParseParams(r *http.Request, allowOrgFilter bool) (Params, error) {
 		ChurnDropPct:    parsePositiveFloat(q.Get("churn_drop_pct"), DefaultChurnDropPct),
 		ChurnWindowDays: parsePositiveInt(q.Get("churn_window_days"), DefaultChurnWindowDays),
 		StuckMinutes:    parsePositiveInt(q.Get("stuck_minutes"), DefaultStuckMinutes),
+		VolumeWindowDays: parsePositiveInt(q.Get("volume_days"), DefaultVolumeWindowDays),
 	}
 	if allowOrgFilter {
 		if orgID := strings.TrimSpace(q.Get("org_id")); orgID != "" {
