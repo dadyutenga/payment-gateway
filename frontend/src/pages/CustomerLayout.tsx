@@ -110,6 +110,10 @@ const CustomerLayout = () => {
   // with SandboxModeBanner — one network call).
   const orgsQuery = useQuery({ queryKey: ["orgs", "mine"], queryFn: () => listMyOrgs(), staleTime: 60_000, retry: false });
   const activeOrg = (orgsQuery.data ?? []).find((o) => o.status === "active") ?? orgsQuery.data?.[0];
+  const isCreator = (activeOrg?.account_kind ?? "merchant") === "creator";
+  // Creator accounts are single-member: hide the Team group (member
+  // management stays reachable via direct URL for a future manager add).
+  const groups = isCreator ? NAV_GROUPS.filter((g) => g.id !== "team") : NAV_GROUPS;
   const statusBadge = !activeOrg ? undefined : activeOrg.kyc_status === "verified" ? (
     <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-emerald-700">
       Live
@@ -125,14 +129,14 @@ const CustomerLayout = () => {
       <Wallet className="h-5 w-5" />
       LipaGO
       <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-emerald-700">
-        Merchant
+        {isCreator ? "Creator" : "Merchant"}
       </span>
     </>
   );
 
   const sidebar = (
     <Sidebar
-      groups={NAV_GROUPS}
+      groups={groups}
       accent="merchant"
       spaceBadge={brand}
       collapsed={collapsed}

@@ -50,6 +50,7 @@ const OrgMembers = () => {
 
   const myRole = orgQuery.data?.role;
   const isOwner = myRole === "owner";
+  const isCreator = (orgQuery.data?.account_kind ?? "merchant") === "creator";
   const members = membersQuery.data ?? [];
   const invited = members.filter((m) => m.status === "invited");
   const active = members.filter((m) => m.status === "active");
@@ -127,7 +128,9 @@ const OrgMembers = () => {
         <div>
           <h2 className="text-2xl font-bold text-slate-900">Members — {orgQuery.data?.name ?? "…"}</h2>
           <p className="mt-1 text-sm text-slate-500">
-            Invite by email (they need an account first), change roles, or remove members.
+            {isCreator
+              ? "Creator pages are single-owner. Contact support if you need to add a manager."
+              : "Invite by email (they need an account first), change roles, or remove members."}
             {myRole && <> Your role: <Badge variant="secondary">{myRole}</Badge></>}
           </p>
         </div>
@@ -142,7 +145,7 @@ const OrgMembers = () => {
         </Card>
       )}
 
-      {isOwner && (
+      {isOwner && !isCreator && (
         <Card className="mt-4">
           <CardContent className="p-4">
             <form onSubmit={handleInvite} className="flex flex-col gap-2 sm:flex-row sm:items-end">

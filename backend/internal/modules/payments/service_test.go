@@ -192,6 +192,10 @@ type fakePaymentRepository struct {
 	orgLiveMaxTxn           string
 	orgLiveDailyCap         string
 	orgLimitsErr            error
+	appsByOrg               []PaymentApp
+	appsByOrgErr            error
+	providerAccountList     []PaymentProviderAccount
+	providerAccountListErr  error
 	updatedLabelAppID       string
 	updatedLabelKeyID       string
 	updatedLabel            string
@@ -251,6 +255,12 @@ func (r *fakePaymentRepository) TodayLiveVolume(_ context.Context, _, _ string) 
 }
 
 func (r *fakePaymentRepository) ListAppsByOrg(_ context.Context, _ string) ([]PaymentApp, error) {
+	if r.appsByOrgErr != nil {
+		return nil, r.appsByOrgErr
+	}
+	if r.appsByOrg != nil {
+		return r.appsByOrg, nil
+	}
 	return []PaymentApp{}, nil
 }
 
@@ -670,6 +680,12 @@ func (r *fakePaymentRepository) DeleteProviderAccount(_ context.Context, _ strin
 }
 
 func (r *fakePaymentRepository) ListProviderAccounts(_ context.Context) ([]PaymentProviderAccount, error) {
+	if r.providerAccountListErr != nil {
+		return nil, r.providerAccountListErr
+	}
+	if r.providerAccountList != nil {
+		return r.providerAccountList, nil
+	}
 	return nil, nil
 }
 

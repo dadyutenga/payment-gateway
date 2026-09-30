@@ -12,18 +12,22 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { toast } from "@/components/ui/sonner";
 import {
   deleteOrg,
+  enableSupportPage,
   getLimitsUsage,
   getNotificationPrefs,
   getOrg,
+  getSupportSettings,
   listKYCAttempts,
   listOrgMembers,
   resolveLogoSrc,
   updateNotificationPrefs,
   updateOrg,
+  updateSupportSettings,
   uploadOrgLogo,
   type NotificationPrefs,
   type Organization,
 } from "@/lib/orgApi";
+import CreatorSurveyForm, { loadCreatorSurvey } from "@/components/CreatorSurveyForm";
 import { changePassword, getKYC, getOwnProfile, updateOwnProfile } from "@/lib/signupApi";
 import { listMerchantWithdrawals, listMyApps } from "@/lib/merchantApi";
 
@@ -55,6 +59,9 @@ type ProfileForm = {
   contact_email: string;
   logo_url: string;
   primary_color: string;
+  display_name: string;
+  handle: string;
+  bio: string;
 };
 
 function formFromOrg(org: Organization): ProfileForm {
@@ -67,14 +74,20 @@ function formFromOrg(org: Organization): ProfileForm {
     contact_email: org.contact_email ?? "",
     logo_url: org.logo_url ?? "",
     primary_color: org.primary_color ?? "",
+    display_name: org.display_name ?? "",
+    handle: org.handle ?? "",
+    bio: org.bio ?? "",
   };
 }
+
+const isCreatorOrg = (org: Organization) => (org.account_kind ?? "merchant") === "creator";
 
 const GeneralTab = ({ org, isOwner }: { org: Organization; isOwner: boolean }) => {
   const queryClient = useQueryClient();
   const [form, setForm] = useState<ProfileForm>(() => formFromOrg(org));
   const [saving, setSaving] = useState(false);
   const locked = org.kyc_status === "verified";
+  const isCreator = isCreatorOrg(org);
   const dirty = JSON.stringify(form) !== JSON.stringify(formFromOrg(org));
   const set = (key: keyof ProfileForm) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setForm((f) => ({ ...f, [key]: e.target.value }));
@@ -94,15 +107,18 @@ const GeneralTab = ({ org, isOwner }: { org: Organization; isOwner: boolean }) =
     try {
       await updateOrg(org.id, {
         name: form.name.trim(),
-        business_name: form.business_name.trim() || undefined,
-        tin: form.tin.trim() || undefined,
+        business_name: isCreator ? undefined : form.business_name.trim() || undefined,
+        tin: isCreator ? undefined : form.tin.trim() || undefined,
         address: form.address.trim() || undefined,
         phone: form.phone.trim() || undefined,
         contact_email: form.contact_email.trim() || undefined,
         logo_url: form.logo_url.trim() || undefined,
         primary_color: form.primary_color.trim() || undefined,
+        display_name: isCreator ? form.display_name.trim() || undefined : undefined,
+        handle: isCreator ? form.handle.trim().toLowerCase() || undefined : undefined,
+        bio: isCreator ? form.bio.trim() || undefined : undefined,
       });
-      toast.success("Organization updated.");
+      toast.success(isCreator ? "Creator page updated." : "Organization updated.");
       queryClient.invalidateQueries({ queryKey: ["orgs", org.id] });
       queryClient.invalidateQueries({ queryKey: ["orgs", "mine"] });
     } catch (err) {
@@ -169,22 +185,42 @@ const GeneralTab = ({ org, isOwner }: { org: Organization; isOwner: boolean }) =
             <p className="mt-1 text-xs text-slate-400">Read-only identifier used in API paths and support requests.</p>
           </div>
           {field("Organization name", "Workspace label shown in navigation — internal only.", "name")}
-          {field(
-            "Business name",
-            "Legal / trading name shown to customers and used for verification.",
-            "business_name",
-            { disabled: locked, placeholder: "Acme Limited" },
+          {isCreator ? (
+            <>
+              {field("Display name", "Public name on your support page.", "display_name", { placeholder: "Amina Creates" })}
+              {field("Handle", "Your public link: /c/<handle>. Contact support to change it later.", "handle", { placeholder: "amina.creates" })}
+              {field("Bio", "Short public intro shown to supporters (500 chars).", "bio", { placeholder: "I make videos about…" })}
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                {field("Contact email", "Where supporters and LipaGO reach you.", "contact_email", { type: "email", placeholder: "hello@example.com" })}
+                {field("Contact phone", "Your contact number.", "phone", { placeholder: "+255712345678" })}
+              </div>
+            </>
+          ) : (
+            <>
+              {field(
+                "Business name",
+                "Legal / trading name shown to customers and used for verification.",
+                "business_name",
+                { disabled: locked, placeholder: "Acme Limited" },
+              )}
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                {field("TIN", "Tax identification number. Locked after verification.", "tin", { disabled: locked, placeholder: "123456789" })}
+                {field("Contact email", "Where customers and LipaGO reach you.", "contact_email", { type: "email", placeholder: "billing@example.com" })}
+              </div>
+              {field("Business address", "Physical address of the business.", "address", { placeholder: "123 Sam Nujoma Rd, Dar es Salaam" })}
+              {field("Business phone", "Business contact number.", "phone", { placeholder: "+255712345678" })}
+            </>
           )}
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            {field("TIN", "Tax identification number. Locked after verification.", "tin", { disabled: locked, placeholder: "123456789" })}
-            {field("Contact email", "Where customers and LipaGO reach you.", "contact_email", { type: "email", placeholder: "billing@example.com" })}
-          </div>
-          {field("Business address", "Physical address of the business.", "address", { placeholder: "123 Sam Nujoma Rd, Dar es Salaam" })}
-          {field("Business phone", "Business contact number.", "phone", { placeholder: "+255712345678" })}
-          {locked && (
+          {!isCreator && locked && (
             <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-900">
               Business name and TIN are locked after verification. Changing them requires re-verification —{" "}
               <Link to={`/onboarding/kyc/${org.id}`} className="font-medium underline">request a change via resubmission</Link>.
+            </div>
+          )}
+          {isCreator && org.handle && (
+            <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2.5 text-xs text-emerald-900">
+              Your public support page: <Link to={`/c/${org.handle}`} className="font-medium underline">/c/{org.handle}</Link>
+              {" "}— share it anywhere. {org.kyc_status === "verified" ? "Live support payments enabled." : "Sandbox only until ID verification passes."}
             </div>
           )}
           {isOwner ? (
@@ -203,6 +239,7 @@ const GeneralTab = ({ org, isOwner }: { org: Organization; isOwner: boolean }) =
 const VerificationTab = ({ org, isOwner }: { org: Organization; isOwner: boolean }) => {
   const status = KYC_STATUS[org.kyc_status] ?? KYC_STATUS.pending;
   const Icon = status.icon;
+  const creator = isCreatorOrg(org);
 
   const kycQuery = useQuery({
     queryKey: ["orgs", org.id, "kyc"],
@@ -253,7 +290,7 @@ const VerificationTab = ({ org, isOwner }: { org: Organization; isOwner: boolean
               <TableHeader>
                 <TableRow>
                   <TableHead>Date</TableHead>
-                  <TableHead>Business</TableHead>
+                  <TableHead>{creator ? "Identity" : "Business"}</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead>Decision</TableHead>
                 </TableRow>
@@ -262,7 +299,7 @@ const VerificationTab = ({ org, isOwner }: { org: Organization; isOwner: boolean
                 {attempts.map((a) => (
                   <TableRow key={a.id}>
                     <TableCell className="text-xs">{formatDate(a.created_at)}</TableCell>
-                    <TableCell className="text-xs">{a.business_name || "—"}</TableCell>
+                    <TableCell className="text-xs">{a.full_name || a.business_name || "—"}</TableCell>
                     <TableCell><Badge variant="secondary">{a.status}</Badge></TableCell>
                     <TableCell className="max-w-xs truncate text-xs text-slate-500">
                       {a.status === "rejected" && a.rejection_reason ? a.rejection_reason : a.reviewed_by ? `by ${a.reviewed_by}` : "—"}
@@ -586,6 +623,9 @@ const BrandingTab = ({ org, isOwner }: { org: Organization; isOwner: boolean }) 
         name: org.name,
         business_name: org.business_name,
         tin: org.tin,
+        display_name: org.display_name,
+        handle: org.handle,
+        bio: org.bio,
         logo_url: logoUrl.trim() || undefined,
         primary_color: primaryColor.trim() || undefined,
       });
@@ -754,6 +794,181 @@ const PayoutsTab = () => {
   );
 };
 
+// ---------- Survey tab (creator onboarding answers, editable) ----------
+
+const SurveyTab = ({ org, isOwner }: { org: Organization; isOwner: boolean }) => {
+  const queryClient = useQueryClient();
+  const surveyQuery = useQuery({
+    queryKey: ["orgs", org.id, "creator-survey"],
+    queryFn: () => loadCreatorSurvey(org.id),
+    staleTime: 30_000,
+  });
+
+  return (
+    <Card className="mt-4">
+      <CardContent className="p-4 sm:p-6">
+        <h3 className="text-sm font-bold text-slate-800">Onboarding survey</h3>
+        <p className="mt-1 text-xs text-slate-500">
+          Your launch answers — used for safe starting defaults. They never raise live limits on their own.
+        </p>
+        {surveyQuery.isLoading ? (
+          <p className="mt-3 text-sm text-slate-500">Loading answers…</p>
+        ) : !isOwner ? (
+          <p className="mt-3 text-sm text-slate-500">Only owners can change these answers.</p>
+        ) : (
+          <div className="mt-4">
+            <CreatorSurveyForm
+              org={org}
+              initial={surveyQuery.data}
+              submitLabel="Save answers"
+              onSaved={() => queryClient.invalidateQueries({ queryKey: ["orgs", org.id, "creator-survey"] })}
+            />
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+};
+
+// ---------- Support page tab (creator receiving config) ----------
+
+const SupportPageTab = ({ org, isOwner }: { org: Organization; isOwner: boolean }) => {
+  const queryClient = useQueryClient();
+  const settingsQuery = useQuery({
+    queryKey: ["orgs", org.id, "support-settings"],
+    queryFn: () => getSupportSettings(org.id).catch(() => null),
+    staleTime: 15_000,
+  });
+  const appsQuery = useQuery({ queryKey: ["merchant", "my-apps"], queryFn: () => listMyApps(), staleTime: 30_000 });
+  const settings = settingsQuery.data;
+  const enabled = !!settings?.support_app_id;
+
+  const [appId, setAppId] = useState<string | null>(null);
+  const [minAmount, setMinAmount] = useState<string | null>(null);
+  const [maxAmount, setMaxAmount] = useState<string | null>(null);
+  const [links, setLinks] = useState<{ label: string; amount_mode: "fixed" | "open"; amount?: string }[] | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [enabling, setEnabling] = useState(false);
+
+  const effAppId = appId ?? settings?.support_app_id ?? "";
+  const effMin = minAmount ?? settings?.min_amount ?? "";
+  const effMax = maxAmount ?? settings?.max_amount ?? "";
+  const effLinks = links ?? (settings?.links ?? []).map((l) => ({ label: l.label, amount_mode: l.amount_mode, amount: l.amount ?? "" }));
+
+  const handleEnable = async () => {
+    setEnabling(true);
+    try {
+      await enableSupportPage(org.id);
+      toast.success("Support page enabled — share your link.");
+      queryClient.invalidateQueries({ queryKey: ["orgs", org.id, "support-settings"] });
+    } catch (err) {
+      toast.error(errorMessage(err, "Unable to enable the support page."));
+    } finally {
+      setEnabling(false);
+    }
+  };
+
+  const handleSave = async (event: FormEvent) => {
+    event.preventDefault();
+    setSaving(true);
+    try {
+      await updateSupportSettings(org.id, {
+        support_app_id: effAppId || undefined,
+        min_amount: effMin.trim() || undefined,
+        max_amount: effMax.trim() || undefined,
+        links: effLinks.map((l) => ({ label: l.label.trim(), amount_mode: l.amount_mode, amount: l.amount?.trim() || undefined })),
+      });
+      toast.success("Support page saved.");
+      queryClient.invalidateQueries({ queryKey: ["orgs", org.id, "support-settings"] });
+    } catch (err) {
+      toast.error(errorMessage(err, "Unable to save the support page."));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const updateLink = (i: number, patch: Partial<{ label: string; amount_mode: "fixed" | "open"; amount?: string }>) => {
+    setLinks((effLinks.map((l, j) => (j === i ? { ...l, ...patch } : l))));
+  };
+
+  return (
+    <Card className="mt-4">
+      <CardContent className="p-4 sm:p-6">
+        <h3 className="text-sm font-bold text-slate-800">Support page</h3>
+        <p className="mt-1 text-xs text-slate-500">
+          What fans see at <span className="font-mono">/c/{org.handle || "…"}</span>. Payments run through the same order path as merchant checkouts.
+        </p>
+        {settingsQuery.isLoading ? (
+          <p className="mt-3 text-sm text-slate-500">Loading…</p>
+        ) : !isOwner ? (
+          <p className="mt-3 text-sm text-slate-500">Only owners can change the support page.</p>
+        ) : !enabled ? (
+          <div className="mt-4">
+            <p className="text-sm text-slate-600">Your page shows your profile, but fans can’t pay you until you enable it — enabling creates a dedicated receiving app and two starter buttons.</p>
+            <Button className="mt-3" disabled={enabling} onClick={handleEnable}>{enabling ? "Enabling…" : "Enable support page"}</Button>
+          </div>
+        ) : (
+          <form onSubmit={handleSave} className="mt-4 space-y-4">
+            <div>
+              <label className="text-sm font-medium text-slate-700">Receiving app</label>
+              <select value={effAppId} onChange={(e) => setAppId(e.target.value)} className="mt-1 h-10 w-full rounded-md border border-slate-300 bg-white px-2 text-sm" required>
+                <option value="" disabled>Select an app…</option>
+                {(appsQuery.data ?? []).map((a) => (
+                  <option key={a.id} value={a.id}>{a.name}</option>
+                ))}
+              </select>
+              <p className="mt-1 text-xs text-slate-400">Support payments settle into this app’s balance.</p>
+            </div>
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <div>
+                <label className="text-sm font-medium text-slate-700">Minimum amount (TZS)</label>
+                <Input value={effMin} onChange={(e) => setMinAmount(e.target.value.replace(/[^\d]/g, ""))} inputMode="numeric" placeholder="500" className="mt-1" />
+                <p className="mt-1 text-xs text-slate-400">Floor is 500 TZS against dust.</p>
+              </div>
+              <div>
+                <label className="text-sm font-medium text-slate-700">Maximum amount (TZS)</label>
+                <Input value={effMax} onChange={(e) => setMaxAmount(e.target.value.replace(/[^\d]/g, ""))} inputMode="numeric" placeholder="Live tier cap" className="mt-1" />
+                <p className="mt-1 text-xs text-slate-400">Clamped to your live per-transaction tier at order time.</p>
+              </div>
+            </div>
+            <div>
+              <label className="text-sm font-medium text-slate-700">Support buttons (max 6)</label>
+              <div className="mt-2 space-y-2">
+                {effLinks.map((l, i) => (
+                  <div key={i} className="flex flex-col gap-2 rounded-lg border border-slate-200 p-2 sm:flex-row sm:items-center">
+                    <Input value={l.label} onChange={(e) => updateLink(i, { label: e.target.value })} maxLength={60} placeholder="Buy me coffee" className="flex-1" />
+                    <select value={l.amount_mode} onChange={(e) => updateLink(i, { amount_mode: e.target.value as "fixed" | "open" })} className="h-10 rounded-md border border-slate-300 px-2 text-sm">
+                      <option value="open">Custom amount</option>
+                      <option value="fixed">Fixed amount</option>
+                    </select>
+                    {l.amount_mode === "fixed" && (
+                      <Input value={l.amount ?? ""} onChange={(e) => updateLink(i, { amount: e.target.value.replace(/[^\d]/g, "") })} inputMode="numeric" placeholder="5000" className="w-28" />
+                    )}
+                    <Button type="button" size="sm" variant="outline" onClick={() => setLinks(effLinks.filter((_, j) => j !== i))}>Remove</Button>
+                  </div>
+                ))}
+              </div>
+              {effLinks.length < 6 && (
+                <Button type="button" size="sm" variant="outline" className="mt-2" onClick={() => setLinks([...effLinks, { label: "", amount_mode: "open" }])}>
+                  Add button
+                </Button>
+              )}
+            </div>
+            <label className="flex items-start gap-3 rounded-lg border border-slate-200 px-3 py-2.5 opacity-60">
+              <input type="checkbox" checked={false} disabled className="mt-1 h-4 w-4" />
+              <span>
+                <span className="block text-sm font-medium text-slate-800">Public supporters wall (coming soon)</span>
+                <span className="block text-xs text-slate-500">Supporter messages stay private in your dashboard until this ships. Default: off.</span>
+              </span>
+            </label>
+            <Button type="submit" disabled={saving}>{saving ? "Saving…" : "Save support page"}</Button>
+          </form>
+        )}
+      </CardContent>
+    </Card>
+  );
+};
+
 // ---------- Danger zone ----------
 
 const DangerTab = ({ org, isOwner }: { org: Organization; isOwner: boolean }) => {
@@ -810,8 +1025,9 @@ const OrgSettings = () => {
       <div>
         <h2 className="text-2xl font-bold text-slate-900">Settings — {org?.name ?? "…"}</h2>
         <p className="mt-1 flex flex-wrap items-center gap-2 text-sm text-slate-500">
-          Organization settings.
+          {org && isCreatorOrg(org) ? "Creator page settings." : "Organization settings."}
           {org && <Badge variant="secondary">{org.role}</Badge>}
+          {org && isCreatorOrg(org) && <Badge variant="outline">creator</Badge>}
         </p>
       </div>
 
@@ -821,6 +1037,8 @@ const OrgSettings = () => {
         <Tabs defaultValue="general" className="mt-4">
           <TabsList className="flex-wrap">
             <TabsTrigger value="general">General</TabsTrigger>
+            {org && isCreatorOrg(org) && <TabsTrigger value="survey">Survey</TabsTrigger>}
+            {org && isCreatorOrg(org) && <TabsTrigger value="support">Support page</TabsTrigger>}
             <TabsTrigger value="verification">Verification</TabsTrigger>
             <TabsTrigger value="limits">Limits &amp; Fees</TabsTrigger>
             <TabsTrigger value="security">Security</TabsTrigger>
@@ -831,6 +1049,8 @@ const OrgSettings = () => {
           </TabsList>
 
           <TabsContent value="general"><GeneralTab org={org} isOwner={!!isOwner} /></TabsContent>
+          {org && isCreatorOrg(org) && <TabsContent value="survey"><SurveyTab org={org} isOwner={!!isOwner} /></TabsContent>}
+          {org && isCreatorOrg(org) && <TabsContent value="support"><SupportPageTab org={org} isOwner={!!isOwner} /></TabsContent>}
           <TabsContent value="verification"><VerificationTab org={org} isOwner={!!isOwner} /></TabsContent>
           <TabsContent value="limits"><LimitsTab org={org} /></TabsContent>
           <TabsContent value="security"><SecurityTab /></TabsContent>

@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"math/big"
 	"strings"
+	"time"
 
 	"lipago/internal/shared/validation"
 )
@@ -97,6 +98,156 @@ func (s *Service) CreateOrganization(ctx context.Context, userID, name, business
 	return org, nil, nil
 }
 
+// ValidHandle reports whether a public creator handle is well-formed:
+// 3-30 chars, lowercase letters/digits plus dot/hyphen/underscore.
+func ValidHandle(handle string) bool {
+	handle = strings.TrimSpace(handle)
+	if len(handle) < 3 || len(handle) > 30 {
+		return false
+	}
+	for _, r := range handle {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '.', r == '-', r == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// NormalizeHandle lowercases and trims a handle for storage/comparison.
+func NormalizeHandle(handle string) string {
+	return strings.ToLower(strings.TrimSpace(handle))
+}
+
+// ValidCreatorIDType reports whether an ID type is accepted for creator KYC.
+func ValidCreatorIDType(idType string) bool {
+	switch strings.ToLower(strings.TrimSpace(idType)) {
+	case "national_id", "passport", "drivers_license", "voters_id":
+		return true
+	default:
+		return false
+	}
+}
+
+// Creator survey vocab validation (Part 2 onboarding).
+func ValidCreatorCategory(category string) bool {
+	switch strings.ToLower(strings.TrimSpace(category)) {
+	case CreatorCategoryContentCreator, CreatorCategoryMusicianArtist,
+		CreatorCategoryFreelancerConsultant, CreatorCategoryCoachEducator,
+		CreatorCategoryNonprofitCause, CreatorCategoryOther:
+		return true
+	default:
+		return false
+	}
+}
+
+func ValidCreatorReferralSource(source string) bool {
+	switch strings.ToLower(strings.TrimSpace(source)) {
+	case CreatorReferralSocialMedia, CreatorReferralFriend, CreatorReferralSearch,
+		CreatorReferralEvent, CreatorReferralAdvertisement, CreatorReferralOther:
+		return true
+	default:
+		return false
+	}
+}
+
+func ValidCreatorUseCase(useCase string) bool {
+	switch strings.ToLower(strings.TrimSpace(useCase)) {
+	case CreatorUseSupportTips, CreatorUseDigitalProducts,
+		CreatorUseFreelanceWork, CreatorUseAPIIntegration:
+		return true
+	default:
+		return false
+	}
+}
+
+func ValidCreatorVolumeBand(band string) bool {
+	switch strings.ToLower(strings.TrimSpace(band)) {
+	case CreatorVolumeUnder100K, CreatorVolume100KTo1M, CreatorVolume1MTo10M,
+		CreatorVolume10MTo100M, CreatorVolumeOver100M:
+		return true
+	default:
+		return false
+	}
+}
+
+func ValidCreatorTxnBand(band string) bool {
+	switch strings.ToLower(strings.TrimSpace(band)) {
+	case CreatorTxnUnder50, CreatorTxn50To200, CreatorTxn200To1000,
+		CreatorTxn1000To5000, CreatorTxnOver5000:
+		return true
+	default:
+		return false
+	}
+}
+
+// SuggestedCreatorRiskTier derives the DEFAULT starting risk tier from
+// self-reported bands. Segmentation only: a high suggestion flags closer
+// admin attention — it never unlocks higher live limits, which still gate
+// on kyc_status.
+func SuggestedCreatorRiskTier(volumeBand, txnBand string) string {
+	volumeBand = strings.ToLower(strings.TrimSpace(volumeBand))
+	txnBand = strings.ToLower(strings.TrimSpace(txnBand))
+	if volumeBand == CreatorVolumeOver100M || volumeBand == CreatorVolume10MTo100M ||
+		txnBand == CreatorTxnOver5000 {
+		return CreatorRiskHigh
+	}
+	if volumeBand == CreatorVolume1MTo10M ||
+		txnBand == CreatorTxn200To1000 || txnBand == CreatorTxn1000To5000 {
+		return CreatorRiskElevated
+	}
+	return CreatorRiskStandard
+}
+
+// CreateCreatorOrganization creates a creator-kind account: display name +
+// unique handle instead of a business name. The creator becomes the single
+// owner member; the invite UI stays hidden in v1 (schema still supports a
+// later manager add).
+func (s *Service) CreateCreatorOrganization(ctx context.Context, userID, name string, in CreatorOrgInput) (Organization, validation.Errors, error) {
+	name = strings.TrimSpace(name)
+	in.DisplayName = strings.TrimSpace(in.DisplayName)
+	in.Handle = NormalizeHandle(in.Handle)
+	in.Bio = strings.TrimSpace(in.Bio)
+
+	errs := validation.Errors{}
+	validation.Required(name, "Name is required.", errs, "name")
+	validation.MaxRunes(name, 100, "Name must be 100 characters or fewer.", errs, "name")
+	validation.Required(in.DisplayName, "Display name is required.", errs, "display_name")
+	validation.MaxRunes(in.DisplayName, 100, "Display name must be 100 characters or fewer.", errs, "display_name")
+	if !ValidHandle(in.Handle) {
+		errs.Add("handle", "Handle must be 3-30 lowercase letters, numbers, dots, hyphens or underscores.")
+	} else if ReservedHandle(in.Handle) {
+		errs.Add("handle", "That handle is reserved — pick another.")
+	}
+	validation.MaxRunes(in.Bio, 500, "Bio must be 500 characters or fewer.", errs, "bio")
+	if errs.Any() {
+		return Organization{}, errs, nil
+	}
+
+	if count, err := s.repo.CountActiveOrgsForUser(ctx, userID); err != nil {
+		return Organization{}, nil, err
+	} else if count > 0 {
+		return Organization{}, nil, ErrSingleOrg
+	}
+
+	org, err := s.repo.CreateCreatorOrganization(ctx, name, SlugFor(name), in, userID)
+	if err != nil {
+		return Organization{}, nil, err
+	}
+	return org, nil, nil
+}
+
+// GetCreatorByHandle resolves a public support-page handle. No actor check
+// — the handler exposes only the safe public profile subset.
+func (s *Service) GetCreatorByHandle(ctx context.Context, handle string) (Organization, error) {
+	handle = NormalizeHandle(handle)
+	if !ValidHandle(handle) {
+		return Organization{}, ErrOrgNotFound
+	}
+	return s.repo.GetOrganizationByHandle(ctx, handle)
+}
+
 func (s *Service) ListMyOrganizations(ctx context.Context, userID string) ([]OrganizationWithRole, error) {
 	return s.repo.ListOrganizationsForUser(ctx, userID)
 }
@@ -125,11 +276,18 @@ func (s *Service) UpdateOrganization(ctx context.Context, userID, orgID string, 
 	upd.ContactEmail = strings.ToLower(strings.TrimSpace(upd.ContactEmail))
 	upd.LogoURL = strings.TrimSpace(upd.LogoURL)
 	upd.PrimaryColor = strings.TrimSpace(upd.PrimaryColor)
+	upd.DisplayName = strings.TrimSpace(upd.DisplayName)
+	upd.Handle = NormalizeHandle(upd.Handle)
+	upd.Bio = strings.TrimSpace(upd.Bio)
+
+	current, err := s.repo.GetOrganization(ctx, strings.TrimSpace(orgID))
+	if err != nil {
+		return Organization{}, nil, err
+	}
 
 	errs := validation.Errors{}
 	validation.Required(upd.Name, "Name is required.", errs, "name")
 	validation.MaxRunes(upd.Name, 100, "Name must be 100 characters or fewer.", errs, "name")
-	validation.MaxRunes(upd.BusinessName, 200, "Business name must be 200 characters or fewer.", errs, "business_name")
 	validation.MaxRunes(upd.Address, 500, "Address must be 500 characters or fewer.", errs, "address")
 	validation.MaxRunes(upd.Phone, 30, "Phone must be 30 characters or fewer.", errs, "phone")
 	if upd.ContactEmail != "" && !strings.Contains(upd.ContactEmail, "@") {
@@ -139,22 +297,65 @@ func (s *Service) UpdateOrganization(ctx context.Context, userID, orgID string, 
 	if upd.PrimaryColor != "" && !validHexColor(upd.PrimaryColor) {
 		errs.Add("primary_color", "Primary color must be a hex color like #0ea5e9.")
 	}
+	if current.AccountKind == AccountKindCreator {
+		// Creator track: business identity never applies — reject it
+		// explicitly instead of silently storing empty strings.
+		if upd.BusinessName != "" || upd.TIN != "" {
+			errs.Add("business_name", "Creator accounts use individual verification, not a business name/TIN.")
+		}
+		validation.Required(upd.DisplayName, "Display name is required.", errs, "display_name")
+		validation.MaxRunes(upd.DisplayName, 100, "Display name must be 100 characters or fewer.", errs, "display_name")
+		if upd.Handle != "" && !ValidHandle(upd.Handle) {
+			errs.Add("handle", "Handle must be 3-30 lowercase letters, numbers, dots, hyphens or underscores.")
+		} else if upd.Handle != "" && upd.Handle != current.Handle && ReservedHandle(upd.Handle) {
+			errs.Add("handle", "That handle is reserved — pick another.")
+		}
+		validation.MaxRunes(upd.Bio, 500, "Bio must be 500 characters or fewer.", errs, "bio")
+	} else {
+		validation.MaxRunes(upd.BusinessName, 200, "Business name must be 200 characters or fewer.", errs, "business_name")
+		if upd.DisplayName != "" || upd.Handle != "" || upd.Bio != "" {
+			errs.Add("display_name", "Display name, handle and bio are creator-only fields.")
+		}
+	}
 	if errs.Any() {
 		return Organization{}, errs, nil
 	}
 
-	// Verified orgs lock business name + TIN: changing them requires
-	// re-verification (resubmit KYC, which flips status back to submitted).
-	current, err := s.repo.GetOrganization(ctx, strings.TrimSpace(orgID))
-	if err != nil {
-		return Organization{}, nil, err
-	}
-	if current.KYCStatus == "verified" &&
-		(upd.BusinessName != current.BusinessName || upd.TIN != current.TIN) {
-		return Organization{}, nil, ErrReverificationRequired
+	// Verified orgs lock identity: merchants lock business name + TIN,
+	// creators lock display identity via re-verification (compare the live
+	// KYC submission rather than the org row, which never stores ID data).
+	if current.KYCStatus == "verified" {
+		if current.AccountKind == AccountKindCreator {
+			if sub, found, subErr := s.repo.GetKYCSubmission(ctx, strings.TrimSpace(orgID)); subErr != nil {
+				return Organization{}, nil, subErr
+			} else if found {
+				_ = sub
+				// Display identity itself stays editable (it's the public
+				// page); the verified legal identity (full name/ID) can
+				// only change via resubmission — enforced in
+				// SubmitCreatorKYC flipping status back to submitted.
+			}
+			if upd.Handle != current.Handle || upd.DisplayName != current.DisplayName {
+				// Handle/display-name changes are allowed but must stay
+				// unique/valid — uniqueness enforced at the DB layer and
+				// mapped to ErrHandleTaken by callers.
+			}
+		} else if upd.BusinessName != current.BusinessName || upd.TIN != current.TIN {
+			return Organization{}, nil, ErrReverificationRequired
+		}
 	}
 
 	org, err := s.repo.UpdateOrganization(ctx, strings.TrimSpace(orgID), upd)
+	if err != nil {
+		return Organization{}, nil, err
+	}
+	// Preserve kind on responses from repos that don't populate it (fakes).
+	if org.AccountKind == "" {
+		org.AccountKind = current.AccountKind
+		if org.AccountKind == "" {
+			org.AccountKind = AccountKindMerchant
+		}
+	}
 	return org, nil, err
 }
 
@@ -244,14 +445,27 @@ func validPositiveDecimal(value string) bool {
 	return true
 }
 
+// decimalLessThan reports whether a < b for positive decimal strings.
+// Unparseable input returns false (callers validate separately).
+func decimalLessThan(a, b string) bool {
+	ra, okA := new(big.Rat).SetString(strings.TrimSpace(a))
+	rb, okB := new(big.Rat).SetString(strings.TrimSpace(b))
+	if !okA || !okB {
+		return false
+	}
+	return ra.Cmp(rb) < 0
+}
+
 // AdminOrgDetail is the operator's single-org view (linked from
-// analytics merchant rows): profile, members, verification evidence and
-// history. No actor check — route-gated by RequireAdminAuth.
+// analytics merchant rows): profile, members, verification evidence,
+// history, and the creator onboarding survey (segmentation/risk signal).
+// No actor check — route-gated by RequireAdminAuth.
 type AdminOrgDetail struct {
 	Org       Organization `json:"org"`
 	Members   []OrgMember  `json:"members"`
 	KYC       *KYCSubmission `json:"kyc,omitempty"`
 	Attempts  []KYCAttempt `json:"attempts"`
+	Survey    *CreatorSurvey `json:"survey,omitempty"`
 }
 
 func (s *Service) AdminOrgDetail(ctx context.Context, orgID string) (AdminOrgDetail, error) {
@@ -274,7 +488,13 @@ func (s *Service) AdminOrgDetail(ctx context.Context, orgID string) (AdminOrgDet
 	if err != nil {
 		return AdminOrgDetail{}, err
 	}
-	return AdminOrgDetail{Org: org, Members: members, KYC: kyc, Attempts: attempts}, nil
+	var survey *CreatorSurvey
+	if sv, found, err := s.repo.GetCreatorSurvey(ctx, orgID); err != nil {
+		return AdminOrgDetail{}, err
+	} else if found {
+		survey = &sv
+	}
+	return AdminOrgDetail{Org: org, Members: members, KYC: kyc, Attempts: attempts, Survey: survey}, nil
 }
 
 // AdminGetKYCSubmission loads the evidence row with no actor check —
@@ -425,9 +645,20 @@ func validTIN(tin string) bool {
 // SubmitKYC files (or refiles) verification evidence for owner-run orgs.
 // Business name, TIN, and an uploaded document are all required; review
 // (approve/reject) is an admin action in a later block.
+// Creator accounts must use SubmitCreatorKYC instead — business KYC is
+// rejected explicitly rather than bypassed with empty strings.
 func (s *Service) SubmitKYC(ctx context.Context, userID, orgID, businessName, tin, docURL string) (KYCSubmission, validation.Errors, error) {
 	if _, err := s.CheckOrgPermission(ctx, userID, orgID, PermManageOrg); err != nil {
 		return KYCSubmission{}, nil, err
+	}
+	current, err := s.repo.GetOrganization(ctx, strings.TrimSpace(orgID))
+	if err != nil {
+		return KYCSubmission{}, nil, err
+	}
+	if current.AccountKind == AccountKindCreator {
+		errs := validation.Errors{}
+		errs.Add("business_name", "Creator accounts use individual verification — submit full name and ID instead.")
+		return KYCSubmission{}, errs, nil
 	}
 	businessName = strings.TrimSpace(businessName)
 	tin = strings.TrimSpace(tin)
@@ -445,6 +676,355 @@ func (s *Service) SubmitKYC(ctx context.Context, userID, orgID, businessName, ti
 	}
 	sub, err := s.repo.SubmitKYC(ctx, strings.TrimSpace(orgID), businessName, tin, docURL)
 	return sub, nil, err
+}
+
+// SubmitCreatorKYC files (or refiles) individual verification evidence for
+// creator accounts: full legal name + date of birth (18+) + national ID +
+// front document (+ optional back side) + v1 selfie photo. Merchant
+// accounts must use SubmitKYC instead.
+func (s *Service) SubmitCreatorKYC(ctx context.Context, userID, orgID string, in CreatorKYCInput) (KYCSubmission, validation.Errors, error) {
+	if _, err := s.CheckOrgPermission(ctx, userID, orgID, PermManageOrg); err != nil {
+		return KYCSubmission{}, nil, err
+	}
+	current, err := s.repo.GetOrganization(ctx, strings.TrimSpace(orgID))
+	if err != nil {
+		return KYCSubmission{}, nil, err
+	}
+	if current.AccountKind != AccountKindCreator {
+		errs := validation.Errors{}
+		errs.Add("full_name", "Business accounts use business verification — submit business name and TIN instead.")
+		return KYCSubmission{}, errs, nil
+	}
+	in.FullName = strings.TrimSpace(in.FullName)
+	in.IDType = strings.ToLower(strings.TrimSpace(in.IDType))
+	in.IDNumber = strings.TrimSpace(in.IDNumber)
+	in.Dob = strings.TrimSpace(in.Dob)
+	in.DocURL = strings.TrimSpace(in.DocURL)
+	in.DocBackURL = strings.TrimSpace(in.DocBackURL)
+	in.SelfieURL = strings.TrimSpace(in.SelfieURL)
+
+	errs := validation.Errors{}
+	validation.Required(in.FullName, "Full legal name is required.", errs, "full_name")
+	validation.MaxRunes(in.FullName, 200, "Full name must be 200 characters or fewer.", errs, "full_name")
+	if !ValidCreatorIDType(in.IDType) {
+		errs.Add("id_type", "ID type must be national_id, passport, drivers_license, or voters_id.")
+	}
+	validation.Required(in.IDNumber, "ID number is required.", errs, "id_number")
+	validation.MaxRunes(in.IDNumber, 60, "ID number must be 60 characters or fewer.", errs, "id_number")
+	// Age-gate: under-18 is a plain validation refusal — progression is
+	// blocked before anything is persisted, so no age-identifying reason
+	// is ever stored for a rejected signup.
+	if !ValidCreatorDOB(in.Dob) {
+		errs.Add("dob", "You must be 18 or older to use LipaGO.")
+	}
+	validation.Required(in.DocURL, "An ID document upload is required.", errs, "id_document_url")
+	validation.MaxRunes(in.DocBackURL, 500, "Back-side document reference must be 500 characters or fewer.", errs, "id_document_back_url")
+	validation.Required(in.SelfieURL, "A selfie photo is required.", errs, "selfie_url")
+	if errs.Any() {
+		return KYCSubmission{}, errs, nil
+	}
+	sub, err := s.repo.SubmitCreatorKYC(ctx, strings.TrimSpace(orgID), in)
+	return sub, nil, err
+}
+
+// ValidCreatorDOB reports whether value is a YYYY-MM-DD date proving the
+// holder is at least 18 years old (and not implausibly old). Pure
+// function so the gate is unit-testable without a database.
+func ValidCreatorDOB(value string) bool {
+	dob, err := time.Parse("2006-01-02", strings.TrimSpace(value))
+	if err != nil {
+		return false
+	}
+	now := time.Now().UTC()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	if dob.After(today) || dob.Year() < 1900 {
+		return false
+	}
+	eighteen := time.Date(today.Year()-18, today.Month(), today.Day(), 0, 0, 0, 0, time.UTC)
+	return !dob.After(eighteen)
+}
+
+// SaveCreatorSurvey stores (or replaces) a creator org's onboarding
+// answers. Creator accounts only; any active member may read, but only
+// manage_org may write. Display name (Q1) is applied to the org row in
+// the same call so the survey form submits once.
+func (s *Service) SaveCreatorSurvey(ctx context.Context, userID, orgID string, in CreatorSurveyInput) (CreatorSurvey, validation.Errors, error) {
+	if _, err := s.CheckOrgPermission(ctx, userID, orgID, PermManageOrg); err != nil {
+		return CreatorSurvey{}, nil, err
+	}
+	current, err := s.repo.GetOrganization(ctx, strings.TrimSpace(orgID))
+	if err != nil {
+		return CreatorSurvey{}, nil, err
+	}
+	if current.AccountKind != AccountKindCreator {
+		errs := validation.Errors{}
+		errs.Add("category", "Onboarding surveys are for creator accounts only.")
+		return CreatorSurvey{}, errs, nil
+	}
+	in.DisplayName = strings.TrimSpace(in.DisplayName)
+	in.Category = strings.ToLower(strings.TrimSpace(in.Category))
+	in.CategoryOther = strings.TrimSpace(in.CategoryOther)
+	in.ReferralSource = strings.ToLower(strings.TrimSpace(in.ReferralSource))
+	in.ExpectedVolumeBand = strings.ToLower(strings.TrimSpace(in.ExpectedVolumeBand))
+	in.ExpectedTxnBand = strings.ToLower(strings.TrimSpace(in.ExpectedTxnBand))
+	normalizedUseCases := []string{}
+	seenUseCases := map[string]bool{}
+	for _, u := range in.UseCases {
+		u = strings.ToLower(strings.TrimSpace(u))
+		if u == "" || seenUseCases[u] {
+			continue
+		}
+		seenUseCases[u] = true
+		normalizedUseCases = append(normalizedUseCases, u)
+	}
+	in.UseCases = normalizedUseCases
+
+	errs := validation.Errors{}
+	if in.DisplayName != "" {
+		validation.MaxRunes(in.DisplayName, 100, "Display name must be 100 characters or fewer.", errs, "display_name")
+	}
+	if !ValidCreatorCategory(in.Category) {
+		errs.Add("category", "Category must be content_creator, musician_artist, freelancer_consultant, coach_educator, nonprofit_cause, or other.")
+	}
+	if in.Category == CreatorCategoryOther {
+		validation.Required(in.CategoryOther, "Describe your category when selecting Other.", errs, "category_other")
+		validation.MaxRunes(in.CategoryOther, 200, "Category description must be 200 characters or fewer.", errs, "category_other")
+	}
+	if !ValidCreatorReferralSource(in.ReferralSource) {
+		errs.Add("referral_source", "Referral source must be social_media, friend_colleague, search_engine, event_conference, advertisement, or other.")
+	}
+	if len(in.UseCases) == 0 {
+		errs.Add("use_cases", "Select at least one use case.")
+	}
+	for _, u := range in.UseCases {
+		if !ValidCreatorUseCase(u) {
+			errs.Add("use_cases", "Use cases must be support_tips, digital_products, freelance_work, or api_integration.")
+			break
+		}
+	}
+	if !ValidCreatorVolumeBand(in.ExpectedVolumeBand) {
+		errs.Add("expected_volume_band", "Expected monthly amount must be under_100k, 100k_1m, 1m_10m, 10m_100m, or over_100m.")
+	}
+	if !ValidCreatorTxnBand(in.ExpectedTxnBand) {
+		errs.Add("expected_txn_band", "Expected monthly payments must be under_50, 50_200, 200_1000, 1000_5000, or over_5000.")
+	}
+	if errs.Any() {
+		return CreatorSurvey{}, errs, nil
+	}
+	survey, err := s.repo.UpsertCreatorSurvey(ctx, strings.TrimSpace(orgID), in)
+	return survey, nil, err
+}
+
+// GetCreatorSurvey returns a creator org's onboarding answers plus the
+// derived starting risk tier (any active member may read).
+func (s *Service) GetCreatorSurvey(ctx context.Context, userID, orgID string) (CreatorSurvey, error) {
+	if _, err := s.CheckOrgPermission(ctx, userID, orgID, PermRead); err != nil {
+		return CreatorSurvey{}, err
+	}
+	survey, found, err := s.repo.GetCreatorSurvey(ctx, strings.TrimSpace(orgID))
+	if err != nil {
+		return CreatorSurvey{}, err
+	}
+	if !found {
+		return CreatorSurvey{}, ErrSurveyNotFound
+	}
+	return survey, nil
+}
+
+// SwitchCreatorToMerchant moves a pre-KYC creator org to the merchant
+// track (the Q4 "API integration" escape hatch). Refused once any KYC
+// submission exists — after that, kind changes are support-assisted.
+func (s *Service) SwitchCreatorToMerchant(ctx context.Context, userID, orgID string) (Organization, error) {
+	if _, err := s.CheckOrgPermission(ctx, userID, orgID, PermManageOrg); err != nil {
+		return Organization{}, err
+	}
+	return s.repo.SwitchCreatorToMerchant(ctx, strings.TrimSpace(orgID))
+}
+
+// SupportPageData is everything the public support page needs that is
+// safe to display: profile, category badge source, page config, buttons.
+// Never identity, contact, or KYC data. No actor check — served publicly.
+type SupportPageData struct {
+	Org      Organization    `json:"org"`
+	Category string          `json:"category"`
+	Settings SupportSettings `json:"settings"`
+	Enabled  bool            `json:"enabled"`
+}
+
+// PublicCreatorSupport resolves a handle to its public page data. Unknown
+// handles and non-creator rows surface as not-found so the handle
+// namespace cannot be probed for merchant orgs.
+func (s *Service) PublicCreatorSupport(ctx context.Context, handle string) (SupportPageData, error) {
+	org, err := s.repo.GetOrganizationByHandle(ctx, handle)
+	if err != nil {
+		return SupportPageData{}, err
+	}
+	category := ""
+	if survey, found, err := s.repo.GetCreatorSurvey(ctx, org.ID); err != nil {
+		return SupportPageData{}, err
+	} else if found {
+		category = survey.Category
+	}
+	settings, found, err := s.repo.GetSupportSettings(ctx, org.ID)
+	if err != nil {
+		return SupportPageData{}, err
+	}
+	if !found {
+		settings = SupportSettings{OrgID: org.ID, Links: []SupportLink{}}
+	}
+	return SupportPageData{
+		Org:      org,
+		Category: category,
+		Settings: settings,
+		Enabled:  found && strings.TrimSpace(settings.SupportAppID) != "",
+	}, nil
+}
+
+// GetSupportSettings returns a creator org's page configuration (any
+// active member may read).
+func (s *Service) GetSupportSettings(ctx context.Context, userID, orgID string) (SupportSettings, error) {
+	if _, err := s.CheckOrgPermission(ctx, userID, orgID, PermRead); err != nil {
+		return SupportSettings{}, err
+	}
+	settings, found, err := s.repo.GetSupportSettings(ctx, strings.TrimSpace(orgID))
+	if err != nil {
+		return SupportSettings{}, err
+	}
+	if !found {
+		return SupportSettings{OrgID: strings.TrimSpace(orgID), Links: []SupportLink{}}, nil
+	}
+	return settings, nil
+}
+
+// SaveSupportSettings replaces a creator org's page configuration
+// (owner/manage_org). Bounds are sanity-checked here; they are clamped
+// against the live per-transaction cap at order time, and self-reported
+// values can never raise live limits. The supporters-wall toggle is
+// future scope — writes are accepted but the wall is never rendered
+// publicly until that toggle ships (always off for now).
+func (s *Service) SaveSupportSettings(ctx context.Context, userID, orgID string, in SupportSettingsInput) (SupportSettings, validation.Errors, error) {
+	if _, err := s.CheckOrgPermission(ctx, userID, orgID, PermManageOrg); err != nil {
+		return SupportSettings{}, nil, err
+	}
+	current, err := s.repo.GetOrganization(ctx, strings.TrimSpace(orgID))
+	if err != nil {
+		return SupportSettings{}, nil, err
+	}
+	if current.AccountKind != AccountKindCreator {
+		errs := validation.Errors{}
+		errs.Add("support_app_id", "Support pages are for creator accounts only.")
+		return SupportSettings{}, errs, nil
+	}
+	in.SupportAppID = strings.TrimSpace(in.SupportAppID)
+	in.MinAmount = strings.TrimSpace(in.MinAmount)
+	in.MaxAmount = strings.TrimSpace(in.MaxAmount)
+
+	errs := validation.Errors{}
+	if in.MinAmount != "" && !validPositiveDecimal(in.MinAmount) {
+		errs.Add("min_amount", "Minimum amount must be a positive number.")
+	}
+	if in.MaxAmount != "" && !validPositiveDecimal(in.MaxAmount) {
+		errs.Add("max_amount", "Maximum amount must be a positive number.")
+	}
+	if in.MinAmount != "" && validPositiveDecimal(in.MinAmount) && decimalLessThan(in.MinAmount, CreatorSupportMinAmount) {
+		errs.Add("min_amount", "Minimum amount is at least "+CreatorSupportMinAmount+" TZS (dust protection).")
+	}
+	if in.MinAmount != "" && in.MaxAmount != "" && validPositiveDecimal(in.MinAmount) && validPositiveDecimal(in.MaxAmount) &&
+		!decimalLessThan(in.MinAmount, in.MaxAmount) {
+		errs.Add("max_amount", "Maximum amount must be above the minimum.")
+	}
+	links := make([]SupportLinkInput, 0, len(in.Links))
+	if len(in.Links) > maxSupportLinks {
+		errs.Add("links", "At most 6 support buttons.")
+	}
+	for i, l := range in.Links {
+		if i >= maxSupportLinks {
+			break
+		}
+		l.Label = strings.TrimSpace(l.Label)
+		l.AmountMode = strings.ToLower(strings.TrimSpace(l.AmountMode))
+		l.Amount = strings.TrimSpace(l.Amount)
+		if l.Label == "" {
+			errs.Add("links", "Every button needs a label.")
+			continue
+		}
+		validation.MaxRunes(l.Label, 60, "Button labels must be 60 characters or fewer.", errs, "links")
+		if l.AmountMode != "fixed" && l.AmountMode != "open" {
+			errs.Add("links", "Button amount mode must be fixed or open.")
+			continue
+		}
+		if l.AmountMode == "fixed" {
+			if strings.TrimSpace(l.Amount) == "" || !validPositiveDecimal(l.Amount) {
+				errs.Add("links", "Fixed-amount buttons need a positive amount.")
+				continue
+			}
+		} else {
+			l.Amount = ""
+		}
+		l.Active = true
+		links = append(links, l)
+	}
+	if errs.Any() {
+		return SupportSettings{}, errs, nil
+	}
+	in.Links = links
+	settings, err := s.repo.UpsertSupportSettings(ctx, strings.TrimSpace(orgID), in)
+	return settings, nil, err
+}
+
+// EnsureSupportPage links the receiving app to the creator's page and
+// seeds the default buttons when the page has none. Called by the
+// enable flow after the app is created via the single CreateApp path.
+func (s *Service) EnsureSupportPage(ctx context.Context, userID, orgID, appID string) (SupportSettings, error) {
+	if _, err := s.CheckOrgPermission(ctx, userID, orgID, PermManageOrg); err != nil {
+		return SupportSettings{}, err
+	}
+	current, err := s.repo.GetOrganization(ctx, strings.TrimSpace(orgID))
+	if err != nil {
+		return SupportSettings{}, err
+	}
+	if current.AccountKind != AccountKindCreator {
+		return SupportSettings{}, ErrSupportPageDisabled
+	}
+	settings, found, err := s.repo.GetSupportSettings(ctx, strings.TrimSpace(orgID))
+	if err != nil {
+		return SupportSettings{}, err
+	}
+	links := []SupportLinkInput{}
+	if found {
+		if strings.TrimSpace(settings.SupportAppID) != "" {
+			return settings, nil
+		}
+		for _, l := range settings.Links {
+			links = append(links, SupportLinkInput{Label: l.Label, AmountMode: l.AmountMode, Amount: l.Amount, Active: l.Active})
+		}
+	}
+	if len(links) == 0 {
+		links = defaultSupportLinks()
+	}
+	updated, err := s.repo.UpsertSupportSettings(ctx, strings.TrimSpace(orgID), SupportSettingsInput{
+		SupportAppID: appID,
+		MinAmount:    settings.MinAmount,
+		MaxAmount:    settings.MaxAmount,
+		Links:        links,
+	})
+	return updated, err
+}
+
+// RequireCreatorOrg enforces a membership permission and the creator
+// track in one call for support-page management routes.
+func (s *Service) RequireCreatorOrg(ctx context.Context, userID, orgID string, perm Permission) (Organization, error) {
+	if _, err := s.CheckOrgPermission(ctx, userID, orgID, perm); err != nil {
+		return Organization{}, err
+	}
+	org, err := s.repo.GetOrganization(ctx, strings.TrimSpace(orgID))
+	if err != nil {
+		return Organization{}, err
+	}
+	if org.AccountKind != AccountKindCreator {
+		return Organization{}, ErrNotCreatorOrg
+	}
+	return org, nil
 }
 
 // GetKYCSubmission returns the evidence row plus live org status for the

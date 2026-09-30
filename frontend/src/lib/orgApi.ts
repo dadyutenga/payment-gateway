@@ -87,13 +87,19 @@ async function request<T>(
 
 export type OrgRole = "owner" | "finance" | "developer" | "viewer";
 
+export type AccountKind = "merchant" | "creator";
+
 export type Organization = {
   id: string;
   name: string;
   slug: string;
   kyc_status: "pending" | "submitted" | "verified" | "rejected";
+  account_kind: AccountKind;
   business_name?: string;
   tin?: string;
+  display_name?: string;
+  handle?: string;
+  bio?: string;
   address?: string;
   phone?: string;
   contact_email?: string;
@@ -135,8 +141,12 @@ export async function listMyOrgs() {
   return (await request<OrganizationWithRole[]>("/api/v1/orgs")).data;
 }
 
-export async function createOrg(input: { name: string; business_name?: string }) {
+export async function createOrg(input: { name: string; business_name?: string; account_kind?: AccountKind; display_name?: string; handle?: string; bio?: string }) {
   return (await request<OrganizationWithRole>("/api/v1/orgs", { method: "POST", body: input })).data;
+}
+
+export async function createCreatorOrg(input: { name: string; display_name: string; handle: string; bio?: string }) {
+  return createOrg({ ...input, account_kind: "creator" });
 }
 
 export async function getOrg(orgId: string) {
@@ -152,6 +162,9 @@ export async function updateOrg(orgId: string, input: {
   contact_email?: string;
   logo_url?: string;
   primary_color?: string;
+  display_name?: string;
+  handle?: string;
+  bio?: string;
 }) {
   return (await request<Organization>(`/api/v1/orgs/${orgId}`, { method: "PATCH", body: input })).data;
 }
@@ -195,7 +208,13 @@ export type KYCAttempt = {
   org_id: string;
   business_name: string;
   tin: string;
+  full_name?: string;
+  id_type?: string;
+  id_number?: string;
+  dob?: string;
   id_document_url: string;
+  id_document_back_url?: string;
+  selfie_url?: string;
   status: "submitted" | "verified" | "rejected";
   rejection_reason?: string;
   reviewed_by?: string;
@@ -253,6 +272,183 @@ export async function updateNotificationPrefs(orgId: string, input: Omit<Notific
   return (
     await request<NotificationPrefs>(`/api/v1/orgs/${orgId}/notification-prefs`, { method: "PATCH", body: input })
   ).data;
+}
+
+// ---------- Creator support page (public) ----------
+
+export type SupportPageLink = {
+  id: string;
+  label: string;
+  amount_mode: "fixed" | "open";
+  amount?: string;
+};
+
+export type SupportPage = {
+  display_name: string;
+  handle: string;
+  bio?: string;
+  logo_url?: string;
+  primary_color?: string;
+  category: string;
+  currency: string;
+  environment: "live" | "sandbox";
+  enabled: boolean;
+  min_amount: string;
+  max_amount: string;
+  links: SupportPageLink[];
+  providers: string[];
+};
+
+export type SupportOrder = {
+  id: string;
+  provider: string;
+  provider_order_id?: string;
+  amount: string;
+  currency: string;
+  status: string;
+  created_at: string;
+};
+
+export async function getSupportPage(handle: string): Promise<SupportPage> {
+  const response = await fetch(`${apiBaseUrl}/api/v1/c/${encodeURIComponent(handle)}`, {
+    headers: { Accept: "application/json" },
+  });
+  if (!response.ok) {
+    throw new OrgApiError(response.status, "Creator not found.", "not_found");
+  }
+  const payload = (await response.json()) as { data: SupportPage };
+  return payload.data;
+}
+
+export async function createSupportOrder(
+  handle: string,
+  input: {
+    link_id?: string;
+    amount: string;
+    currency?: string;
+    provider: string;
+    buyer_name: string;
+    buyer_email: string;
+    buyer_phone: string;
+    supporter_message?: string;
+  },
+): Promise<SupportOrder> {
+  const response = await fetch(`${apiBaseUrl}/api/v1/c/${encodeURIComponent(handle)}/support`, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  const payload = (await response.json().catch(() => null)) as {
+    data?: SupportOrder;
+    error?: { code?: string; message?: string; details?: Record<string, string> };
+  } | null;
+  if (!response.ok || !payload?.data) {
+    throw new OrgApiError(
+      response.status,
+      payload?.error?.message || "Unable to create the support payment.",
+      payload?.error?.code,
+      payload?.error?.details,
+    );
+  }
+  return payload.data;
+}
+
+// ---------- Creator public profile (legacy alias — use SupportPage) ----------
+
+export type CreatorPublicProfile = {
+  display_name: string;
+  handle: string;
+  bio?: string;
+  logo_url?: string;
+  primary_color?: string;
+};
+
+export async function getCreatorPublic(handle: string): Promise<CreatorPublicProfile> {
+  return getSupportPage(handle);
+}
+
+// ---------- Creator support settings (merchant management) ----------
+
+export type SupportSettingsLink = {
+  id: string;
+  org_id: string;
+  label: string;
+  amount_mode: "fixed" | "open";
+  amount?: string;
+  sort_order: number;
+  active: boolean;
+  created_at: string;
+};
+
+export type SupportSettings = {
+  org_id: string;
+  support_app_id?: string;
+  min_amount?: string;
+  max_amount?: string;
+  show_supporters_wall: boolean;
+  links: SupportSettingsLink[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type SupportSettingsInput = {
+  support_app_id?: string;
+  min_amount?: string;
+  max_amount?: string;
+  links: { label: string; amount_mode: "fixed" | "open"; amount?: string }[];
+};
+
+export async function getSupportSettings(orgId: string) {
+  return (await request<SupportSettings>(`/api/v1/merchant/orgs/${orgId}/support-settings`)).data;
+}
+
+export async function updateSupportSettings(orgId: string, input: SupportSettingsInput) {
+  return (
+    await request<SupportSettings>(`/api/v1/merchant/orgs/${orgId}/support-settings`, { method: "PUT", body: input })
+  ).data;
+}
+
+export async function enableSupportPage(orgId: string) {
+  return (
+    await request<SupportSettings>(`/api/v1/merchant/orgs/${orgId}/support-page/enable`, { method: "POST" })
+  ).data;
+}
+
+// ---------- Creator survey (onboarding answers, editable) ----------
+
+export type CreatorSurvey = {
+  org_id: string;
+  category: string;
+  category_other?: string;
+  referral_source: string;
+  use_cases: string[];
+  expected_volume_band: string;
+  expected_txn_band: string;
+  suggested_risk_tier: "standard" | "elevated" | "high";
+  created_at: string;
+  updated_at: string;
+};
+
+export type CreatorSurveyInput = {
+  display_name?: string;
+  category: string;
+  category_other?: string;
+  referral_source: string;
+  use_cases: string[];
+  expected_volume_band: string;
+  expected_txn_band: string;
+};
+
+export async function getCreatorSurvey(orgId: string) {
+  return (await request<CreatorSurvey>(`/api/v1/orgs/${orgId}/creator-survey`)).data;
+}
+
+export async function saveCreatorSurvey(orgId: string, input: CreatorSurveyInput) {
+  return (await request<CreatorSurvey>(`/api/v1/orgs/${orgId}/creator-survey`, { method: "PUT", body: input })).data;
+}
+
+export async function switchCreatorToMerchant(orgId: string) {
+  return (await request<Organization>(`/api/v1/orgs/${orgId}/switch-kind`, { method: "POST" })).data;
 }
 
 // ---------- Logo upload (multipart) + authenticated serving ----------

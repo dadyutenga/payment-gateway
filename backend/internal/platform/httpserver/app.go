@@ -278,6 +278,10 @@ func New(ctx context.Context) (*App, error) {
 	mux.Handle("GET /api/v1/merchant/apps/{id}/deliveries", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantListDeliveries), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
 	mux.Handle("POST /api/v1/merchant/apps/{id}/deliveries/{deliveryID}/replay", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantReplayDelivery), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
 	mux.Handle("GET /api/v1/merchant/orgs/{orgID}/limits-usage", middleware.Chain(http.HandlerFunc(paymentHandler.MerchantOrgLimitsUsage), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	// ---- Creator support page management (org-scoped merchant routes) ----
+	mux.Handle("POST /api/v1/merchant/orgs/{orgID}/support-page/enable", middleware.Chain(http.HandlerFunc(paymentHandler.EnableSupportPage), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("GET /api/v1/merchant/orgs/{orgID}/support-settings", middleware.Chain(http.HandlerFunc(paymentHandler.GetSupportSettings), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("PUT /api/v1/merchant/orgs/{orgID}/support-settings", middleware.Chain(http.HandlerFunc(paymentHandler.UpdateSupportSettings), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
 
 	// ---- Organizations & roles (session-authenticated; role checks run
 	// inside the handlers/services against the member's own row) ----
@@ -301,6 +305,17 @@ func New(ctx context.Context) (*App, error) {
 	mux.Handle("DELETE /api/v1/orgs/{orgID}/members/{userID}", middleware.Chain(http.HandlerFunc(orgHandler.RemoveMember), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
 	mux.Handle("POST /api/v1/orgs/{orgID}/leave", middleware.Chain(http.HandlerFunc(orgHandler.LeaveOrganization), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
 	mux.Handle("POST /api/v1/orgs/{orgID}/kyc", middleware.Chain(http.HandlerFunc(orgHandler.SubmitKYC), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("POST /api/v1/orgs/{orgID}/kyc/creator", middleware.Chain(http.HandlerFunc(orgHandler.SubmitCreatorKYC), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("GET /api/v1/orgs/{orgID}/creator-survey", middleware.Chain(http.HandlerFunc(orgHandler.GetCreatorSurvey), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("PUT /api/v1/orgs/{orgID}/creator-survey", middleware.Chain(http.HandlerFunc(orgHandler.SaveCreatorSurvey), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("POST /api/v1/orgs/{orgID}/switch-kind", middleware.Chain(http.HandlerFunc(orgHandler.SwitchCreatorToMerchant), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	// Public creator support pages (no auth — display-safe fields only;
+	// per-IP rate limits, same middleware as the analytics surfaces).
+	publicSupport := func(h http.HandlerFunc, perMinute int) http.Handler {
+		return middleware.Chain(h, middleware.RateLimit(perMinute))
+	}
+	mux.Handle("GET /api/v1/c/{handle}", publicSupport(paymentHandler.SupportPage, 60))
+	mux.Handle("POST /api/v1/c/{handle}/support", publicSupport(paymentHandler.CreateSupportOrder, 30))
 	mux.Handle("GET /api/v1/orgs/{orgID}/kyc", middleware.Chain(http.HandlerFunc(orgHandler.GetKYCSubmission), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
 	mux.Handle("GET /api/v1/orgs/{orgID}/kyc/attempts", middleware.Chain(http.HandlerFunc(orgHandler.ListKYCAttempts), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
 	mux.Handle("GET /api/v1/orgs/{orgID}/notification-prefs", middleware.Chain(http.HandlerFunc(orgHandler.GetNotificationPrefs), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
@@ -309,6 +324,8 @@ func New(ctx context.Context) (*App, error) {
 	mux.Handle("GET /api/v1/orgs/{orgID}/logo", middleware.Chain(http.HandlerFunc(orgHandler.ServeOrgLogo), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
 	mux.Handle("POST /api/v1/orgs/{orgID}/kyc/document", middleware.Chain(http.HandlerFunc(orgHandler.UploadKYCDocument), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
 	mux.Handle("GET /api/v1/orgs/{orgID}/kyc/document", middleware.Chain(http.HandlerFunc(orgHandler.ServeKYCDocument), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("POST /api/v1/orgs/{orgID}/kyc/selfie", middleware.Chain(http.HandlerFunc(orgHandler.UploadKYCSelfie), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("GET /api/v1/orgs/{orgID}/kyc/selfie", middleware.Chain(http.HandlerFunc(orgHandler.ServeKYCSelfie), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
 
 	// ---- Admin: KYC review queue, decisions, per-org live limits ----
 	mux.Handle("GET /api/v1/admin/orgs/kyc-queue", middleware.Chain(http.HandlerFunc(orgHandler.ListKYCQueue), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))
@@ -351,6 +368,7 @@ func New(ctx context.Context) (*App, error) {
 	mux.Handle("POST /api/v1/admin/orgs/{orgID}/kyc/approve", middleware.Chain(http.HandlerFunc(orgHandler.ApproveKYC), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))
 	mux.Handle("POST /api/v1/admin/orgs/{orgID}/kyc/reject", middleware.Chain(http.HandlerFunc(orgHandler.RejectKYC), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))
 	mux.Handle("GET /api/v1/admin/orgs/{orgID}/kyc/document", middleware.Chain(http.HandlerFunc(orgHandler.AdminServeKYCDocument), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))
+	mux.Handle("GET /api/v1/admin/orgs/{orgID}/kyc/selfie", middleware.Chain(http.HandlerFunc(orgHandler.AdminServeKYCSelfie), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))
 	mux.Handle("PATCH /api/v1/admin/orgs/{orgID}/limits", middleware.Chain(http.HandlerFunc(orgHandler.UpdateOrgLiveLimits), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))
 	mux.Handle("POST /api/v1/admin/orgs/{orgID}/suspend", middleware.Chain(http.HandlerFunc(orgHandler.SuspendOrg), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))
 	mux.Handle("POST /api/v1/admin/orgs/{orgID}/unsuspend", middleware.Chain(http.HandlerFunc(orgHandler.UnsuspendOrg), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))

@@ -18,6 +18,7 @@ import { toast } from "@/components/ui/sonner";
 import {
   approveKYC,
   fetchKYCDocument,
+  fetchKYCSelfie,
   listKYCQueue,
   rejectKYC,
   updateOrgLimits,
@@ -52,6 +53,7 @@ const AdminKYCReview = () => {
   const [limitsMaxTxn, setLimitsMaxTxn] = useState("");
   const [limitsDailyCap, setLimitsDailyCap] = useState("");
   const [viewingDocId, setViewingDocId] = useState<string | null>(null);
+  const [viewingSelfieId, setViewingSelfieId] = useState<string | null>(null);
 
   const reload = () => queryClient.invalidateQueries({ queryKey: ["admin", "kyc-queue"] });
 
@@ -125,6 +127,20 @@ const AdminKYCReview = () => {
     }
   };
 
+  const handleViewSelfie = async (item: KYCQueueItem) => {
+    setViewingSelfieId(item.org_id);
+    try {
+      const { blob } = await fetchKYCSelfie(item.org_id);
+      const url = URL.createObjectURL(blob);
+      window.open(url, "_blank", "noopener");
+      window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (err) {
+      toast.error(errorMessage(err, "Unable to load selfie."));
+    } finally {
+      setViewingSelfieId(null);
+    }
+  };
+
   return (
     <div>
       <div>
@@ -157,7 +173,7 @@ const AdminKYCReview = () => {
               <TableHeader>
                 <TableRow>
                   <TableHead>Organization</TableHead>
-                  <TableHead>Business / TIN</TableHead>
+                  <TableHead>Identity</TableHead>
                   <TableHead>Owner</TableHead>
                   <TableHead>Submitted</TableHead>
                   <TableHead>Doc</TableHead>
@@ -169,14 +185,13 @@ const AdminKYCReview = () => {
                   <TableRow key={item.org_id}>
                     <TableCell>
                       <p className="text-sm font-semibold text-slate-900">{item.org_name}</p>
-                      <p className="text-xs text-slate-400">{item.slug} · <Badge variant="secondary">{item.kyc_status}</Badge></p>
+                      <p className="text-xs text-slate-400">{item.slug} · <Badge variant="secondary">{item.kyc_status}</Badge>{item.account_kind === "creator" ? " · creator" : ""}{item.suggested_risk_tier && item.suggested_risk_tier !== "standard" ? (<> · <Badge variant={item.suggested_risk_tier === "high" ? "destructive" : "outline"}>{item.suggested_risk_tier} risk</Badge></>) : null}</p>
                       {item.rejection_reason && (
                         <p className="mt-0.5 text-xs text-rose-600">Rejected: {item.rejection_reason}</p>
                       )}
                     </TableCell>
                     <TableCell className="text-xs text-slate-600">
-                      {item.business_name || "—"}<br />
-                      <span className="text-slate-400">TIN {item.tin || "—"}</span>
+                      {item.account_kind === "creator" ? (<>{item.full_name || "—"}<br /><span className="text-slate-400">{item.id_type || "ID"} on file{item.dob ? ` · born ${item.dob}` : ""}</span></>) : (<>{item.business_name || "—"}<br /><span className="text-slate-400">TIN {item.tin || "—"}</span></>)}
                     </TableCell>
                     <TableCell className="text-xs text-slate-600">
                       {item.owner_name || item.owner_email || "—"}
@@ -191,6 +206,17 @@ const AdminKYCReview = () => {
                         </Button>
                       ) : (
                         <span className="text-xs text-slate-400">none</span>
+                      )}
+                      {item.account_kind === "creator" && (
+                        <div className="mt-1">
+                          {item.has_selfie ? (
+                            <Button size="sm" variant="outline" disabled={viewingSelfieId === item.org_id} onClick={() => handleViewSelfie(item)}>
+                              <FileText className="h-3.5 w-3.5 mr-1" /> {viewingSelfieId === item.org_id ? "Loading..." : "Selfie"}
+                            </Button>
+                          ) : (
+                            <span className="text-xs text-slate-400">no selfie</span>
+                          )}
+                        </div>
                       )}
                     </TableCell>
                     <TableCell className="text-right">

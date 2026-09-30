@@ -39,6 +39,7 @@ const AdminOrgDetail = () => {
             <h2 className="text-2xl font-bold text-slate-900">{detail.org.name}</h2>
             <p className="mt-1 flex flex-wrap items-center gap-2 text-sm text-slate-500">
               <Badge variant="secondary">{detail.org.kyc_status}</Badge>
+              {(detail.org as { account_kind?: string }).account_kind === "creator" && <Badge variant="outline">creator</Badge>}
               <span className="font-mono text-xs">{detail.org.id}</span>
             </p>
           </div>
@@ -47,8 +48,17 @@ const AdminOrgDetail = () => {
             <Card><CardContent className="p-4">
               <h3 className="text-sm font-bold text-slate-800">Profile</h3>
               <dl className="mt-2 space-y-1 text-sm">
-                <div className="flex justify-between gap-2"><dt className="text-slate-500">Business</dt><dd className="font-medium">{detail.org.business_name || "—"}</dd></div>
-                <div className="flex justify-between gap-2"><dt className="text-slate-500">TIN</dt><dd className="font-medium">{detail.org.tin || "—"}</dd></div>
+                {(detail.org as { account_kind?: string }).account_kind === "creator" ? (
+                  <>
+                    <div className="flex justify-between gap-2"><dt className="text-slate-500">Display name</dt><dd className="font-medium">{(detail.org as { display_name?: string }).display_name || "—"}</dd></div>
+                    <div className="flex justify-between gap-2"><dt className="text-slate-500">Handle</dt><dd className="font-mono text-xs">{(detail.org as { handle?: string }).handle || "—"}</dd></div>
+                  </>
+                ) : (
+                  <>
+                    <div className="flex justify-between gap-2"><dt className="text-slate-500">Business</dt><dd className="font-medium">{detail.org.business_name || "—"}</dd></div>
+                    <div className="flex justify-between gap-2"><dt className="text-slate-500">TIN</dt><dd className="font-medium">{detail.org.tin || "—"}</dd></div>
+                  </>
+                )}
                 <div className="flex justify-between gap-2"><dt className="text-slate-500">Slug</dt><dd className="font-mono text-xs">{detail.org.slug}</dd></div>
                 <div className="flex justify-between gap-2"><dt className="text-slate-500">Live caps</dt><dd className="text-xs">{detail.org.live_max_txn_amount || "default"} / {detail.org.live_daily_volume_cap || "default"}</dd></div>
               </dl>
@@ -77,6 +87,25 @@ const AdminOrgDetail = () => {
               </Table>
             </CardContent></Card>
           </div>
+
+          {detail.survey && (
+            <Card className="mt-4"><CardContent className="p-4">
+              <h3 className="text-sm font-bold text-slate-800">
+                Onboarding survey{" "}
+                <Badge variant={detail.survey.suggested_risk_tier === "high" ? "destructive" : "secondary"}>
+                  {detail.survey.suggested_risk_tier} risk
+                </Badge>
+              </h3>
+              <dl className="mt-2 space-y-1 text-sm">
+                <div className="flex justify-between gap-2"><dt className="text-slate-500">Category</dt><dd className="font-medium">{detail.survey.category_other || detail.survey.category}</dd></div>
+                <div className="flex justify-between gap-2"><dt className="text-slate-500">Heard via</dt><dd className="font-medium">{detail.survey.referral_source}</dd></div>
+                <div className="flex justify-between gap-2"><dt className="text-slate-500">Use cases</dt><dd className="font-medium text-right">{detail.survey.use_cases.join(", ") || "—"}</dd></div>
+                <div className="flex justify-between gap-2"><dt className="text-slate-500">Expected volume</dt><dd className="font-medium">{detail.survey.expected_volume_band}</dd></div>
+                <div className="flex justify-between gap-2"><dt className="text-slate-500">Expected txns</dt><dd className="font-medium">{detail.survey.expected_txn_band}</dd></div>
+              </dl>
+              <p className="mt-2 text-xs text-slate-400">Segmentation only — never raises live limits.</p>
+            </CardContent></Card>
+          )}
 
           <Card className="mt-4"><CardContent className="p-4">
             <h3 className="text-sm font-bold text-slate-800">Verification history</h3>

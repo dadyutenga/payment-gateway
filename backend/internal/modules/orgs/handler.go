@@ -15,6 +15,7 @@ import (
 
 	"lipago/internal/platform/middleware"
 	"lipago/internal/shared/httputil"
+	"lipago/internal/shared/validation"
 )
 
 type Handler struct {
@@ -80,6 +81,18 @@ func (h *Handler) orgError(w http.ResponseWriter, err error, action string) {
 		httputil.Error(w, http.StatusBadRequest, "cannot_remove_self", "Use leave instead of removing yourself.", nil)
 	case errors.Is(err, ErrSingleOrg):
 		httputil.Error(w, http.StatusConflict, "single_org", "Each account belongs to a single organization.", nil)
+	case errors.Is(err, ErrSingleOrg):
+		httputil.Error(w, http.StatusConflict, "single_org", "Each account belongs to a single organization.", nil)
+	case errors.Is(err, ErrHandleTaken):
+		httputil.Error(w, http.StatusConflict, "handle_taken", "That handle is already taken — try another.", nil)
+	case errors.Is(err, ErrHandleInvalid):
+		httputil.Error(w, http.StatusUnprocessableEntity, "validation_failed", "Handle must be 3-30 lowercase letters, numbers, dots, hyphens or underscores.", nil)
+	case errors.Is(err, ErrSurveyNotFound):
+		httputil.Error(w, http.StatusNotFound, "not_submitted", "No onboarding survey yet.", nil)
+	case errors.Is(err, ErrKindSwitchSubmitted):
+		httputil.Error(w, http.StatusConflict, "kind_switch_locked", "Account kind can only be switched before verification is submitted — contact support.", nil)
+	case errors.Is(err, ErrAccountKindImmutable):
+		httputil.Error(w, http.StatusConflict, "kind_immutable", "Only creator accounts can switch to the merchant track.", nil)
 	default:
 		h.fail(w, http.StatusInternalServerError, "internal_error", "Unable to complete the organization request.", err)
 	}
@@ -88,6 +101,10 @@ func (h *Handler) orgError(w http.ResponseWriter, err error, action string) {
 type createOrgHTTPInput struct {
 	Name         string `json:"name"`
 	BusinessName string `json:"business_name"`
+	AccountKind  string `json:"account_kind"`
+	DisplayName  string `json:"display_name"`
+	Handle       string `json:"handle"`
+	Bio          string `json:"bio"`
 }
 
 func (h *Handler) CreateOrganization(w http.ResponseWriter, r *http.Request) {
@@ -100,25 +117,65 @@ func (h *Handler) CreateOrganization(w http.ResponseWriter, r *http.Request) {
 		httputil.Error(w, http.StatusBadRequest, "invalid_request", "Unable to decode request body.", nil)
 		return
 	}
-	org, vErrs, err := h.service.CreateOrganization(r.Context(), userID, in.Name, in.BusinessName)
+	kind, err := ParseAccountKind(strings.ToLower(strings.TrimSpace(in.AccountKind)))
 	if err != nil {
-		if errors.Is(err, ErrSingleOrg) {
+		httputil.Error(w, http.StatusUnprocessableEntity, "validation_failed", "account_kind must be merchant or creator.", nil)
+		return
+	}
+	var (
+		org   OrganizationWithRole
+		vErrs validation.Errors
+	)
+	if kind == AccountKindCreator {
+		created, cErrs, cErr := h.service.CreateCreatorOrganization(r.Context(), userID, in.Name, CreatorOrgInput{
+			DisplayName: in.DisplayName, Handle: in.Handle, Bio: in.Bio,
+		})
+		vErrs = cErrs
+		if cErr != nil {
+			if errors.Is(cErr, ErrSingleOrg) {
+				httputil.Error(w, http.StatusConflict, "single_org", "Each account belongs to a single organization.", nil)
+				return
+			}
+			if errors.Is(cErr, ErrHandleTaken) {
+				httputil.Error(w, http.StatusConflict, "handle_taken", "That handle is already taken — try another.", nil)
+				return
+			}
+			h.fail(w, http.StatusInternalServerError, "create_failed", "Unable to create organization.", cErr)
+			return
+		}
+		if vErrs.Any() {
+			httputil.Error(w, http.StatusUnprocessableEntity, "validation_failed", "Please check your organization input.", vErrs)
+			return
+		}
+		member, mErr := h.service.CheckOrgPermission(r.Context(), userID, created.ID, PermRead)
+		if mErr != nil {
+			h.fail(w, http.StatusInternalServerError, "create_failed", "Unable to create organization.", mErr)
+			return
+		}
+		org = OrganizationWithRole{Organization: created, Role: member.Role, Status: member.Status}
+		httputil.JSON(w, http.StatusCreated, map[string]any{"data": org})
+		return
+	}
+	created, mErrs, mErr := h.service.CreateOrganization(r.Context(), userID, in.Name, in.BusinessName)
+	vErrs = mErrs
+	if mErr != nil {
+		if errors.Is(mErr, ErrSingleOrg) {
 			httputil.Error(w, http.StatusConflict, "single_org", "Each account belongs to a single organization.", nil)
 			return
 		}
-		h.fail(w, http.StatusInternalServerError, "create_failed", "Unable to create organization.", err)
+		h.fail(w, http.StatusInternalServerError, "create_failed", "Unable to create organization.", mErr)
 		return
 	}
 	if vErrs.Any() {
 		httputil.Error(w, http.StatusUnprocessableEntity, "validation_failed", "Please check your organization input.", vErrs)
 		return
 	}
-	member, err := h.service.CheckOrgPermission(r.Context(), userID, org.ID, PermRead)
+	member, err := h.service.CheckOrgPermission(r.Context(), userID, created.ID, PermRead)
 	if err != nil {
 		h.fail(w, http.StatusInternalServerError, "create_failed", "Unable to create organization.", err)
 		return
 	}
-	httputil.JSON(w, http.StatusCreated, map[string]any{"data": OrganizationWithRole{Organization: org, Role: member.Role, Status: member.Status}})
+	httputil.JSON(w, http.StatusCreated, map[string]any{"data": OrganizationWithRole{Organization: created, Role: member.Role, Status: member.Status}})
 }
 
 func (h *Handler) ListMyOrganizations(w http.ResponseWriter, r *http.Request) {
@@ -156,6 +213,9 @@ type updateOrgHTTPInput struct {
 	ContactEmail string `json:"contact_email"`
 	LogoURL      string `json:"logo_url"`
 	PrimaryColor string `json:"primary_color"`
+	DisplayName  string `json:"display_name"`
+	Handle       string `json:"handle"`
+	Bio          string `json:"bio"`
 }
 
 func (h *Handler) UpdateOrganization(w http.ResponseWriter, r *http.Request) {
@@ -172,10 +232,15 @@ func (h *Handler) UpdateOrganization(w http.ResponseWriter, r *http.Request) {
 		Name: in.Name, BusinessName: in.BusinessName, TIN: in.TIN,
 		Address: in.Address, Phone: in.Phone, ContactEmail: in.ContactEmail,
 		LogoURL: in.LogoURL, PrimaryColor: in.PrimaryColor,
+		DisplayName: in.DisplayName, Handle: in.Handle, Bio: in.Bio,
 	})
 	if err != nil {
 		if errors.Is(err, ErrReverificationRequired) {
 			httputil.Error(w, http.StatusConflict, "reverification_required", "Business name and TIN are locked after verification — resubmit verification to change them.", nil)
+			return
+		}
+		if errors.Is(err, ErrHandleTaken) {
+			httputil.Error(w, http.StatusConflict, "handle_taken", "That handle is already taken — try another.", nil)
 			return
 		}
 		h.orgError(w, err, "manage this organization")
@@ -305,7 +370,7 @@ func (h *Handler) LeaveOrganization(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// maxKYCDocumentBytes caps ID uploads at 5MB.
+// maxKYCDocumentBytes caps ID and selfie uploads at 5MB.
 const maxKYCDocumentBytes = 5 << 20
 
 // kycUploadDir is relative to the process working directory (backend/ for
@@ -354,6 +419,115 @@ func (h *Handler) SubmitKYC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httputil.JSON(w, http.StatusOK, map[string]any{"data": sub})
+}
+
+type submitCreatorKYCHTTPInput struct {
+	FullName          string `json:"full_name"`
+	IDType            string `json:"id_type"`
+	IDNumber          string `json:"id_number"`
+	Dob               string `json:"dob"`
+	IDDocumentURL     string `json:"id_document_url"`
+	IDDocumentBackURL string `json:"id_document_back_url"`
+	SelfieURL         string `json:"selfie_url"`
+}
+
+// SubmitCreatorKYC files individual verification for creator accounts
+// (full name + DOB + national ID + front document + optional back side +
+// v1 selfie). Merchant accounts keep using the business endpoint above.
+func (h *Handler) SubmitCreatorKYC(w http.ResponseWriter, r *http.Request) {
+	userID, ok := claimsUserID(w, r)
+	if !ok {
+		return
+	}
+	var in submitCreatorKYCHTTPInput
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		httputil.Error(w, http.StatusBadRequest, "invalid_request", "Unable to decode request body.", nil)
+		return
+	}
+	sub, vErrs, err := h.service.SubmitCreatorKYC(r.Context(), userID, r.PathValue("orgID"), CreatorKYCInput{
+		FullName: in.FullName, IDType: in.IDType, IDNumber: in.IDNumber, Dob: in.Dob,
+		DocURL: in.IDDocumentURL, DocBackURL: in.IDDocumentBackURL, SelfieURL: in.SelfieURL,
+	})
+	if err != nil {
+		h.orgError(w, err, "submit verification")
+		return
+	}
+	if vErrs.Any() {
+		httputil.Error(w, http.StatusUnprocessableEntity, "validation_failed", "Please check your submission.", vErrs)
+		return
+	}
+	httputil.JSON(w, http.StatusOK, map[string]any{"data": sub})
+}
+
+type creatorSurveyHTTPInput struct {
+	DisplayName        string   `json:"display_name"`
+	Category           string   `json:"category"`
+	CategoryOther      string   `json:"category_other"`
+	ReferralSource     string   `json:"referral_source"`
+	UseCases           []string `json:"use_cases"`
+	ExpectedVolumeBand string   `json:"expected_volume_band"`
+	ExpectedTxnBand    string   `json:"expected_txn_band"`
+}
+
+// SaveCreatorSurvey stores (or replaces) a creator org's onboarding
+// answers (owner/manage_org). Creator accounts only.
+func (h *Handler) SaveCreatorSurvey(w http.ResponseWriter, r *http.Request) {
+	userID, ok := claimsUserID(w, r)
+	if !ok {
+		return
+	}
+	var in creatorSurveyHTTPInput
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		httputil.Error(w, http.StatusBadRequest, "invalid_request", "Unable to decode request body.", nil)
+		return
+	}
+	survey, vErrs, err := h.service.SaveCreatorSurvey(r.Context(), userID, r.PathValue("orgID"), CreatorSurveyInput{
+		DisplayName: in.DisplayName, Category: in.Category, CategoryOther: in.CategoryOther,
+		ReferralSource: in.ReferralSource, UseCases: in.UseCases,
+		ExpectedVolumeBand: in.ExpectedVolumeBand, ExpectedTxnBand: in.ExpectedTxnBand,
+	})
+	if err != nil {
+		h.orgError(w, err, "save the onboarding survey")
+		return
+	}
+	if vErrs.Any() {
+		httputil.Error(w, http.StatusUnprocessableEntity, "validation_failed", "Please check your answers.", vErrs)
+		return
+	}
+	httputil.JSON(w, http.StatusOK, map[string]any{"data": survey})
+}
+
+// GetCreatorSurvey returns a creator org's onboarding answers plus the
+// derived starting risk tier (any active member may read).
+func (h *Handler) GetCreatorSurvey(w http.ResponseWriter, r *http.Request) {
+	userID, ok := claimsUserID(w, r)
+	if !ok {
+		return
+	}
+	survey, err := h.service.GetCreatorSurvey(r.Context(), userID, r.PathValue("orgID"))
+	if err != nil {
+		h.orgError(w, err, "view the onboarding survey")
+		return
+	}
+	httputil.JSON(w, http.StatusOK, map[string]any{"data": survey})
+}
+
+// SwitchCreatorToMerchant moves a pre-KYC creator org to the merchant
+// track (the survey's "API integration" escape hatch). Refused once any
+// KYC submission exists.
+func (h *Handler) SwitchCreatorToMerchant(w http.ResponseWriter, r *http.Request) {
+	userID, ok := claimsUserID(w, r)
+	if !ok {
+		return
+	}
+	org, err := h.service.SwitchCreatorToMerchant(r.Context(), userID, r.PathValue("orgID"))
+	if err != nil {
+		h.orgError(w, err, "switch account kind")
+		return
+	}
+	h.auditAdmin(r, "org.switch_kind", "organization", org.ID,
+		map[string]any{"account_kind": "creator"}, map[string]any{"account_kind": "merchant"})
+	httputil.JSON(w, http.StatusOK, map[string]any{"data": org})
 }
 
 // ListKYCAttempts returns the submit/decide history for the Settings
@@ -441,53 +615,108 @@ func (h *Handler) UploadKYCDocument(w http.ResponseWriter, r *http.Request) {
 		h.orgError(w, err, "upload verification documents")
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxKYCDocumentBytes+1<<20)
-	if err := r.ParseMultipartForm(maxKYCDocumentBytes); err != nil {
-		httputil.Error(w, http.StatusBadRequest, "invalid_request", "Document must be under 5MB.", nil)
+	path, stored := h.storeKYCUpload(w, r, orgID, "document", false, "")
+	if !stored {
 		return
 	}
-	file, header, err := r.FormFile("document")
-	if err != nil {
-		httputil.Error(w, http.StatusBadRequest, "invalid_request", "Attach the ID document as the 'document' field.", nil)
+	httputil.JSON(w, http.StatusCreated, map[string]any{"data": map[string]any{"id_document_url": path}})
+}
+
+var allowedSelfieExtensions = map[string]bool{
+	".jpg": true, ".jpeg": true, ".png": true, ".webp": true,
+}
+
+// selfieContentTypeAllowed sniffs raster images only (v1 selfie is a
+// simple photo — PDF makes no sense and SVG is a stored-XSS vector).
+func selfieContentTypeAllowed(detected, filename string) bool {
+	switch detected {
+	case "image/jpeg", "image/png", "image/webp":
+	default:
+		return false
+	}
+	ext := strings.ToLower(filepath.Ext(filename))
+	return allowedSelfieExtensions[ext]
+}
+
+// UploadKYCSelfie stores the creator's v1 selfie photo (owner/manage_org)
+// and returns its private location for the KYC submit call. True liveness
+// detection is future scope — this endpoint intentionally accepts a plain
+// photo and says so in the UI copy.
+func (h *Handler) UploadKYCSelfie(w http.ResponseWriter, r *http.Request) {
+	userID, ok := claimsUserID(w, r)
+	if !ok {
 		return
+	}
+	orgID := r.PathValue("orgID")
+	if _, err := h.service.CheckOrgPermission(r.Context(), userID, orgID, PermManageOrg); err != nil {
+		h.orgError(w, err, "upload the selfie photo")
+		return
+	}
+	path, stored := h.storeKYCUpload(w, r, orgID, "selfie", true, "-selfie")
+	if !stored {
+		return
+	}
+	httputil.JSON(w, http.StatusCreated, map[string]any{"data": map[string]any{"selfie_url": path}})
+}
+
+// storeKYCUpload parses one multipart file and stores it under
+// uploads/kyc/. imagesOnly restricts to raster photos (selfies); the
+// document path additionally allows PDFs. It writes the error response
+// itself and reports ok=false when it does.
+func (h *Handler) storeKYCUpload(w http.ResponseWriter, r *http.Request, orgID, formField string, imagesOnly bool, nameInfix string) (string, bool) {
+	limit := int64(maxKYCDocumentBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, limit+1<<20)
+	if err := r.ParseMultipartForm(limit); err != nil {
+		httputil.Error(w, http.StatusBadRequest, "invalid_request", "File must be under 5MB.", nil)
+		return "", false
+	}
+	file, header, err := r.FormFile(formField)
+	if err != nil {
+		httputil.Error(w, http.StatusBadRequest, "invalid_request", "Attach the file as the '"+formField+"' field.", nil)
+		return "", false
 	}
 	defer file.Close()
-	if header.Size > maxKYCDocumentBytes {
-		httputil.Error(w, http.StatusBadRequest, "invalid_request", "Document must be under 5MB.", nil)
-		return
+	if header.Size > limit {
+		httputil.Error(w, http.StatusBadRequest, "invalid_request", "File must be under 5MB.", nil)
+		return "", false
 	}
 	head := make([]byte, 512)
 	n, _ := io.ReadFull(file, head)
 	head = head[:n]
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		h.fail(w, http.StatusInternalServerError, "upload_failed", "Unable to store document.", err)
-		return
+		h.fail(w, http.StatusInternalServerError, "upload_failed", "Unable to store file.", err)
+		return "", false
 	}
 	detected := http.DetectContentType(head)
-	if !kycContentTypeAllowed(detected, header.Filename) {
+	if imagesOnly {
+		if !selfieContentTypeAllowed(detected, header.Filename) {
+			httputil.Error(w, http.StatusUnprocessableEntity, "invalid_selfie", "Selfie must be a JPEG, PNG, or WEBP photo.", nil)
+			return "", false
+		}
+	} else if !kycContentTypeAllowed(detected, header.Filename) {
 		httputil.Error(w, http.StatusUnprocessableEntity, "invalid_document", "Document must be a JPEG, PNG, WEBP image or PDF.", nil)
-		return
+		return "", false
 	}
 	if err := os.MkdirAll(kycUploadDir, 0o750); err != nil {
-		h.fail(w, http.StatusInternalServerError, "upload_failed", "Unable to store document.", err)
-		return
+		h.fail(w, http.StatusInternalServerError, "upload_failed", "Unable to store file.", err)
+		return "", false
 	}
 	ext := strings.ToLower(filepath.Ext(header.Filename))
-	name := orgID + "-" + strconv.FormatInt(time.Now().UnixNano(), 10) + ext
+	name := orgID + nameInfix + "-" + strconv.FormatInt(time.Now().UnixNano(), 10) + ext
 	path := filepath.Join(kycUploadDir, name)
 	out, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o640)
 	if err != nil {
-		h.fail(w, http.StatusInternalServerError, "upload_failed", "Unable to store document.", err)
-		return
+		h.fail(w, http.StatusInternalServerError, "upload_failed", "Unable to store file.", err)
+		return "", false
 	}
 	if _, err := io.Copy(out, file); err != nil {
 		_ = out.Close()
 		_ = os.Remove(path)
-		h.fail(w, http.StatusInternalServerError, "upload_failed", "Unable to store document.", err)
-		return
+		h.fail(w, http.StatusInternalServerError, "upload_failed", "Unable to store file.", err)
+		return "", false
 	}
 	_ = out.Close()
-	httputil.JSON(w, http.StatusCreated, map[string]any{"data": map[string]any{"id_document_url": filepath.ToSlash(path)}})
+	return filepath.ToSlash(path), true
 }
 
 func (h *Handler) ServeKYCDocument(w http.ResponseWriter, r *http.Request) {
@@ -917,4 +1146,47 @@ func (h *Handler) AdminServeKYCDocument(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	h.serveKYCDocumentPath(w, r, sub.IDDocumentURL)
+}
+
+// ServeKYCSelfie streams the creator's v1 selfie to active members.
+func (h *Handler) ServeKYCSelfie(w http.ResponseWriter, r *http.Request) {
+	userID, ok := claimsUserID(w, r)
+	if !ok {
+		return
+	}
+	orgID := r.PathValue("orgID")
+	if _, err := h.service.CheckOrgPermission(r.Context(), userID, orgID, PermRead); err != nil {
+		h.orgError(w, err, "view the selfie photo")
+		return
+	}
+	sub, kycStatus, err := h.service.GetKYCSubmission(r.Context(), userID, orgID)
+	if err != nil || sub.SelfieURL == "" {
+		httputil.Error(w, http.StatusNotFound, "not_found", "No selfie photo.", nil)
+		return
+	}
+	_ = kycStatus
+	h.serveKYCDocumentPath(w, r, sub.SelfieURL)
+}
+
+// AdminServeKYCSelfie streams an org's selfie without a membership check
+// (reviewers are rarely members). Path confinement identical to the
+// member route.
+func (h *Handler) AdminServeKYCSelfie(w http.ResponseWriter, r *http.Request) {
+	if _, _, ok := claimsIdentity(w, r); !ok {
+		return
+	}
+	sub, err := h.service.AdminGetKYCSubmission(r.Context(), r.PathValue("orgID"))
+	if err != nil {
+		if errors.Is(err, ErrKYCNotSubmitted) {
+			httputil.Error(w, http.StatusNotFound, "not_found", "No selfie photo.", nil)
+			return
+		}
+		h.fail(w, http.StatusInternalServerError, "internal_error", "Unable to load selfie.", err)
+		return
+	}
+	if sub.SelfieURL == "" {
+		httputil.Error(w, http.StatusNotFound, "not_found", "No selfie photo.", nil)
+		return
+	}
+	h.serveKYCDocumentPath(w, r, sub.SelfieURL)
 }

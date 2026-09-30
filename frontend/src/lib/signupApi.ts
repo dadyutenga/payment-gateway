@@ -39,7 +39,13 @@ export type KYCSubmission = {
   org_id: string;
   business_name: string;
   tin: string;
+  full_name?: string;
+  id_type?: string;
+  id_number?: string;
+  dob?: string;
   id_document_url: string;
+  id_document_back_url?: string;
+  selfie_url?: string;
   submitted_at: string;
   reviewed_by?: string;
   reviewed_at?: string;
@@ -100,6 +106,10 @@ export async function submitKYC(orgId: string, input: { business_name: string; t
   return request<KYCSubmission>(`/api/v1/orgs/${orgId}/kyc`, { method: "POST", body: input });
 }
 
+export async function submitCreatorKYC(orgId: string, input: { full_name: string; id_type: string; id_number: string; dob: string; id_document_url: string; id_document_back_url?: string; selfie_url: string }) {
+  return request<KYCSubmission>(`/api/v1/orgs/${orgId}/kyc/creator`, { method: "POST", body: input });
+}
+
 export async function getKYC(orgId: string) {
   return request<KYCStatusResult>(`/api/v1/orgs/${orgId}/kyc`);
 }
@@ -108,6 +118,12 @@ export async function uploadKYCDocument(orgId: string, file: File) {
   const formData = new FormData();
   formData.append("document", file);
   return request<{ id_document_url: string }>(`/api/v1/orgs/${orgId}/kyc/document`, { method: "POST", formData });
+}
+
+export async function uploadKYCSelfie(orgId: string, file: File) {
+  const formData = new FormData();
+  formData.append("selfie", file);
+  return request<{ selfie_url: string }>(`/api/v1/orgs/${orgId}/kyc/selfie`, { method: "POST", formData });
 }
 
 export async function changePassword(input: { current_password: string; new_password: string }) {

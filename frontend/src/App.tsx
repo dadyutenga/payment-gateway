@@ -37,6 +37,8 @@ import MerchantAnalyticsFailures from "@/pages/MerchantAnalyticsFailures";
 import MerchantSettlements from "@/pages/MerchantSettlements";
 import { MerchantAnalyticsIndex, MerchantSettlementsIndex, MerchantTeamIndex } from "@/pages/MerchantAnalyticsIndex";
 import CreateOrg from "@/pages/CreateOrg";
+import CreatorOnboarding from "@/pages/CreatorOnboarding";
+import CreatorSupport from "@/pages/CreatorSupport";
 import OrgMembers from "@/pages/OrgMembers";
 import OrgSettings from "@/pages/OrgSettings";
 import SignUp from "@/pages/SignUp";
@@ -144,7 +146,19 @@ const App = () => (
           >
             <Route index element={<OnboardingKYC />} />
           </Route>
+          <Route
+            path="/onboarding/creator/:orgId"
+            element={
+              <MerchantRoute>
+                <CustomerLayout />
+              </MerchantRoute>
+            }
+          >
+            <Route index element={<CreatorOnboarding />} />
+          </Route>
           <Route path="/" element={<Welcome />} />
+          {/* Public creator support page (no auth — handle namespace). */}
+          <Route path="/c/:handle" element={<CreatorSupport />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </BrowserRouter>

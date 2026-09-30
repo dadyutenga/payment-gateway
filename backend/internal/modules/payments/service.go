@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"lipago/internal/modules/orgs"
 	"lipago/internal/modules/payments/provider"
 	azcrypto "lipago/internal/platform/crypto"
 	"lipago/internal/shared/audit"
@@ -2536,6 +2537,82 @@ func normalizeProviderName(name string) string {
 // endpoints — every type the gateway can emit.
 func DefaultWebhookEventTypes() []string {
 	return []string{EventTypePaymentUpdated, EventTypePaymentRefunded, EventTypePaymentExpired}
+}
+
+// ---------- Creator support pages (Part 4) ----------
+
+// SupportBounds resolves the effective buyer-entered amount bounds for a
+// creator page: the configured floor (never below the 500 TZS dust floor)
+// and the configured ceiling clamped to the live per-transaction tier, so
+// self-reported values can never raise limits. Applies to sandbox orders
+// too — that is the pre-KYC absurd-amount protection.
+func (s *Service) SupportBounds(ctx context.Context, app PaymentApp, minCfg, maxCfg string) (min, max string, err error) {
+	min = "500"
+	if trimmed := strings.TrimSpace(minCfg); trimmed != "" {
+		if rat, ok := new(big.Rat).SetString(trimmed); ok && rat.Sign() > 0 {
+			if floor, _ := new(big.Rat).SetString("500"); rat.Cmp(floor) >= 0 {
+				min = trimmed
+			}
+		}
+	}
+	maxTxn, _, err := s.effectiveLiveCaps(ctx, app)
+	if err != nil {
+		return "", "", err
+	}
+	max = strings.TrimSpace(maxTxn)
+	if trimmed := strings.TrimSpace(maxCfg); trimmed != "" {
+		if rat, ok := new(big.Rat).SetString(trimmed); ok && rat.Sign() > 0 {
+			if max == "" {
+				max = trimmed
+			} else if capRat, ok := new(big.Rat).SetString(max); ok && rat.Cmp(capRat) < 0 {
+				max = trimmed
+			}
+		}
+	}
+	return min, max, nil
+}
+
+// UsableProviderKinds lists registry provider kinds that have an active
+// default account, so the public page only offers working rails.
+func (s *Service) UsableProviderKinds(ctx context.Context) ([]string, error) {
+	accounts, err := s.repo.ListProviderAccounts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	kinds := []string{}
+	for _, a := range accounts {
+		kind := normalizeProviderName(a.Provider)
+		if !a.IsDefault || strings.TrimSpace(a.Status) != "active" || seen[kind] {
+			continue
+		}
+		seen[kind] = true
+		if _, ok := s.registry[kind]; ok {
+			kinds = append(kinds, kind)
+		}
+	}
+	return kinds, nil
+}
+
+// ResolveSupportApp returns the org's app for support orders, verifying it
+// belongs to the org and is not deleted. A linked app that vanished reads
+// as page-disabled so the creator re-links in Settings.
+func (s *Service) ResolveSupportApp(ctx context.Context, orgID, appID string) (PaymentApp, error) {
+	apps, err := s.repo.ListAppsByOrg(ctx, strings.TrimSpace(orgID))
+	if err != nil {
+		return PaymentApp{}, err
+	}
+	for _, app := range apps {
+		if app.ID == strings.TrimSpace(appID) {
+			return app, nil
+		}
+	}
+	return PaymentApp{}, orgs.ErrSupportPageDisabled
+}
+
+// ListAppsByOrg lists an org's non-deleted apps (receiving-app picker).
+func (s *Service) ListAppsByOrg(ctx context.Context, orgID string) ([]PaymentApp, error) {
+	return s.repo.ListAppsByOrg(ctx, strings.TrimSpace(orgID))
 }
 
 func normalizeEventTypes(eventTypes []string) []string {

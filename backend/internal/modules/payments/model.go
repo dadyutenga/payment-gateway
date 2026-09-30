@@ -739,6 +739,8 @@ var ErrRefundNotPending = errors.New("refund is not awaiting confirmation")
 var ErrWebhookAmountMismatch = errors.New("webhook amount or currency does not match the order")
 var ErrLiveTxnCapExceeded = errors.New("order amount exceeds the live per-transaction cap")
 var ErrLiveDailyCapExceeded = errors.New("order would exceed the live daily volume cap")
+var ErrSupportAmountTooSmall = errors.New("support amount is below this page's minimum")
+var ErrSupportAmountTooLarge = errors.New("support amount is above this page's maximum")
 
 // Webhook event types delivered to merchant endpoints. Endpoints subscribe
 // via event_types (default: all three for new endpoints).

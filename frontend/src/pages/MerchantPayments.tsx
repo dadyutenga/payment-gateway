@@ -94,7 +94,14 @@ const MerchantPayments = () => {
                     </TableCell>
                     <TableCell>{order.provider}</TableCell>
                     <TableCell>{order.amount} {order.currency}</TableCell>
-                    <TableCell>{order.buyer_name || order.buyer_phone || "—"}</TableCell>
+                    <TableCell>
+                      {order.buyer_name || order.buyer_phone || "—"}
+                      {typeof order.metadata?.supporter_message === "string" && order.metadata.supporter_message.trim() !== "" && (
+                        <p className="mt-0.5 max-w-xs truncate text-xs italic text-slate-500" title={order.metadata.supporter_message as string}>
+                          “{order.metadata.supporter_message as string}”
+                        </p>
+                      )}
+                    </TableCell>
                     <TableCell className="max-w-xs truncate font-mono text-xs">{order.external_reference || order.provider_order_id || "—"}</TableCell>
                     <TableCell><Badge variant="secondary">{order.status}</Badge></TableCell>
                     <TableCell>{order.created_at ? new Date(order.created_at).toLocaleString() : "—"}</TableCell>

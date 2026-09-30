@@ -280,6 +280,7 @@ export type MerchantOrder = {
   buyer_name?: string;
   buyer_email?: string;
   buyer_phone?: string;
+  metadata?: Record<string, unknown>;
   status: string;
   created_at: string;
   updated_at: string;

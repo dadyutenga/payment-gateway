@@ -74,6 +74,26 @@ type Repository interface {
 	UpsertNotificationPrefs(ctx context.Context, prefs NotificationPrefs) (NotificationPrefs, error)
 	// PlatformStats counts tenants and workload for the admin dashboard.
 	PlatformStats(ctx context.Context) (PlatformStats, error)
+	// CreateCreatorOrganization inserts a creator-kind org + owner member.
+	CreateCreatorOrganization(ctx context.Context, name, slug string, in CreatorOrgInput, ownerUserID string) (Organization, error)
+	// SubmitCreatorKYC files individual verification evidence for creators.
+	SubmitCreatorKYC(ctx context.Context, orgID string, in CreatorKYCInput) (KYCSubmission, error)
+	// GetOrganizationByHandle resolves a public creator handle (case-insensitive).
+	GetOrganizationByHandle(ctx context.Context, handle string) (Organization, error)
+	// UpsertCreatorSurvey stores (or replaces) a creator org's onboarding answers.
+	UpsertCreatorSurvey(ctx context.Context, orgID string, in CreatorSurveyInput) (CreatorSurvey, error)
+	// GetCreatorSurvey loads a creator org's onboarding answers; found=false when never submitted.
+	GetCreatorSurvey(ctx context.Context, orgID string) (CreatorSurvey, bool, error)
+	// SwitchCreatorToMerchant converts a pre-KYC creator org to the merchant
+	// track (clears creator profile + survey). Only before any KYC
+	// submission exists.
+	SwitchCreatorToMerchant(ctx context.Context, orgID string) (Organization, error)
+	// GetSupportSettings loads a creator org's public-page configuration;
+	// found=false when the page was never enabled.
+	GetSupportSettings(ctx context.Context, orgID string) (SupportSettings, bool, error)
+	// UpsertSupportSettings replaces the page configuration and its
+	// buttons in one transaction.
+	UpsertSupportSettings(ctx context.Context, orgID string, in SupportSettingsInput) (SupportSettings, error)
 }
 
 type PostgresRepository struct {
@@ -91,11 +111,14 @@ func scanOrganization(row interface {
 	var businessName, tin, maxTxn, dailyCap sql.NullString
 	var address, phone, contactEmail, logoURL, primaryColor sql.NullString
 	var suspendedReason sql.NullString
+	var accountKind sql.NullString
+	var displayName, handle, bio sql.NullString
 	if err := row.Scan(
 		&org.ID, &org.Name, &org.Slug, &org.KYCStatus,
 		&businessName, &tin, &maxTxn, &dailyCap,
 		&address, &phone, &contactEmail, &logoURL, &primaryColor,
 		&org.Suspended, &suspendedReason,
+		&accountKind, &displayName, &handle, &bio,
 		&org.CreatedAt, &org.UpdatedAt,
 	); err != nil {
 		return Organization{}, err
@@ -110,6 +133,13 @@ func scanOrganization(row interface {
 	org.LogoURL = logoURL.String
 	org.PrimaryColor = primaryColor.String
 	org.SuspendedReason = suspendedReason.String
+	org.AccountKind = accountKind.String
+	if org.AccountKind == "" {
+		org.AccountKind = AccountKindMerchant
+	}
+	org.DisplayName = displayName.String
+	org.Handle = handle.String
+	org.Bio = bio.String
 	return org, nil
 }
 
@@ -118,6 +148,8 @@ const organizationSelect = `
 	       business_name, tin, live_max_txn_amount, live_daily_volume_cap,
 	       address, phone, contact_email, logo_url, primary_color,
 	       suspended, COALESCE(suspended_reason, ''),
+	       COALESCE(account_kind, 'merchant'), COALESCE(display_name, ''),
+	       COALESCE(handle, ''), COALESCE(bio, ''),
 	       created_at, updated_at
 	FROM app.organizations
 `
@@ -185,6 +217,8 @@ func (r *PostgresRepository) CreateOrganization(ctx context.Context, name, slug,
 		          live_max_txn_amount, live_daily_volume_cap,
 		          address, phone, contact_email, logo_url, primary_color,
 		          suspended, COALESCE(suspended_reason, ''),
+		          COALESCE(account_kind, 'merchant'), COALESCE(display_name, ''),
+		          COALESCE(handle, ''), COALESCE(bio, ''),
 		          created_at, updated_at
 	`, nil, name, slug, valueOrNil(businessName)))
 	if err != nil {
@@ -226,6 +260,8 @@ func (r *PostgresRepository) ListOrganizationsForUser(ctx context.Context, userI
 		       o.business_name, o.tin, o.live_max_txn_amount, o.live_daily_volume_cap,
 		       o.address, o.phone, o.contact_email, o.logo_url, o.primary_color,
 		       o.suspended, COALESCE(o.suspended_reason, ''),
+		       COALESCE(o.account_kind, 'merchant'), COALESCE(o.display_name, ''),
+		       COALESCE(o.handle, ''), COALESCE(o.bio, ''),
 		       o.created_at, o.updated_at,
 		       m.role, m.status
 		FROM app.org_members m
@@ -244,12 +280,14 @@ func (r *PostgresRepository) ListOrganizationsForUser(ctx context.Context, userI
 		var businessName, tin, maxTxn, dailyCap sql.NullString
 		var address, phone, contactEmail, logoURL, primaryColor sql.NullString
 		var suspendedReason sql.NullString
+		var accountKind, displayName, handle, bio sql.NullString
 		var role, status string
 		if err := rows.Scan(
 			&item.ID, &item.Name, &item.Slug, &item.KYCStatus,
 			&businessName, &tin, &maxTxn, &dailyCap,
 			&address, &phone, &contactEmail, &logoURL, &primaryColor,
 			&item.Suspended, &suspendedReason,
+			&accountKind, &displayName, &handle, &bio,
 			&item.CreatedAt, &item.UpdatedAt,
 			&role, &status,
 		); err != nil {
@@ -265,6 +303,13 @@ func (r *PostgresRepository) ListOrganizationsForUser(ctx context.Context, userI
 		item.LogoURL = logoURL.String
 		item.PrimaryColor = primaryColor.String
 		item.SuspendedReason = suspendedReason.String
+		item.AccountKind = accountKind.String
+		if item.AccountKind == "" {
+			item.AccountKind = AccountKindMerchant
+		}
+		item.DisplayName = displayName.String
+		item.Handle = handle.String
+		item.Bio = bio.String
 		item.Role = Role(role)
 		item.Status = MemberStatus(status)
 		orgs = append(orgs, item)
@@ -279,16 +324,20 @@ func (r *PostgresRepository) UpdateOrganization(ctx context.Context, orgID strin
 	org, err := scanOrganization(r.db.QueryRowEx(ctx, `
 		UPDATE app.organizations
 		SET name = $2, business_name = $3, tin = $4, address = $5, phone = $6,
-		    contact_email = $7, logo_url = $8, primary_color = $9, updated_at = NOW()
+		    contact_email = $7, logo_url = $8, primary_color = $9,
+		    display_name = $10, handle = $11, bio = $12, updated_at = NOW()
 		WHERE id = $1::uuid
 		RETURNING id::text, name, slug, kyc_status, business_name, tin,
 		          live_max_txn_amount, live_daily_volume_cap,
 		          address, phone, contact_email, logo_url, primary_color,
 		          suspended, COALESCE(suspended_reason, ''),
+		          COALESCE(account_kind, 'merchant'), COALESCE(display_name, ''),
+		          COALESCE(handle, ''), COALESCE(bio, ''),
 		          created_at, updated_at
 	`, nil, orgID, upd.Name, valueOrNil(upd.BusinessName), valueOrNil(upd.TIN),
 		valueOrNil(upd.Address), valueOrNil(upd.Phone), valueOrNil(upd.ContactEmail),
-		valueOrNil(upd.LogoURL), valueOrNil(upd.PrimaryColor)))
+		valueOrNil(upd.LogoURL), valueOrNil(upd.PrimaryColor),
+		valueOrNil(upd.DisplayName), valueOrNil(upd.Handle), valueOrNil(upd.Bio)))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Organization{}, ErrOrgNotFound
 	}
@@ -513,9 +562,12 @@ func scanKYCSubmission(row interface{ Scan(dest ...interface{}) error }) (KYCSub
 	var sub KYCSubmission
 	var reviewedBy, rejectionReason sql.NullString
 	var reviewedAt sql.NullTime
+	var fullName, idType, idNumber sql.NullString
+	var dob, docBackURL, selfieURL sql.NullString
 	if err := row.Scan(
 		&sub.OrgID, &sub.BusinessName, &sub.TIN, &sub.IDDocumentURL,
 		&sub.SubmittedAt, &reviewedBy, &reviewedAt, &rejectionReason,
+		&fullName, &idType, &idNumber, &dob, &docBackURL, &selfieURL,
 	); err != nil {
 		return KYCSubmission{}, err
 	}
@@ -524,12 +576,20 @@ func scanKYCSubmission(row interface{ Scan(dest ...interface{}) error }) (KYCSub
 		sub.ReviewedAt = &reviewedAt.Time
 	}
 	sub.RejectionReason = rejectionReason.String
+	sub.FullName = fullName.String
+	sub.IDType = idType.String
+	sub.IDNumber = idNumber.String
+	sub.Dob = dob.String
+	sub.IDDocumentBackURL = docBackURL.String
+	sub.SelfieURL = selfieURL.String
 	return sub, nil
 }
 
 const kycSubmissionSelect = `
 	SELECT org_id::text, business_name, tin, id_document_url, submitted_at,
-	       reviewed_by, reviewed_at, COALESCE(rejection_reason, '')
+	       reviewed_by, reviewed_at, COALESCE(rejection_reason, ''),
+	       COALESCE(full_name, ''), COALESCE(id_type, ''), COALESCE(id_number, ''),
+	       COALESCE(dob::text, ''), COALESCE(id_document_back_url, ''), COALESCE(selfie_url, '')
 	FROM app.kyc_submissions
 `
 
@@ -547,12 +607,18 @@ func (r *PostgresRepository) SubmitKYC(ctx context.Context, orgID, businessName,
 	}()
 
 	if _, err = tx.ExecEx(ctx, `
-		INSERT INTO app.kyc_submissions (org_id, business_name, tin, id_document_url)
-		VALUES ($1::uuid, $2, $3, $4)
+		INSERT INTO app.kyc_submissions (org_id, business_name, tin, id_document_url, full_name, id_type, id_number)
+		VALUES ($1::uuid, $2, $3, $4, '', '', '')
 		ON CONFLICT (org_id) DO UPDATE SET
 			business_name = EXCLUDED.business_name,
 			tin = EXCLUDED.tin,
 			id_document_url = EXCLUDED.id_document_url,
+			full_name = '',
+			id_type = '',
+			id_number = '',
+			dob = NULL,
+			id_document_back_url = '',
+			selfie_url = '',
 			submitted_at = NOW(),
 			reviewed_by = NULL,
 			reviewed_at = NULL,
@@ -568,8 +634,8 @@ func (r *PostgresRepository) SubmitKYC(ctx context.Context, orgID, businessName,
 	}
 	// History: every (re)submission appends an immutable attempt row.
 	if _, err = tx.ExecEx(ctx, `
-		INSERT INTO app.kyc_submission_attempts (org_id, business_name, tin, id_document_url, status)
-		VALUES ($1::uuid, $2, $3, $4, 'submitted')
+		INSERT INTO app.kyc_submission_attempts (org_id, business_name, tin, id_document_url, status, full_name, id_type, id_number)
+		VALUES ($1::uuid, $2, $3, $4, 'submitted', '', '', '')
 	`, nil, orgID, businessName, tin, docURL); err != nil {
 		return KYCSubmission{}, fmt.Errorf("record kyc attempt: %w", err)
 	}
@@ -645,6 +711,8 @@ func (r *PostgresRepository) ReviewKYC(ctx context.Context, orgID, status, revie
 		          live_max_txn_amount, live_daily_volume_cap,
 		          address, phone, contact_email, logo_url, primary_color,
 		          suspended, COALESCE(suspended_reason, ''),
+		          COALESCE(account_kind, 'merchant'), COALESCE(display_name, ''),
+		          COALESCE(handle, ''), COALESCE(bio, ''),
 		          created_at, updated_at
 	`, nil, orgID, status))
 	if err != nil {
@@ -653,8 +721,8 @@ func (r *PostgresRepository) ReviewKYC(ctx context.Context, orgID, status, revie
 	// History: every decision appends an immutable attempt row.
 	if _, err = tx.ExecEx(ctx, `
 		INSERT INTO app.kyc_submission_attempts
-		  (org_id, business_name, tin, id_document_url, status, rejection_reason, reviewed_by, reviewed_at)
-		SELECT org_id, business_name, tin, id_document_url, $2, $3, $4, NOW()
+		  (org_id, business_name, tin, id_document_url, status, rejection_reason, reviewed_by, reviewed_at, full_name, id_type, id_number, dob, id_document_back_url, selfie_url)
+		SELECT org_id, business_name, tin, id_document_url, $2, $3, $4, NOW(), full_name, id_type, id_number, dob, id_document_back_url, selfie_url
 		FROM app.kyc_submissions WHERE org_id = $1::uuid
 	`, nil, orgID, status, reason, valueOrNil(reviewedBy)); err != nil {
 		return Organization{}, fmt.Errorf("record kyc attempt: %w", err)
@@ -680,8 +748,13 @@ func (r *PostgresRepository) ListKYCQueue(ctx context.Context, status string) ([
 	}
 	rows, err := r.db.QueryEx(ctx, fmt.Sprintf(`
 		SELECT o.id::text, o.name, o.slug, o.kyc_status,
+		       COALESCE(o.account_kind, 'merchant'),
 		       COALESCE(s.business_name, ''), COALESCE(s.tin, ''),
+		       COALESCE(s.full_name, ''), COALESCE(s.id_type, ''),
+		       COALESCE(sv.expected_volume_band, ''), COALESCE(sv.expected_txn_band, ''),
 		       COALESCE(s.id_document_url, '') <> '',
+		       COALESCE(s.selfie_url, '') <> '',
+		       COALESCE(s.dob::text, ''),
 		       s.submitted_at, COALESCE(s.rejection_reason, ''),
 		       COALESCE((SELECT u.email FROM app.org_members m JOIN app.users u ON u.id = m.user_id
 		                 WHERE m.org_id = o.id AND m.role = 'owner' AND m.status = 'active'
@@ -694,6 +767,7 @@ func (r *PostgresRepository) ListKYCQueue(ctx context.Context, status string) ([
 		                 ORDER BY m.created_at ASC LIMIT 1), '')
 		FROM app.organizations o
 		JOIN app.kyc_submissions s ON s.org_id = o.id
+		LEFT JOIN app.creator_onboarding_surveys sv ON sv.org_id = o.id
 		%s
 		ORDER BY s.submitted_at DESC
 	`, condition), nil, args...)
@@ -707,12 +781,16 @@ func (r *PostgresRepository) ListKYCQueue(ctx context.Context, status string) ([
 		var item KYCQueueItem
 		if err := rows.Scan(
 			&item.OrgID, &item.OrgName, &item.Slug, &item.KYCStatus,
-			&item.BusinessName, &item.TIN, &item.HasDocument,
+			&item.AccountKind, &item.BusinessName, &item.TIN,
+			&item.FullName, &item.IDType,
+			&item.ExpectedVolumeBand, &item.ExpectedTxnBand,
+			&item.HasDocument, &item.HasSelfie, &item.Dob,
 			&item.SubmittedAt, &item.RejectionReason,
 			&item.OwnerEmail, &item.OwnerName, &item.OwnerPhone,
 		); err != nil {
 			return nil, fmt.Errorf("scan kyc queue item: %w", err)
 		}
+		item.SuggestedRiskTier = SuggestedCreatorRiskTier(item.ExpectedVolumeBand, item.ExpectedTxnBand)
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -803,7 +881,9 @@ func (r *PostgresRepository) PlatformStats(ctx context.Context) (PlatformStats, 
 func (r *PostgresRepository) ListKYCAttempts(ctx context.Context, orgID string) ([]KYCAttempt, error) {
 	rows, err := r.db.QueryEx(ctx, `
 		SELECT id::text, org_id::text, business_name, tin, id_document_url,
-		       status, COALESCE(rejection_reason, ''), reviewed_by, reviewed_at, created_at
+		       status, COALESCE(rejection_reason, ''), reviewed_by, reviewed_at, created_at,
+		       COALESCE(full_name, ''), COALESCE(id_type, ''), COALESCE(id_number, ''),
+		       COALESCE(dob::text, ''), COALESCE(id_document_back_url, ''), COALESCE(selfie_url, '')
 		FROM app.kyc_submission_attempts
 		WHERE org_id = $1::uuid
 		ORDER BY created_at DESC
@@ -821,6 +901,8 @@ func (r *PostgresRepository) ListKYCAttempts(ctx context.Context, orgID string) 
 		if err := rows.Scan(
 			&a.ID, &a.OrgID, &a.BusinessName, &a.TIN, &a.IDDocumentURL,
 			&a.Status, &a.RejectionReason, &reviewedBy, &reviewedAt, &a.CreatedAt,
+			&a.FullName, &a.IDType, &a.IDNumber,
+			&a.Dob, &a.IDDocumentBackURL, &a.SelfieURL,
 		); err != nil {
 			return nil, fmt.Errorf("scan kyc attempt: %w", err)
 		}
@@ -897,6 +979,8 @@ func (r *PostgresRepository) UpdateOrgLogo(ctx context.Context, orgID, logoURL s
 		          live_max_txn_amount, live_daily_volume_cap,
 		          address, phone, contact_email, logo_url, primary_color,
 		          suspended, COALESCE(suspended_reason, ''),
+		          COALESCE(account_kind, 'merchant'), COALESCE(display_name, ''),
+		          COALESCE(handle, ''), COALESCE(bio, ''),
 		          created_at, updated_at
 	`, nil, orgID, strings.TrimSpace(logoURL)))
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -918,6 +1002,8 @@ func (r *PostgresRepository) SuspendOrg(ctx context.Context, orgID, reason strin
 		          live_max_txn_amount, live_daily_volume_cap,
 		          address, phone, contact_email, logo_url, primary_color,
 		          suspended, COALESCE(suspended_reason, ''),
+		          COALESCE(account_kind, 'merchant'), COALESCE(display_name, ''),
+		          COALESCE(handle, ''), COALESCE(bio, ''),
 		          created_at, updated_at
 	`, nil, orgID, strings.TrimSpace(reason)))
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -939,6 +1025,8 @@ func (r *PostgresRepository) UnsuspendOrg(ctx context.Context, orgID string) (Or
 		          live_max_txn_amount, live_daily_volume_cap,
 		          address, phone, contact_email, logo_url, primary_color,
 		          suspended, COALESCE(suspended_reason, ''),
+		          COALESCE(account_kind, 'merchant'), COALESCE(display_name, ''),
+		          COALESCE(handle, ''), COALESCE(bio, ''),
 		          created_at, updated_at
 	`, nil, orgID))
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -1064,6 +1152,8 @@ func (r *PostgresRepository) UpdateOrgLiveLimits(ctx context.Context, orgID, max
 		          live_max_txn_amount, live_daily_volume_cap,
 		          address, phone, contact_email, logo_url, primary_color,
 		          suspended, COALESCE(suspended_reason, ''),
+		          COALESCE(account_kind, 'merchant'), COALESCE(display_name, ''),
+		          COALESCE(handle, ''), COALESCE(bio, ''),
 		          created_at, updated_at
 	`, nil, orgID, strings.TrimSpace(maxTxn), strings.TrimSpace(dailyCap)))
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -1073,4 +1163,406 @@ func (r *PostgresRepository) UpdateOrgLiveLimits(ctx context.Context, orgID, max
 		return Organization{}, fmt.Errorf("update org live limits: %w", err)
 	}
 	return org, nil
+}
+
+// CreateCreatorOrganization inserts a creator-kind org with its public
+// profile fields plus the single owner member. Handle collisions surface
+// as ErrHandleTaken (unique index on lower(handle)).
+func (r *PostgresRepository) CreateCreatorOrganization(ctx context.Context, name, slug string, in CreatorOrgInput, ownerUserID string) (Organization, error) {
+	tx, err := r.db.BeginEx(ctx, nil)
+	if err != nil {
+		return Organization{}, fmt.Errorf("begin create creator transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.RollbackEx(ctx)
+		}
+	}()
+
+	var org Organization
+	org, err = scanOrganization(tx.QueryRowEx(ctx, `
+		INSERT INTO app.organizations (name, slug, account_kind, display_name, handle, bio)
+		VALUES ($1, $2, 'creator', $3, NULLIF($4, ''), $5)
+		RETURNING id::text, name, slug, kyc_status, business_name, tin,
+		          live_max_txn_amount, live_daily_volume_cap,
+		          address, phone, contact_email, logo_url, primary_color,
+		          suspended, COALESCE(suspended_reason, ''),
+		          COALESCE(account_kind, 'merchant'), COALESCE(display_name, ''),
+		          COALESCE(handle, ''), COALESCE(bio, ''),
+		          created_at, updated_at
+	`, nil, name, slug, valueOrNil(in.DisplayName), strings.TrimSpace(in.Handle), valueOrNil(in.Bio)))
+	if err != nil {
+		if pgErr, ok := err.(pgx.PgError); ok && pgErr.Code == "23505" {
+			return Organization{}, ErrHandleTaken
+		}
+		return Organization{}, fmt.Errorf("insert creator organization: %w", err)
+	}
+	if _, err = tx.ExecEx(ctx, `
+		INSERT INTO app.org_members (org_id, user_id, role, invited_by, status)
+		VALUES ($1::uuid, $2::uuid, 'owner', $2, 'active')
+	`, nil, org.ID, ownerUserID); err != nil {
+		return Organization{}, fmt.Errorf("insert owner membership: %w", err)
+	}
+	if err = tx.CommitEx(ctx); err != nil {
+		return Organization{}, fmt.Errorf("commit create creator transaction: %w", err)
+	}
+	return org, nil
+}
+
+// SubmitCreatorKYC files individual verification evidence and flips the
+// creator org to submitted. Merchant columns are cleared so a creator file
+// never carries a stale business identity.
+func (r *PostgresRepository) SubmitCreatorKYC(ctx context.Context, orgID string, in CreatorKYCInput) (KYCSubmission, error) {
+	tx, err := r.db.BeginEx(ctx, nil)
+	if err != nil {
+		return KYCSubmission{}, fmt.Errorf("begin submit creator kyc transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.RollbackEx(ctx)
+		}
+	}()
+
+	if _, err = tx.ExecEx(ctx, `
+		INSERT INTO app.kyc_submissions (org_id, business_name, tin, id_document_url, full_name, id_type, id_number, dob, id_document_back_url, selfie_url)
+		VALUES ($1::uuid, '', '', $2, $3, $4, $5, NULLIF($6, '')::date, $7, $8)
+		ON CONFLICT (org_id) DO UPDATE SET
+			business_name = '',
+			tin = '',
+			id_document_url = EXCLUDED.id_document_url,
+			full_name = EXCLUDED.full_name,
+			id_type = EXCLUDED.id_type,
+			id_number = EXCLUDED.id_number,
+			dob = EXCLUDED.dob,
+			id_document_back_url = EXCLUDED.id_document_back_url,
+			selfie_url = EXCLUDED.selfie_url,
+			submitted_at = NOW(),
+			reviewed_by = NULL,
+			reviewed_at = NULL,
+			rejection_reason = ''
+	`, nil, orgID, in.DocURL, in.FullName, in.IDType, in.IDNumber, in.Dob, in.DocBackURL, in.SelfieURL); err != nil {
+		return KYCSubmission{}, fmt.Errorf("upsert creator kyc: %w", err)
+	}
+	if _, err = tx.ExecEx(ctx, `
+		UPDATE app.organizations SET kyc_status = 'submitted', updated_at = NOW()
+		WHERE id = $1::uuid
+	`, nil, orgID); err != nil {
+		return KYCSubmission{}, fmt.Errorf("mark creator kyc submitted: %w", err)
+	}
+	if _, err = tx.ExecEx(ctx, `
+		INSERT INTO app.kyc_submission_attempts (org_id, business_name, tin, id_document_url, status, full_name, id_type, id_number, dob, id_document_back_url, selfie_url)
+		VALUES ($1::uuid, '', '', $2, 'submitted', $3, $4, $5, NULLIF($6, '')::date, $7, $8)
+	`, nil, orgID, in.DocURL, in.FullName, in.IDType, in.IDNumber, in.Dob, in.DocBackURL, in.SelfieURL); err != nil {
+		return KYCSubmission{}, fmt.Errorf("record creator kyc attempt: %w", err)
+	}
+	var sub KYCSubmission
+	sub, err = scanKYCSubmission(tx.QueryRowEx(ctx, kycSubmissionSelect+` WHERE org_id = $1::uuid`, nil, orgID))
+	if err != nil {
+		return KYCSubmission{}, fmt.Errorf("load creator kyc: %w", err)
+	}
+	if err = tx.CommitEx(ctx); err != nil {
+		return KYCSubmission{}, fmt.Errorf("commit creator kyc transaction: %w", err)
+	}
+	return sub, nil
+}
+
+// GetOrganizationByHandle resolves a public creator handle
+// (case-insensitive). Non-creator rows are invisible here — the support
+// page namespace belongs to creators only.
+func (r *PostgresRepository) GetOrganizationByHandle(ctx context.Context, handle string) (Organization, error) {
+	org, err := scanOrganization(r.db.QueryRowEx(ctx, organizationSelect+` WHERE lower(handle) = lower($1) AND account_kind = 'creator'`, nil, strings.TrimSpace(handle)))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Organization{}, ErrOrgNotFound
+	}
+	if err != nil {
+		return Organization{}, fmt.Errorf("get organization by handle: %w", err)
+	}
+	return org, nil
+}
+
+func scanCreatorSurvey(row interface{ Scan(dest ...interface{}) error }) (CreatorSurvey, error) {
+	var s CreatorSurvey
+	var categoryOther, referralSource, useCasesRaw sql.NullString
+	if err := row.Scan(
+		&s.OrgID, &s.Category, &categoryOther, &referralSource, &useCasesRaw,
+		&s.ExpectedVolumeBand, &s.ExpectedTxnBand, &s.CreatedAt, &s.UpdatedAt,
+	); err != nil {
+		return CreatorSurvey{}, err
+	}
+	s.CategoryOther = categoryOther.String
+	s.ReferralSource = referralSource.String
+	s.UseCases = []string{}
+	if useCasesRaw.Valid && strings.TrimSpace(useCasesRaw.String) != "" {
+		var decoded []string
+		if err := json.Unmarshal([]byte(useCasesRaw.String), &decoded); err == nil && decoded != nil {
+			s.UseCases = decoded
+		}
+	}
+	s.SuggestedRiskTier = SuggestedCreatorRiskTier(s.ExpectedVolumeBand, s.ExpectedTxnBand)
+	return s, nil
+}
+
+// UpsertCreatorSurvey stores (or replaces) a creator org's onboarding
+// answers. Display name is applied to the org row in the same
+// transaction so the survey form submits once.
+func (r *PostgresRepository) UpsertCreatorSurvey(ctx context.Context, orgID string, in CreatorSurveyInput) (CreatorSurvey, error) {
+	useCasesJSON, err := json.Marshal(in.UseCases)
+	if err != nil {
+		return CreatorSurvey{}, fmt.Errorf("encode survey use cases: %w", err)
+	}
+	tx, err := r.db.BeginEx(ctx, nil)
+	if err != nil {
+		return CreatorSurvey{}, fmt.Errorf("begin upsert survey transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.RollbackEx(ctx)
+		}
+	}()
+
+	if strings.TrimSpace(in.DisplayName) != "" {
+		if _, err = tx.ExecEx(ctx, `
+			UPDATE app.organizations SET display_name = $2, updated_at = NOW()
+			WHERE id = $1::uuid AND account_kind = 'creator'
+		`, nil, orgID, strings.TrimSpace(in.DisplayName)); err != nil {
+			return CreatorSurvey{}, fmt.Errorf("apply survey display name: %w", err)
+		}
+	}
+	var survey CreatorSurvey
+	survey, err = scanCreatorSurvey(tx.QueryRowEx(ctx, `
+		INSERT INTO app.creator_onboarding_surveys
+		  (org_id, category, category_other, referral_source, use_cases, expected_volume_band, expected_txn_band, updated_at)
+		VALUES ($1::uuid, $2, $3, $4, $5::jsonb, $6, $7, NOW())
+		ON CONFLICT (org_id) DO UPDATE SET
+		  category = EXCLUDED.category,
+		  category_other = EXCLUDED.category_other,
+		  referral_source = EXCLUDED.referral_source,
+		  use_cases = EXCLUDED.use_cases,
+		  expected_volume_band = EXCLUDED.expected_volume_band,
+		  expected_txn_band = EXCLUDED.expected_txn_band,
+		  updated_at = NOW()
+		RETURNING org_id::text, category, category_other, referral_source, use_cases::text,
+		          expected_volume_band, expected_txn_band, created_at, updated_at
+	`, nil, orgID, in.Category, in.CategoryOther, in.ReferralSource, string(useCasesJSON), in.ExpectedVolumeBand, in.ExpectedTxnBand))
+	if err != nil {
+		return CreatorSurvey{}, fmt.Errorf("upsert creator survey: %w", err)
+	}
+	if err = tx.CommitEx(ctx); err != nil {
+		return CreatorSurvey{}, fmt.Errorf("commit upsert survey transaction: %w", err)
+	}
+	return survey, nil
+}
+
+// GetCreatorSurvey loads a creator org's onboarding answers;
+// found=false when the survey was never submitted.
+func (r *PostgresRepository) GetCreatorSurvey(ctx context.Context, orgID string) (CreatorSurvey, bool, error) {
+	survey, err := scanCreatorSurvey(r.db.QueryRowEx(ctx, `
+		SELECT org_id::text, category, category_other, referral_source, use_cases::text,
+		       expected_volume_band, expected_txn_band, created_at, updated_at
+		FROM app.creator_onboarding_surveys WHERE org_id = $1::uuid
+	`, nil, orgID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return CreatorSurvey{}, false, nil
+	}
+	if err != nil {
+		return CreatorSurvey{}, false, fmt.Errorf("get creator survey: %w", err)
+	}
+	return survey, true, nil
+}
+
+// SwitchCreatorToMerchant converts a pre-KYC creator org to the merchant
+// track: kind flips, creator profile/survey rows are cleared. Refused once
+// any KYC submission exists (kind is support-assisted after that point).
+func (r *PostgresRepository) SwitchCreatorToMerchant(ctx context.Context, orgID string) (Organization, error) {
+	tx, err := r.db.BeginEx(ctx, nil)
+	if err != nil {
+		return Organization{}, fmt.Errorf("begin kind switch transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.RollbackEx(ctx)
+		}
+	}()
+
+	var kind, kycStatus string
+	err = tx.QueryRowEx(ctx, `SELECT account_kind, kyc_status FROM app.organizations WHERE id = $1::uuid`, nil, orgID).Scan(&kind, &kycStatus)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Organization{}, ErrOrgNotFound
+	}
+	if err != nil {
+		return Organization{}, fmt.Errorf("load org kind: %w", err)
+	}
+	if kind != AccountKindCreator {
+		return Organization{}, ErrAccountKindImmutable
+	}
+	var hasKYC bool
+	err = tx.QueryRowEx(ctx, `SELECT EXISTS (SELECT 1 FROM app.kyc_submissions WHERE org_id = $1::uuid)`, nil, orgID).Scan(&hasKYC)
+	if err != nil {
+		return Organization{}, fmt.Errorf("check kyc submission: %w", err)
+	}
+	if hasKYC || kycStatus != "pending" {
+		return Organization{}, ErrKindSwitchSubmitted
+	}
+	if _, err = tx.ExecEx(ctx, `DELETE FROM app.creator_onboarding_surveys WHERE org_id = $1::uuid`, nil, orgID); err != nil {
+		return Organization{}, fmt.Errorf("clear creator survey: %w", err)
+	}
+	var org Organization
+	org, err = scanOrganization(tx.QueryRowEx(ctx, `
+		UPDATE app.organizations
+		SET account_kind = 'merchant', display_name = NULL, handle = NULL, bio = NULL, updated_at = NOW()
+		WHERE id = $1::uuid
+		RETURNING id::text, name, slug, kyc_status, business_name, tin,
+		          live_max_txn_amount, live_daily_volume_cap,
+		          address, phone, contact_email, logo_url, primary_color,
+		          suspended, COALESCE(suspended_reason, ''),
+		          COALESCE(account_kind, 'merchant'), COALESCE(display_name, ''),
+		          COALESCE(handle, ''), COALESCE(bio, ''),
+		          created_at, updated_at
+	`, nil, orgID))
+	if err != nil {
+		return Organization{}, fmt.Errorf("switch org kind: %w", err)
+	}
+	if err = tx.CommitEx(ctx); err != nil {
+		return Organization{}, fmt.Errorf("commit kind switch transaction: %w", err)
+	}
+	return org, nil
+}
+
+func scanSupportLink(row interface{ Scan(dest ...interface{}) error }) (SupportLink, error) {
+	var l SupportLink
+	var amount sql.NullString
+	if err := row.Scan(
+		&l.ID, &l.OrgID, &l.Label, &l.AmountMode, &amount,
+		&l.SortOrder, &l.Active, &l.CreatedAt,
+	); err != nil {
+		return SupportLink{}, err
+	}
+	l.Amount = amount.String
+	return l, nil
+}
+
+const supportLinkSelect = `
+	SELECT id::text, org_id::text, label, amount_mode, amount,
+	       sort_order, active, created_at
+	FROM app.creator_support_links
+`
+
+func (r *PostgresRepository) listSupportLinks(ctx context.Context, q interface {
+	QueryEx(ctx context.Context, query string, options *pgx.QueryExOptions, args ...interface{}) (*pgx.Rows, error)
+}, orgID string) ([]SupportLink, error) {
+	rows, err := q.QueryEx(ctx, supportLinkSelect+` WHERE org_id = $1::uuid ORDER BY sort_order ASC, created_at ASC`, nil, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("list support links: %w", err)
+	}
+	defer rows.Close()
+
+	links := []SupportLink{}
+	for rows.Next() {
+		link, err := scanSupportLink(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan support link: %w", err)
+		}
+		links = append(links, link)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate support links: %w", err)
+	}
+	return links, nil
+}
+
+// GetSupportSettings loads a creator org's public-page configuration;
+// found=false when the page was never enabled.
+func (r *PostgresRepository) GetSupportSettings(ctx context.Context, orgID string) (SupportSettings, bool, error) {
+	var s SupportSettings
+	var appID, minAmount, maxAmount sql.NullString
+	err := r.db.QueryRowEx(ctx, `
+		SELECT org_id::text, support_app_id::text, min_amount, max_amount,
+		       show_supporters_wall, created_at, updated_at
+		FROM app.creator_support_settings WHERE org_id = $1::uuid
+	`, nil, orgID).Scan(
+		&s.OrgID, &appID, &minAmount, &maxAmount,
+		&s.ShowSupportersWall, &s.CreatedAt, &s.UpdatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return SupportSettings{}, false, nil
+	}
+	if err != nil {
+		return SupportSettings{}, false, fmt.Errorf("get support settings: %w", err)
+	}
+	s.SupportAppID = appID.String
+	s.MinAmount = minAmount.String
+	s.MaxAmount = maxAmount.String
+	links, err := r.listSupportLinks(ctx, r.db, orgID)
+	if err != nil {
+		return SupportSettings{}, false, err
+	}
+	s.Links = links
+	return s, true, nil
+}
+
+// UpsertSupportSettings replaces the page configuration and its buttons
+// in one transaction (links are delete-and-reinsert, display order from
+// the request order).
+func (r *PostgresRepository) UpsertSupportSettings(ctx context.Context, orgID string, in SupportSettingsInput) (SupportSettings, error) {
+	tx, err := r.db.BeginEx(ctx, nil)
+	if err != nil {
+		return SupportSettings{}, fmt.Errorf("begin upsert support settings transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.RollbackEx(ctx)
+		}
+	}()
+
+	var s SupportSettings
+	var appID, minAmount, maxAmount sql.NullString
+	err = tx.QueryRowEx(ctx, `
+		INSERT INTO app.creator_support_settings (org_id, support_app_id, min_amount, max_amount, updated_at)
+		VALUES ($1::uuid, NULLIF($2, '')::uuid, NULLIF($3, ''), NULLIF($4, ''), NOW())
+		ON CONFLICT (org_id) DO UPDATE SET
+		  support_app_id = EXCLUDED.support_app_id,
+		  min_amount = EXCLUDED.min_amount,
+		  max_amount = EXCLUDED.max_amount,
+		  updated_at = NOW()
+		RETURNING org_id::text, support_app_id::text, min_amount, max_amount,
+		          show_supporters_wall, created_at, updated_at
+	`, nil, orgID, strings.TrimSpace(in.SupportAppID), strings.TrimSpace(in.MinAmount), strings.TrimSpace(in.MaxAmount)).Scan(
+		&s.OrgID, &appID, &minAmount, &maxAmount,
+		&s.ShowSupportersWall, &s.CreatedAt, &s.UpdatedAt,
+	)
+	if err != nil {
+		return SupportSettings{}, fmt.Errorf("upsert support settings: %w", err)
+	}
+	s.SupportAppID = appID.String
+	s.MinAmount = minAmount.String
+	s.MaxAmount = maxAmount.String
+
+	if _, err = tx.ExecEx(ctx, `DELETE FROM app.creator_support_links WHERE org_id = $1::uuid`, nil, orgID); err != nil {
+		return SupportSettings{}, fmt.Errorf("clear support links: %w", err)
+	}
+	links := []SupportLink{}
+	for i, l := range in.Links {
+		var link SupportLink
+		var amount sql.NullString
+		err = tx.QueryRowEx(ctx, `
+			INSERT INTO app.creator_support_links (org_id, label, amount_mode, amount, sort_order, active)
+			VALUES ($1::uuid, $2, $3, NULLIF($4, ''), $5, $6)
+			RETURNING id::text, org_id::text, label, amount_mode, amount,
+			          sort_order, active, created_at
+		`, nil, orgID, strings.TrimSpace(l.Label), strings.TrimSpace(l.AmountMode),
+			strings.TrimSpace(l.Amount), i, l.Active).Scan(
+			&link.ID, &link.OrgID, &link.Label, &link.AmountMode, &amount,
+			&link.SortOrder, &link.Active, &link.CreatedAt,
+		)
+		if err != nil {
+			return SupportSettings{}, fmt.Errorf("insert support link: %w", err)
+		}
+		link.Amount = amount.String
+		links = append(links, link)
+	}
+	s.Links = links
+	if err = tx.CommitEx(ctx); err != nil {
+		return SupportSettings{}, fmt.Errorf("commit upsert support settings transaction: %w", err)
+	}
+	return s, nil
 }

@@ -87,9 +87,17 @@ export type KYCQueueItem = {
   org_name: string;
   slug: string;
   kyc_status: string;
+  account_kind?: string;
   business_name: string;
   tin: string;
+  full_name?: string;
+  id_type?: string;
+  dob?: string;
+  suggested_risk_tier?: string;
+  expected_volume_band?: string;
+  expected_txn_band?: string;
   has_document: boolean;
+  has_selfie?: boolean;
   submitted_at: string;
   rejection_reason?: string;
   owner_email?: string;
@@ -146,6 +154,23 @@ export async function fetchKYCDocument(orgId: string): Promise<{ blob: Blob; con
   });
   if (!response.ok) {
     throw new AdminOrgApiError(response.status, "Unable to load the verification document.");
+  }
+  const blob = await response.blob();
+  return { blob, contentType: response.headers.get("content-type") ?? "application/octet-stream" };
+}
+
+// fetchKYCSelfie downloads a creator org's v1 selfie photo as a blob
+// (admin review path — reviewers compare it against the ID document).
+export async function fetchKYCSelfie(orgId: string): Promise<{ blob: Blob; contentType: string }> {
+  const token = getAdminToken();
+  if (!token) {
+    throw new AdminOrgApiError(401, "You need to sign in to continue.", "unauthorized");
+  }
+  const response = await fetch(`${apiBaseUrl}/api/v1/admin/orgs/${orgId}/kyc/selfie`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!response.ok) {
+    throw new AdminOrgApiError(response.status, "Unable to load the selfie photo.");
   }
   const blob = await response.blob();
   return { blob, contentType: response.headers.get("content-type") ?? "application/octet-stream" };

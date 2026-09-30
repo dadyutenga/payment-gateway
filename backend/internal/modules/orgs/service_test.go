@@ -65,6 +65,8 @@ type fakeOrgRepository struct {
 	queueErr     error
 	limitsMaxTxn string
 	limitsDailyCap string
+	survey       *CreatorSurvey
+	support      *SupportSettings
 }
 
 func orgKey(orgID, userID string) string { return orgID + "\x00" + userID }
@@ -75,14 +77,64 @@ func newFakeOrgRepository() *fakeOrgRepository {
 
 func (r *fakeOrgRepository) CreateOrganization(_ context.Context, name, slug, businessName, ownerUserID string) (Organization, error) {
 	r.createdOrgs++
-	return Organization{ID: "org_test", Name: name, Slug: slug, BusinessName: businessName, KYCStatus: "pending"}, nil
+	return Organization{ID: "org_test", Name: name, Slug: slug, BusinessName: businessName, KYCStatus: "pending", AccountKind: AccountKindMerchant}, nil
+}
+
+func (r *fakeOrgRepository) CreateCreatorOrganization(_ context.Context, name, slug string, in CreatorOrgInput, ownerUserID string) (Organization, error) {
+	r.createdOrgs++
+	return Organization{ID: "org_test", Name: name, Slug: slug, KYCStatus: "pending", AccountKind: AccountKindCreator, DisplayName: in.DisplayName, Handle: in.Handle, Bio: in.Bio}, nil
+}
+
+func (r *fakeOrgRepository) SubmitCreatorKYC(_ context.Context, orgID string, in CreatorKYCInput) (KYCSubmission, error) {
+	return KYCSubmission{OrgID: orgID, FullName: in.FullName, IDType: in.IDType, IDNumber: in.IDNumber, Dob: in.Dob, IDDocumentURL: in.DocURL, IDDocumentBackURL: in.DocBackURL, SelfieURL: in.SelfieURL}, nil
+}
+
+func (r *fakeOrgRepository) GetOrganizationByHandle(_ context.Context, handle string) (Organization, error) {
+	return Organization{ID: "org_test", Handle: handle, AccountKind: AccountKindCreator}, nil
+}
+
+func (r *fakeOrgRepository) UpsertCreatorSurvey(_ context.Context, orgID string, in CreatorSurveyInput) (CreatorSurvey, error) {
+	return CreatorSurvey{
+		OrgID: orgID, Category: in.Category, CategoryOther: in.CategoryOther,
+		ReferralSource: in.ReferralSource, UseCases: in.UseCases,
+		ExpectedVolumeBand: in.ExpectedVolumeBand, ExpectedTxnBand: in.ExpectedTxnBand,
+		SuggestedRiskTier: SuggestedCreatorRiskTier(in.ExpectedVolumeBand, in.ExpectedTxnBand),
+	}, nil
+}
+
+func (r *fakeOrgRepository) GetCreatorSurvey(_ context.Context, orgID string) (CreatorSurvey, bool, error) {
+	if r.survey != nil {
+		return *r.survey, true, nil
+	}
+	return CreatorSurvey{}, false, nil
+}
+
+func (r *fakeOrgRepository) SwitchCreatorToMerchant(_ context.Context, orgID string) (Organization, error) {
+	return Organization{ID: orgID, Name: "Switched", KYCStatus: "pending", AccountKind: AccountKindMerchant}, nil
+}
+
+func (r *fakeOrgRepository) GetSupportSettings(_ context.Context, orgID string) (SupportSettings, bool, error) {
+	if r.support != nil {
+		return *r.support, true, nil
+	}
+	return SupportSettings{}, false, nil
+}
+
+func (r *fakeOrgRepository) UpsertSupportSettings(_ context.Context, orgID string, in SupportSettingsInput) (SupportSettings, error) {
+	links := make([]SupportLink, 0, len(in.Links))
+	for i, l := range in.Links {
+		links = append(links, SupportLink{ID: "link_" + string(rune('a'+i)), OrgID: orgID, Label: l.Label, AmountMode: l.AmountMode, Amount: l.Amount, SortOrder: i, Active: true})
+	}
+	s := SupportSettings{OrgID: orgID, SupportAppID: in.SupportAppID, MinAmount: in.MinAmount, MaxAmount: in.MaxAmount, Links: links}
+	r.support = &s
+	return s, nil
 }
 
 func (r *fakeOrgRepository) GetOrganization(_ context.Context, orgID string) (Organization, error) {
 	if r.org.ID != "" {
 		return r.org, nil
 	}
-	return Organization{ID: orgID, Name: "Test Org", KYCStatus: "pending"}, nil
+	return Organization{ID: orgID, Name: "Test Org", KYCStatus: "pending", AccountKind: AccountKindMerchant}, nil
 }
 
 func (r *fakeOrgRepository) ListOrganizationsForUser(_ context.Context, _ string) ([]OrganizationWithRole, error) {
