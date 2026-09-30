@@ -1,75 +1,166 @@
-import { NavLink, Outlet } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { Outlet, useLocation } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { LogOut, Wallet } from "lucide-react";
+import {
+  Activity, BarChart3, Building2, ChevronsLeft, ChevronsRight, CreditCard, FileCheck, History,
+  LayoutDashboard, Wallet, XCircle,
+} from "lucide-react";
 import { signOut } from "@/lib/auth";
 import { getAdminMe } from "@/lib/adminApi";
+import Sidebar, { type SidebarNavGroup } from "@/components/Sidebar";
+import SpaceTopbar from "@/components/SpaceTopbar";
 
-const NAV_ITEMS = [
-  { to: "/admin", label: "Home", end: true },
-  { to: "/admin/analytics", label: "Analytics" },
-  { to: "/admin/analytics/providers", label: "Provider stats" },
-  { to: "/admin/analytics/merchants", label: "Merchants" },
-  { to: "/admin/analytics/failures", label: "Failures" },
-  { to: "/admin/ops", label: "Ops" },
-  { to: "/admin/payments", label: "Payments" },
-  { to: "/admin/payments/apps", label: "Apps" },
-  { to: "/admin/payments/withdrawals", label: "Withdrawals" },
-  { to: "/admin/payments/providers", label: "Pay providers" },
+const COLLAPSED_KEY = "lipago_sidebar_admin_collapsed";
+const EXPAND_KEY = "lipago_nav_admin";
+
+const BASE_GROUPS: SidebarNavGroup[] = [
+  {
+    id: "overview", label: "Overview", icon: LayoutDashboard,
+    items: [{ to: "/admin", label: "Home", icon: LayoutDashboard, end: true }],
+  },
+  {
+    id: "organizations", label: "Organizations", icon: Building2,
+    items: [{ to: "/admin/kyc", label: "KYC review", icon: FileCheck }],
+  },
+  {
+    id: "analytics", label: "Analytics", icon: BarChart3,
+    items: [
+      { to: "/admin/analytics", label: "Overview", icon: BarChart3 },
+      { to: "/admin/analytics/providers", label: "Provider stats", icon: BarChart3 },
+      { to: "/admin/analytics/merchants", label: "Merchants", icon: Building2 },
+      { to: "/admin/analytics/failures", label: "Failures", icon: XCircle },
+    ],
+  },
+  {
+    id: "ops", label: "Ops", icon: Activity,
+    items: [{ to: "/admin/ops", label: "Ops", icon: Activity }],
+  },
+  {
+    id: "payments", label: "Payments", icon: CreditCard,
+    items: [
+      { to: "/admin/payments", label: "Payments", icon: CreditCard },
+      { to: "/admin/payments/apps", label: "Apps", icon: Building2 },
+      { to: "/admin/payments/withdrawals", label: "Withdrawals", icon: Wallet },
+      { to: "/admin/payments/providers", label: "Pay providers", icon: Wallet },
+    ],
+  },
+  {
+    id: "audit", label: "Audit", icon: History,
+    items: [{ to: "/admin/audit", label: "Audit log", icon: History }],
+  },
 ];
 
-const ADMIN_NAV_ITEMS = [
-  { to: "/admin/kyc", label: "KYC review" },
-];
-
-// Operator-only layout: admin nav, ADMIN identity badge, no org switcher,
-// no merchant links, no sandbox banner. Merchant pages live under
-// CustomerLayout instead.
+// Operator-only layout: red-accented sidebar, slim top bar with ADMIN
+// identity. The backend re-checks admin on every request regardless.
 const AdminLayout = () => {
-  // Admin-only links (KYC review) stay hidden unless the backend confirms
-  // the operator session — it re-checks admin on every request regardless.
+  const location = useLocation();
+  // Admin-only links stay hidden until the backend confirms the operator
+  // session — it re-checks admin on every request regardless.
   const meQuery = useQuery({ queryKey: ["admin", "me"], queryFn: () => getAdminMe(), staleTime: 60_000, retry: false });
-  const navItems = [...NAV_ITEMS, ...((meQuery.data?.is_admin ?? false) ? ADMIN_NAV_ITEMS : [])];
+  const isAdmin = meQuery.data?.is_admin ?? false;
+
+  const [collapsed, setCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem(COLLAPSED_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  const [drawerOpen, setDrawerOpen] = useState(false);
+
+  const toggleCollapsed = () => {
+    setCollapsed((prev) => {
+      try {
+        localStorage.setItem(COLLAPSED_KEY, prev ? "0" : "1");
+      } catch {
+        /* ignore */
+      }
+      return !prev;
+    });
+  };
+
+  useEffect(() => {
+    setDrawerOpen(false);
+  }, [location.pathname]);
+  useEffect(() => {
+    if (!drawerOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setDrawerOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [drawerOpen]);
+
+  const groups = BASE_GROUPS.filter((g) => g.id !== "organizations" || isAdmin);
+
+  const brand = (
+    <>
+      <Wallet className="h-5 w-5" />
+      LipaGO
+      <span className="rounded bg-red-100 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-red-700">
+        Admin
+      </span>
+    </>
+  );
+
+  const sidebar = (
+    <Sidebar
+      groups={groups}
+      accent="admin"
+      spaceBadge={brand}
+      collapsed={collapsed}
+      storageKey={EXPAND_KEY}
+      onNavigate={() => setDrawerOpen(false)}
+      footer={
+        <button
+          type="button"
+          onClick={toggleCollapsed}
+          aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          className="hidden w-full items-center justify-center gap-1 rounded-md px-2 py-1.5 text-slate-500 hover:bg-sidebar-accent lg:flex"
+        >
+          {collapsed ? <ChevronsRight className="h-4 w-4" /> : <><ChevronsLeft className="h-4 w-4" /> Collapse</>}
+        </button>
+      }
+    />
+  );
 
   return (
-    <div className="min-h-screen bg-slate-50">
-      <header className="border-b border-slate-200 bg-white">
-        <div className="mx-auto flex h-14 max-w-6xl items-center justify-between gap-2 px-4 sm:px-6">
-          <div className="flex items-center gap-2 font-bold text-slate-900">
-            <Wallet className="h-5 w-5" />
-            LipaGO
-            <span className="rounded bg-red-100 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-red-700">
-              Admin
-            </span>
-          </div>
-          <nav className="flex items-center gap-1">
-            {navItems.map((item) => (
-              <NavLink
-                key={item.to}
-                to={item.to}
-                end={item.end}
-                className={({ isActive }) =>
-                  `rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
-                    isActive ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-100"
-                  }`
-                }
-              >
-                {item.label}
-              </NavLink>
-            ))}
-            <button
-              type="button"
-              title="Sign out"
-              onClick={() => { signOut(); window.location.assign("/admin/login"); }}
-              className="ml-2 flex h-8 w-8 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100"
-            >
-              <LogOut className="h-4 w-4" />
-            </button>
-          </nav>
+    <div className="min-h-screen bg-slate-50 lg:flex">
+      <aside
+        className={`sticky top-0 hidden h-screen shrink-0 transition-[width] lg:block ${
+          collapsed ? "w-16" : "w-64"
+        }`}
+      >
+        {sidebar}
+      </aside>
+
+      {drawerOpen && (
+        <div className="fixed inset-0 z-50 lg:hidden" role="dialog" aria-modal="true" aria-label="Navigation menu">
+          <div
+            className="absolute inset-0 bg-slate-900/50"
+            onClick={() => setDrawerOpen(false)}
+            aria-hidden
+          />
+          <aside className="absolute inset-y-0 left-0 w-72 max-w-[85vw] shadow-xl">
+            {sidebar}
+          </aside>
         </div>
-      </header>
-      <main className="mx-auto max-w-6xl px-4 py-6 sm:px-6">
-        <Outlet />
-      </main>
+      )}
+
+      <div className="flex min-h-screen min-w-0 flex-1 flex-col">
+        <SpaceTopbar
+          onMenu={() => setDrawerOpen(true)}
+          brand={brand}
+          userLabel="Operator"
+          onSignOut={() => {
+            signOut();
+            window.location.assign("/admin/login");
+          }}
+        />
+        <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-6 sm:px-6">
+          <Outlet />
+        </main>
+      </div>
     </div>
   );
 };

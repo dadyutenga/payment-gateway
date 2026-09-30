@@ -11,6 +11,7 @@ import AdminAnalyticsProviders from "@/pages/AdminAnalyticsProviders";
 import AdminAnalyticsMerchants from "@/pages/AdminAnalyticsMerchants";
 import AdminAnalyticsFailures from "@/pages/AdminAnalyticsFailures";
 import AdminOps from "@/pages/AdminOps";
+import AdminAudit from "@/pages/AdminAudit";
 import CustomerLayout from "@/pages/CustomerLayout";
 import SignIn from "@/pages/SignIn";
 import AdminPayments from "@/pages/AdminPayments";
@@ -73,6 +74,7 @@ const App = () => (
             <Route path="analytics/merchants" element={<AdminAnalyticsMerchants />} />
             <Route path="analytics/failures" element={<AdminAnalyticsFailures />} />
             <Route path="ops" element={<AdminOps />} />
+            <Route path="audit" element={<AdminAudit />} />
             <Route path="payments" element={<AdminPayments />} />
             <Route path="payments/apps" element={<AdminPaymentApps />} />
             <Route path="payments/apps/:id" element={<AdminPaymentAppDetail />} />
