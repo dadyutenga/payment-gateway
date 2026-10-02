@@ -108,7 +108,9 @@ until `AUTH_ADMIN_TOKEN_TTL` expires.
 - `POST /api/v1/orgs/{orgID}/kyc` `{business_name, tin, id_document_url}`
   (owner/`manage_org`), `GET /api/v1/orgs/{orgID}/kyc` for status;
   `POST .../kyc/document` (multipart `document`, JPEG/PNG/WEBP/PDF, ≤5MB,
-  stored under `backend/uploads/kyc/`) and `GET .../kyc/document` to fetch.
+  stored in private R2 objects) and `GET .../kyc/document` to fetch through
+  the authenticated backend. Creator back-side documents and selfies use the
+  same private R2 path and access audit.
 - Submission flips `organizations.kyc_status` to `submitted` (review
   approve/reject is a later admin block; `000039_kyc_submissions` keeps
   the evidence + review queue).
@@ -133,6 +135,32 @@ until `AUTH_ADMIN_TOKEN_TTL` expires.
 - Frontend: `/signup` (email + OTP verify), `/onboarding/kyc/{orgID}`
   (business name, TIN, document upload), and a sandbox-mode banner while
   the active org is unverified.
+
+### File storage
+
+All new KYC and branding uploads use Cloudflare R2 through
+`internal/platform/storage`. R2 uses the S3-compatible endpoint with region
+`auto`, a configured custom endpoint, path-style addressing, and SDK checksum
+calculation and validation only when required. Cloudflare's S3 compatibility
+docs and Go SDK example were checked on 2026-10-02; the compatibility page
+was last updated 2026-07-31 and the Go example 2026-04-21.
+
+KYC objects are private under `private/kyc/` and are streamed only after the
+existing organization or admin authorization check. Access is written to the
+audit trail. Branding objects are separate under `public/branding/`; public
+creator pages receive a five-minute presigned GET URL. No support-ticket
+attachment module exists in this checkout yet, so there is no attachment call
+site to migrate; it should use the same storage interface and a
+`private/support/` namespace when added.
+
+Existing local files can be copied and verified with:
+
+```text
+go run ./cmd/migrate-uploads
+```
+
+The command updates database references only after reading the uploaded R2
+object back and deliberately leaves local files in place for manual cleanup.
 
 ## Creator risk posture (Part 5)
 

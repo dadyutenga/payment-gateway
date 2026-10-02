@@ -43,6 +43,14 @@ func (h *Handler) supportPageData(r *http.Request) (map[string]any, error) {
 		return nil, err
 	}
 	payload := buildSupportPagePayload(data)
+	if strings.HasPrefix(data.Org.LogoURL, "r2://") {
+		payload["logo_url"] = ""
+		if h.storage != nil {
+			if signed, signErr := h.storage.PresignGet(r.Context(), strings.TrimPrefix(data.Org.LogoURL, "r2://"), 300); signErr == nil {
+				payload["logo_url"] = signed
+			}
+		}
+	}
 	if !data.Enabled {
 		return payload, nil
 	}
@@ -121,14 +129,14 @@ func supportEnvironment(kycStatus string) string {
 }
 
 type createSupportOrderHTTPInput struct {
-	LinkID            string          `json:"link_id"`
-	Amount            json.RawMessage `json:"amount"`
-	Currency          string          `json:"currency"`
-	Provider          string          `json:"provider"`
-	BuyerName         string          `json:"buyer_name"`
-	BuyerEmail        string          `json:"buyer_email"`
-	BuyerPhone        string          `json:"buyer_phone"`
-	SupporterMessage  string          `json:"supporter_message"`
+	LinkID           string          `json:"link_id"`
+	Amount           json.RawMessage `json:"amount"`
+	Currency         string          `json:"currency"`
+	Provider         string          `json:"provider"`
+	BuyerName        string          `json:"buyer_name"`
+	BuyerEmail       string          `json:"buyer_email"`
+	BuyerPhone       string          `json:"buyer_phone"`
+	SupporterMessage string          `json:"supporter_message"`
 }
 
 // CreateSupportOrder takes a public support payment through the single
@@ -217,23 +225,23 @@ func (h *Handler) CreateSupportOrder(w http.ResponseWriter, r *http.Request) {
 	// callers cannot inject provider metadata. The supporter message rides
 	// here: visible to the creator in their dashboard, never public.
 	metadata := map[string]any{
-		"kind":      "support",
-		"handle":    data.Org.Handle,
-		"link_id":   strings.TrimSpace(in.LinkID),
+		"kind":       "support",
+		"handle":     data.Org.Handle,
+		"link_id":    strings.TrimSpace(in.LinkID),
 		"link_label": linkLabel,
 	}
 	if message != "" {
 		metadata["supporter_message"] = message
 	}
 	order, vErrs, err := h.service.CreateOrder(r.Context(), app, CreatePaymentOrderInput{
-		Provider:      in.Provider,
-		Amount:        amount,
-		Currency:      currency,
-		BuyerName:     in.BuyerName,
-		BuyerEmail:    in.BuyerEmail,
-		BuyerPhone:    in.BuyerPhone,
-		Metadata:      metadata,
-		Environment:   environment,
+		Provider:    in.Provider,
+		Amount:      amount,
+		Currency:    currency,
+		BuyerName:   in.BuyerName,
+		BuyerEmail:  in.BuyerEmail,
+		BuyerPhone:  in.BuyerPhone,
+		Metadata:    metadata,
+		Environment: environment,
 	})
 	if err != nil {
 		switch {

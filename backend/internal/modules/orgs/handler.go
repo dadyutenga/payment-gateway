@@ -7,20 +7,22 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"lipago/internal/platform/middleware"
+	"lipago/internal/platform/storage"
 	"lipago/internal/shared/httputil"
 	"lipago/internal/shared/validation"
+
+	"github.com/google/uuid"
 )
 
 type Handler struct {
 	service *Service
 	logger  *slog.Logger
+	storage storage.Store
 }
 
 func NewHandler(service *Service, logger *slog.Logger) *Handler {
@@ -28,6 +30,10 @@ func NewHandler(service *Service, logger *slog.Logger) *Handler {
 		logger = slog.Default()
 	}
 	return &Handler{service: service, logger: logger}
+}
+
+func (h *Handler) SetStorage(store storage.Store) {
+	h.storage = store
 }
 
 func (h *Handler) fail(w http.ResponseWriter, status int, code, message string, err error) {
@@ -373,11 +379,7 @@ func (h *Handler) LeaveOrganization(w http.ResponseWriter, r *http.Request) {
 // maxKYCDocumentBytes caps ID and selfie uploads at 5MB.
 const maxKYCDocumentBytes = 5 << 20
 
-// kycUploadDir is relative to the process working directory (backend/ for
-// `go run ./cmd/api`). No object storage exists in this repo yet — when an
-// S3-compatible store is introduced, only saveKYCDocument/serveKYCDocument
-// need to change (the DB keeps a location string either way).
-const kycUploadDir = "uploads/kyc"
+const r2ObjectPrefix = "r2://"
 
 var allowedKYCExtensions = map[string]bool{
 	".jpg": true, ".jpeg": true, ".png": true, ".webp": true, ".pdf": true,
@@ -664,6 +666,10 @@ func (h *Handler) UploadKYCSelfie(w http.ResponseWriter, r *http.Request) {
 // document path additionally allows PDFs. It writes the error response
 // itself and reports ok=false when it does.
 func (h *Handler) storeKYCUpload(w http.ResponseWriter, r *http.Request, orgID, formField string, imagesOnly bool, nameInfix string) (string, bool) {
+	if h.storage == nil {
+		h.fail(w, http.StatusServiceUnavailable, "storage_unavailable", "File storage is not configured.", nil)
+		return "", false
+	}
 	limit := int64(maxKYCDocumentBytes)
 	r.Body = http.MaxBytesReader(w, r.Body, limit+1<<20)
 	if err := r.ParseMultipartForm(limit); err != nil {
@@ -697,26 +703,21 @@ func (h *Handler) storeKYCUpload(w http.ResponseWriter, r *http.Request, orgID, 
 		httputil.Error(w, http.StatusUnprocessableEntity, "invalid_document", "Document must be a JPEG, PNG, WEBP image or PDF.", nil)
 		return "", false
 	}
-	if err := os.MkdirAll(kycUploadDir, 0o750); err != nil {
-		h.fail(w, http.StatusInternalServerError, "upload_failed", "Unable to store file.", err)
+	if err := storage.ValidateUpload(detected, header.Filename, header.Size, limit, allowedKYCExtensions); err != nil {
+		h.fail(w, http.StatusUnprocessableEntity, "invalid_document", "Document type or size is not allowed.", err)
 		return "", false
 	}
-	ext := strings.ToLower(filepath.Ext(header.Filename))
-	name := orgID + nameInfix + "-" + strconv.FormatInt(time.Now().UnixNano(), 10) + ext
-	path := filepath.Join(kycUploadDir, name)
-	out, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o640)
+	objectID := uuid.NewString() + strings.TrimSpace(nameInfix)
+	key, err := storage.BuildKey("private/kyc/"+orgID, objectID, header.Filename, allowedKYCExtensions)
 	if err != nil {
-		h.fail(w, http.StatusInternalServerError, "upload_failed", "Unable to store file.", err)
+		h.fail(w, http.StatusUnprocessableEntity, "invalid_document", "Unable to name the uploaded document.", err)
 		return "", false
 	}
-	if _, err := io.Copy(out, file); err != nil {
-		_ = out.Close()
-		_ = os.Remove(path)
-		h.fail(w, http.StatusInternalServerError, "upload_failed", "Unable to store file.", err)
+	if _, err := h.storage.Put(r.Context(), key, file, detected, header.Size); err != nil {
+		h.fail(w, http.StatusBadGateway, "upload_failed", "Unable to store file.", err)
 		return "", false
 	}
-	_ = out.Close()
-	return filepath.ToSlash(path), true
+	return r2ObjectPrefix + key, true
 }
 
 func (h *Handler) ServeKYCDocument(w http.ResponseWriter, r *http.Request) {
@@ -735,10 +736,33 @@ func (h *Handler) ServeKYCDocument(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = kycStatus
+	h.auditKYCView(r, orgID, "document")
 	h.serveKYCDocumentPath(w, r, sub.IDDocumentURL)
 }
 
 func (h *Handler) serveKYCDocumentPath(w http.ResponseWriter, r *http.Request, docURL string) {
+	if strings.HasPrefix(docURL, r2ObjectPrefix) {
+		if h.storage == nil {
+			h.fail(w, http.StatusServiceUnavailable, "storage_unavailable", "File storage is not configured.", nil)
+			return
+		}
+		object, err := h.storage.Get(r.Context(), strings.TrimPrefix(docURL, r2ObjectPrefix))
+		if err != nil {
+			h.fail(w, http.StatusBadGateway, "download_failed", "Unable to load document.", err)
+			return
+		}
+		defer object.Body.Close()
+		if object.Info.ContentType != "" {
+			w.Header().Set("Content-Type", object.Info.ContentType)
+		}
+		if object.Info.Size > 0 {
+			w.Header().Set("Content-Length", strconv.FormatInt(object.Info.Size, 10))
+		}
+		_, _ = io.Copy(w, object.Body)
+		return
+	}
+	// Legacy local objects remain readable while cmd/migrate-uploads moves
+	// existing rows into R2. New uploads never use this branch.
 	clean := filepath.Clean(docURL)
 	if strings.Contains(clean, "..") || !strings.HasPrefix(filepath.ToSlash(clean), "uploads/kyc/") {
 		h.fail(w, http.StatusInternalServerError, "internal_error", "Stored document path is invalid.", errors.New("kyc path escape"))
@@ -749,10 +773,6 @@ func (h *Handler) serveKYCDocumentPath(w http.ResponseWriter, r *http.Request, d
 
 // maxLogoBytes caps branding logo uploads at 2MB.
 const maxLogoBytes = 2 << 20
-
-// logoUploadDir sits next to the KYC store: local disk, never served
-// publicly — only through the authenticated logo endpoint below.
-const logoUploadDir = "uploads/branding"
 
 var allowedLogoExtensions = map[string]bool{
 	".jpg": true, ".jpeg": true, ".png": true, ".webp": true,
@@ -809,28 +829,26 @@ func (h *Handler) UploadOrgLogo(w http.ResponseWriter, r *http.Request) {
 		httputil.Error(w, http.StatusUnprocessableEntity, "invalid_logo", "Logo must be a JPEG, PNG, or WEBP image.", nil)
 		return
 	}
-	if err := os.MkdirAll(logoUploadDir, 0o750); err != nil {
-		h.fail(w, http.StatusInternalServerError, "upload_failed", "Unable to store logo.", err)
+	if h.storage == nil {
+		h.fail(w, http.StatusServiceUnavailable, "storage_unavailable", "File storage is not configured.", nil)
 		return
 	}
-	ext := strings.ToLower(filepath.Ext(header.Filename))
-	name := orgID + "-" + strconv.FormatInt(time.Now().UnixNano(), 10) + ext
-	path := filepath.Join(logoUploadDir, name)
-	out, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o640)
+	if err := storage.ValidateUpload(detected, header.Filename, header.Size, maxLogoBytes, allowedLogoExtensions); err != nil {
+		h.fail(w, http.StatusUnprocessableEntity, "invalid_logo", "Logo type or size is not allowed.", err)
+		return
+	}
+	key, err := storage.BuildKey("public/branding", orgID, header.Filename, allowedLogoExtensions)
 	if err != nil {
-		h.fail(w, http.StatusInternalServerError, "upload_failed", "Unable to store logo.", err)
+		h.fail(w, http.StatusUnprocessableEntity, "invalid_logo", "Unable to name the uploaded logo.", err)
 		return
 	}
-	if _, err := io.Copy(out, file); err != nil {
-		_ = out.Close()
-		_ = os.Remove(path)
-		h.fail(w, http.StatusInternalServerError, "upload_failed", "Unable to store logo.", err)
+	if _, err := h.storage.Put(r.Context(), key, file, detected, header.Size); err != nil {
+		h.fail(w, http.StatusBadGateway, "upload_failed", "Unable to store logo.", err)
 		return
 	}
-	_ = out.Close()
-	org, err := h.service.SetOrgLogoURL(r.Context(), userID, orgID, filepath.ToSlash(path))
+	org, err := h.service.SetOrgLogoURL(r.Context(), userID, orgID, r2ObjectPrefix+key)
 	if err != nil {
-		_ = os.Remove(path)
+		_ = h.storage.Delete(r.Context(), key)
 		h.orgError(w, err, "save the logo")
 		return
 	}
@@ -866,6 +884,23 @@ func (h *Handler) ServeOrgLogo(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, loc, http.StatusFound)
 		return
 	}
+	if strings.HasPrefix(loc, r2ObjectPrefix) {
+		if h.storage == nil {
+			h.fail(w, http.StatusServiceUnavailable, "storage_unavailable", "File storage is not configured.", nil)
+			return
+		}
+		object, err := h.storage.Get(r.Context(), strings.TrimPrefix(loc, r2ObjectPrefix))
+		if err != nil {
+			h.fail(w, http.StatusBadGateway, "download_failed", "Unable to load the logo.", err)
+			return
+		}
+		defer object.Body.Close()
+		if object.Info.ContentType != "" {
+			w.Header().Set("Content-Type", object.Info.ContentType)
+		}
+		_, _ = io.Copy(w, object.Body)
+		return
+	}
 	clean := filepath.Clean(loc)
 	if strings.Contains(clean, "..") || !strings.HasPrefix(filepath.ToSlash(clean), "uploads/branding/") {
 		h.fail(w, http.StatusInternalServerError, "internal_error", "Stored logo path is invalid.", errors.New("logo path escape"))
@@ -888,6 +923,16 @@ func (h *Handler) auditAdmin(r *http.Request, action, targetType, targetID strin
 	}
 }
 
+func (h *Handler) auditKYCView(r *http.Request, orgID, kind string) {
+	claims, ok := middleware.ClaimsFromContext(r.Context())
+	if !ok {
+		return
+	}
+	if err := h.service.WriteAudit(r.Context(), claims.Subject, claims.Email, "kyc."+kind+".viewed", "organization", orgID, requestIP(r), nil, map[string]any{"kind": kind}); err != nil {
+		h.logger.Warn("KYC access audit failed", "org_id", orgID, "kind", kind, "error", err)
+	}
+}
+
 func requestIP(r *http.Request) string {
 	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
 		if idx := strings.Index(forwarded, ","); idx >= 0 {
@@ -901,6 +946,7 @@ func requestIP(r *http.Request) string {
 	}
 	return host
 }
+
 // All routes carry RequireAdmin; handlers use claimsIdentity (no org
 // membership needed) and record the reviewer's email on decisions.
 
@@ -1165,6 +1211,7 @@ func (h *Handler) ServeKYCSelfie(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = kycStatus
+	h.auditKYCView(r, orgID, "selfie")
 	h.serveKYCDocumentPath(w, r, sub.SelfieURL)
 }
 
@@ -1188,5 +1235,6 @@ func (h *Handler) AdminServeKYCSelfie(w http.ResponseWriter, r *http.Request) {
 		httputil.Error(w, http.StatusNotFound, "not_found", "No selfie photo.", nil)
 		return
 	}
+	h.auditKYCView(r, r.PathValue("orgID"), "selfie")
 	h.serveKYCDocumentPath(w, r, sub.SelfieURL)
 }

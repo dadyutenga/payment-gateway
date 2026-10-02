@@ -20,6 +20,7 @@ type Config struct {
 	Database DatabaseConfig
 	Auth     AuthConfig
 	Payments PaymentConfig
+	Storage  StorageConfig
 	CORS     CORSConfig
 	Security SecurityConfig
 }
@@ -84,6 +85,15 @@ type SecurityConfig struct {
 	// EncryptionKey is a base64-encoded 32-byte AES-256 key used to encrypt
 	// payment provider credentials at rest.
 	EncryptionKey string
+}
+
+type StorageConfig struct {
+	R2AccountID     string
+	R2AccessKeyID   string
+	R2SecretKey     string
+	R2Bucket        string
+	R2Endpoint      string
+	R2PublicBaseURL string
 }
 
 type PaymentConfig struct {
@@ -163,16 +173,24 @@ func Load() (Config, error) {
 			HealthTimeout:   mustDuration("DATABASE_HEALTH_TIMEOUT", "3s"),
 		},
 		Auth: AuthConfig{JWTSecret: strings.TrimSpace(os.Getenv("AUTH_JWT_SECRET")), TokenTTL: mustDuration("AUTH_TOKEN_TTL", "24h"), AllowPublicRegister: mustBool("AUTH_ALLOW_PUBLIC_REGISTER", true),
-			RequireEmailVerification: mustBool("AUTH_REQUIRE_EMAIL_VERIFICATION", true),
-			AdminJWTSecret:           strings.TrimSpace(os.Getenv("AUTH_ADMIN_JWT_SECRET")),
-			AdminTokenTTL:            mustDuration("AUTH_ADMIN_TOKEN_TTL", "4h"),
-			LoginRateLimitPerMin:     mustInt("AUTH_LOGIN_RATE_LIMIT_PER_MIN", 20),
+			RequireEmailVerification:  mustBool("AUTH_REQUIRE_EMAIL_VERIFICATION", true),
+			AdminJWTSecret:            strings.TrimSpace(os.Getenv("AUTH_ADMIN_JWT_SECRET")),
+			AdminTokenTTL:             mustDuration("AUTH_ADMIN_TOKEN_TTL", "4h"),
+			LoginRateLimitPerMin:      mustInt("AUTH_LOGIN_RATE_LIMIT_PER_MIN", 20),
 			AdminLoginRateLimitPerMin: mustInt("AUTH_ADMIN_LOGIN_RATE_LIMIT_PER_MIN", 5)},
 		CORS: CORSConfig{
 			AllowedOrigins: splitCSV(getEnv("CORS_ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:3000")),
 		},
 		Security: SecurityConfig{
 			EncryptionKey: strings.TrimSpace(os.Getenv("APP_ENCRYPTION_KEY")),
+		},
+		Storage: StorageConfig{
+			R2AccountID:     strings.TrimSpace(os.Getenv("R2_ACCOUNT_ID")),
+			R2AccessKeyID:   strings.TrimSpace(os.Getenv("R2_ACCESS_KEY_ID")),
+			R2SecretKey:     strings.TrimSpace(os.Getenv("R2_SECRET_ACCESS_KEY")),
+			R2Bucket:        getEnv("R2_BUCKET", "docs89"),
+			R2Endpoint:      strings.TrimRight(strings.TrimSpace(os.Getenv("R2_ENDPOINT")), "/"),
+			R2PublicBaseURL: strings.TrimRight(strings.TrimSpace(os.Getenv("R2_PUBLIC_BASE_URL")), "/"),
 		},
 		Payments: PaymentConfig{
 			PublicBaseURL:                  strings.TrimRight(getEnv("PAYMENTS_PUBLIC_BASE_URL", "http://localhost:8080"), "/"),
@@ -198,6 +216,9 @@ func Load() (Config, error) {
 			PayerHashSecret:                strings.TrimSpace(os.Getenv("ANALYTICS_PAYER_SECRET")),
 		},
 	}
+	if cfg.Storage.R2Endpoint == "" && cfg.Storage.R2AccountID != "" {
+		cfg.Storage.R2Endpoint = "https://" + cfg.Storage.R2AccountID + ".r2.cloudflarestorage.com"
+	}
 
 	var validationErrs []string
 	if cfg.Database.URL == "" {
@@ -205,6 +226,28 @@ func Load() (Config, error) {
 	}
 	if cfg.Security.EncryptionKey == "" {
 		validationErrs = append(validationErrs, "APP_ENCRYPTION_KEY is required")
+	}
+	if cfg.Storage.R2AccountID == "" {
+		validationErrs = append(validationErrs, "R2_ACCOUNT_ID is required")
+	}
+	if cfg.Storage.R2AccessKeyID == "" {
+		validationErrs = append(validationErrs, "R2_ACCESS_KEY_ID is required")
+	}
+	if cfg.Storage.R2SecretKey == "" {
+		validationErrs = append(validationErrs, "R2_SECRET_ACCESS_KEY is required")
+	}
+	if cfg.Storage.R2Bucket == "" {
+		validationErrs = append(validationErrs, "R2_BUCKET must not be empty")
+	}
+	if cfg.Storage.R2Endpoint == "" {
+		validationErrs = append(validationErrs, "R2_ENDPOINT could not be derived")
+	} else if parsed, err := url.ParseRequestURI(cfg.Storage.R2Endpoint); err != nil || parsed.Scheme != "https" || parsed.Host == "" {
+		validationErrs = append(validationErrs, "R2_ENDPOINT must be a valid https URL")
+	}
+	if cfg.Storage.R2PublicBaseURL != "" {
+		if parsed, err := url.ParseRequestURI(cfg.Storage.R2PublicBaseURL); err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			validationErrs = append(validationErrs, "R2_PUBLIC_BASE_URL must be a valid http(s) URL")
+		}
 	}
 	if len(cfg.Auth.JWTSecret) < 32 {
 		validationErrs = append(validationErrs, "AUTH_JWT_SECRET must be at least 32 characters")

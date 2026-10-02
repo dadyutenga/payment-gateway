@@ -16,6 +16,7 @@ import (
 	"lipago/internal/modules/orgs"
 	"lipago/internal/modules/payments/provider"
 	"lipago/internal/platform/middleware"
+	"lipago/internal/platform/storage"
 	"lipago/internal/shared/audit"
 	"lipago/internal/shared/httputil"
 )
@@ -27,6 +28,7 @@ type Handler struct {
 	audit        audit.Writer
 	maxBodyBytes int64
 	logger       *slog.Logger
+	storage      storage.Store
 }
 
 func NewHandler(service *Service, maxBodyBytes int64) *Handler {
@@ -41,6 +43,10 @@ func NewHandler(service *Service, maxBodyBytes int64) *Handler {
 // returned to clients (see fail).
 func (h *Handler) SetLogger(logger *slog.Logger) {
 	h.logger = logger
+}
+
+func (h *Handler) SetStorage(store storage.Store) {
+	h.storage = store
 }
 
 // SetOrgService wires the organization service used for merchant role

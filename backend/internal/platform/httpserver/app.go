@@ -18,6 +18,7 @@ import (
 	"lipago/internal/platform/database"
 	"lipago/internal/platform/middleware"
 	"lipago/internal/platform/observability"
+	"lipago/internal/platform/storage"
 	"lipago/internal/shared/httputil"
 
 	"github.com/jackc/pgx"
@@ -46,6 +47,16 @@ func New(ctx context.Context) (*App, error) {
 
 	db, err := database.NewPool(ctx, cfg.Database)
 	if err != nil {
+		return nil, err
+	}
+	fileStore, err := storage.NewR2(ctx, storage.R2Config{
+		AccessKeyID: cfg.Storage.R2AccessKeyID,
+		SecretKey:   cfg.Storage.R2SecretKey,
+		Bucket:      cfg.Storage.R2Bucket,
+		Endpoint:    cfg.Storage.R2Endpoint,
+	})
+	if err != nil {
+		db.Close()
 		return nil, err
 	}
 
@@ -108,10 +119,12 @@ func New(ctx context.Context) (*App, error) {
 	// concrete types.
 	paymentHandler := payments.NewHandler(paymentService, cfg.Payments.WebhookMaxBodyBytes)
 	paymentHandler.SetLogger(logger)
+	paymentHandler.SetStorage(fileStore)
 
 	orgRepo := orgs.NewPostgresRepository(db)
 	orgService := orgs.NewService(orgRepo, logger)
 	orgHandler := orgs.NewHandler(orgService, logger)
+	orgHandler.SetStorage(fileStore)
 	paymentHandler.SetOrgService(orgService)
 	paymentHandler.SetAuthService(authService)
 	paymentHandler.SetAuditWriter(pgAuditWriter{repo: orgRepo})
