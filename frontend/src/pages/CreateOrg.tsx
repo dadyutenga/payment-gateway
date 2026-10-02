@@ -1,5 +1,5 @@
 import { FormEvent, useState } from "react";
-import { Navigate, useNavigate } from "react-router-dom";
+import { Link, Navigate, useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Building2, HeartHandshake } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -7,14 +7,19 @@ import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
 import { toast } from "@/components/ui/sonner";
 import { createOrg, type AccountKind } from "@/lib/orgApi";
+import { getPendingBusinessName, getPendingDisplayName } from "@/lib/trackIntent";
 
-const CreateOrg = () => {
+const CreateOrg = ({ lockedKind }: { lockedKind?: AccountKind }) => {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const [kind, setKind] = useState<AccountKind>("merchant");
+  const [searchParams] = useSearchParams();
+  const trackParam = searchParams.get("track");
+  const locked: AccountKind | null =
+    lockedKind ?? (trackParam === "merchant" || trackParam === "creator" ? trackParam : null);
+  const [kind, setKind] = useState<AccountKind>(locked ?? "merchant");
   const [name, setName] = useState("");
-  const [businessName, setBusinessName] = useState("");
-  const [displayName, setDisplayName] = useState("");
+  const [businessName, setBusinessName] = useState(() => getPendingBusinessName());
+  const [displayName, setDisplayName] = useState(() => getPendingDisplayName());
   const [handle, setHandle] = useState("");
   const [bio, setBio] = useState("");
   const [creating, setCreating] = useState(false);
@@ -30,9 +35,10 @@ const CreateOrg = () => {
   const handleCreate = async (event: FormEvent) => {
     event.preventDefault();
     setCreating(true);
+    const effectiveKind = locked ?? kind;
     try {
       const org =
-        kind === "creator"
+        effectiveKind === "creator"
           ? await createOrg({
               name: name.trim(),
               account_kind: "creator",
@@ -42,10 +48,10 @@ const CreateOrg = () => {
             })
           : await createOrg({ name: name.trim(), business_name: businessName.trim() || undefined });
       toast.success(
-        kind === "creator" ? "Creator page created — you are its owner." : "Organization created — you are its owner.",
+        effectiveKind === "creator" ? "Creator page created — its sole owner is you. No team." : "Organization created — you are its owner.",
       );
       queryClient.invalidateQueries({ queryKey: ["orgs", "mine"] });
-      navigate(kind === "creator" ? `/onboarding/creator/${org.id}` : `/org/${org.id}/members`, { replace: true });
+      navigate(effectiveKind === "creator" ? `/onboarding/creator/${org.id}` : `/org/${org.id}/members`, { replace: true });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Unable to create organization.");
     } finally {
@@ -53,7 +59,7 @@ const CreateOrg = () => {
     }
   };
 
-  const isCreator = kind === "creator";
+  const isCreator = (locked ?? kind) === "creator";
 
   return (
     <div className="flex min-h-[70vh] items-center justify-center px-4">
@@ -71,6 +77,19 @@ const CreateOrg = () => {
               : "Organizations own apps, API keys, and members. You will be its owner."}
           </p>
 
+          {locked ? (
+            <p className="mt-4 rounded-lg bg-slate-100 px-3 py-2 text-xs text-slate-500">
+              {isCreator
+                ? "Creator setup — personal account, no team. Need a business workspace instead? "
+                : "Business setup — organization with team. Need a personal creator account instead? "}
+              <Link
+                to={isCreator ? "/onboarding/create-org?track=merchant" : "/onboarding/create-org?track=creator"}
+                className="font-medium text-blue-600 hover:underline"
+              >
+                {isCreator ? "Go to Merchant setup →" : "Go to Creator setup →"}
+              </Link>
+            </p>
+          ) : (
           <div className="mt-4 grid grid-cols-2 gap-2 rounded-lg bg-slate-100 p-1" role="tablist" aria-label="Account type">
             {(["merchant", "creator"] as AccountKind[]).map((k) => (
               <button
@@ -87,6 +106,7 @@ const CreateOrg = () => {
               </button>
             ))}
           </div>
+          )}
 
           <form onSubmit={handleCreate} className="mt-5 space-y-4">
             <div>

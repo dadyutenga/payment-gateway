@@ -14,6 +14,11 @@ import AdminOps from "@/pages/AdminOps";
 import AdminAudit from "@/pages/AdminAudit";
 import CustomerLayout from "@/pages/CustomerLayout";
 import SignIn from "@/pages/SignIn";
+import AuthChooser from "@/pages/AuthChooser";
+import MerchantLogin from "@/pages/MerchantLogin";
+import MerchantRegister from "@/pages/MerchantRegister";
+import CreatorLogin from "@/pages/CreatorLogin";
+import CreatorRegister from "@/pages/CreatorRegister";
 import AdminPayments from "@/pages/AdminPayments";
 import AdminPaymentApps from "@/pages/AdminPaymentApps";
 import AdminPaymentAppDetail from "@/pages/AdminPaymentAppDetail";
@@ -36,7 +41,15 @@ import MerchantAnalyticsPeakHours from "@/pages/MerchantAnalyticsPeakHours";
 import MerchantAnalyticsCustomers from "@/pages/MerchantAnalyticsCustomers";
 import MerchantAnalyticsFailures from "@/pages/MerchantAnalyticsFailures";
 import MerchantSettlements from "@/pages/MerchantSettlements";
-import { MerchantAnalyticsIndex, MerchantSettlementsIndex, MerchantTeamIndex } from "@/pages/MerchantAnalyticsIndex";
+import {
+  MerchantAnalyticsCustomersIndex,
+  MerchantAnalyticsFailuresIndex,
+  MerchantAnalyticsIndex,
+  MerchantAnalyticsMethodsIndex,
+  MerchantAnalyticsPeakHoursIndex,
+  MerchantSettlementsIndex,
+  MerchantTeamIndex,
+} from "@/pages/MerchantAnalyticsIndex";
 import CreateOrg from "@/pages/CreateOrg";
 import CreatorOnboarding from "@/pages/CreatorOnboarding";
 import CreatorSupport from "@/pages/CreatorSupport";
@@ -54,13 +67,18 @@ const App = () => (
       <Toaster richColors closeButton position="top-right" />
       <BrowserRouter>
         <Routes>
-          {/* Merchant (customer) space: /login + /register.
-              /signin + /signup are kept as aliases. Operators use
+          {/* Separate entry points — kind is chosen by WHICH PAGE, not a toggle.
+              /login + /register are chooser pages (old /signin + /signup aliases
+              kept as chooser too so bookmarks keep working). Operators use
               /admin/login (separate path, audience, session). */}
-          <Route path="/login" element={<SignIn />} />
-          <Route path="/signin" element={<SignIn />} />
-          <Route path="/register" element={<SignUp />} />
-          <Route path="/signup" element={<SignUp />} />
+          <Route path="/login" element={<AuthChooser mode="login" />} />
+          <Route path="/signin" element={<AuthChooser mode="login" />} />
+          <Route path="/register" element={<AuthChooser mode="register" />} />
+          <Route path="/signup" element={<AuthChooser mode="register" />} />
+          <Route path="/merchant/login" element={<MerchantLogin />} />
+          <Route path="/merchant/register" element={<MerchantRegister />} />
+          <Route path="/creator/login" element={<CreatorLogin />} />
+          <Route path="/creator/register" element={<CreatorRegister />} />
           <Route path="/admin/login" element={<SignIn admin />} />
           <Route
             path="/admin"
@@ -120,6 +138,26 @@ const App = () => (
             }
           >
             <Route index element={<CreateOrg />} />
+          </Route>
+          <Route
+            path="/merchant/setup"
+            element={
+              <MerchantRoute>
+                <CustomerLayout />
+              </MerchantRoute>
+            }
+          >
+            <Route index element={<CreateOrg lockedKind="merchant" />} />
+          </Route>
+          <Route
+            path="/creator/setup"
+            element={
+              <MerchantRoute>
+                <CustomerLayout />
+              </MerchantRoute>
+            }
+          >
+            <Route index element={<CreateOrg lockedKind="creator" />} />
           </Route>
           <Route
             path="/org/:orgId"
