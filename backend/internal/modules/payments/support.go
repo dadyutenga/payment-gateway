@@ -42,21 +42,7 @@ func (h *Handler) supportPageData(r *http.Request) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	payload := map[string]any{
-		"display_name":  data.Org.DisplayName,
-		"handle":        data.Org.Handle,
-		"bio":           data.Org.Bio,
-		"logo_url":      data.Org.LogoURL,
-		"primary_color": data.Org.PrimaryColor,
-		"category":      data.Category,
-		"currency":      "TZS",
-		"environment":   supportEnvironment(data.Org.KYCStatus),
-		"enabled":       false,
-		"min_amount":    "",
-		"max_amount":    "",
-		"links":         []any{},
-		"providers":     []string{},
-	}
+	payload := buildSupportPagePayload(data)
 	if !data.Enabled {
 		return payload, nil
 	}
@@ -89,6 +75,29 @@ func (h *Handler) supportPageData(r *http.Request) (map[string]any, error) {
 	payload["links"] = links
 	payload["providers"] = providers
 	return payload, nil
+}
+
+// buildSupportPagePayload renders the public, display-safe subset of a
+// creator page. Pure function so the no-leak guarantee is unit-testable:
+// the key set below is exhaustive — legal names, ID numbers, documents,
+// contact details, KYC state, and supporter messages can never appear
+// because they are never read here.
+func buildSupportPagePayload(data orgs.SupportPageData) map[string]any {
+	return map[string]any{
+		"display_name":  data.Org.DisplayName,
+		"handle":        data.Org.Handle,
+		"bio":           data.Org.Bio,
+		"logo_url":      data.Org.LogoURL,
+		"primary_color": data.Org.PrimaryColor,
+		"category":      data.Category,
+		"currency":      "TZS",
+		"environment":   supportEnvironment(data.Org.KYCStatus),
+		"enabled":       false,
+		"min_amount":    "",
+		"max_amount":    "",
+		"links":         []any{},
+		"providers":     []string{},
+	}
 }
 
 func (h *Handler) supportPublicError(w http.ResponseWriter, err error) {

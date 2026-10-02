@@ -853,11 +853,15 @@ type SupportPageData struct {
 
 // PublicCreatorSupport resolves a handle to its public page data. Unknown
 // handles and non-creator rows surface as not-found so the handle
-// namespace cannot be probed for merchant orgs.
+// namespace cannot be probed for merchant orgs. Suspended orgs also
+// 404: a support page must never solicit money for a frozen account.
 func (s *Service) PublicCreatorSupport(ctx context.Context, handle string) (SupportPageData, error) {
 	org, err := s.repo.GetOrganizationByHandle(ctx, handle)
 	if err != nil {
 		return SupportPageData{}, err
+	}
+	if org.Suspended {
+		return SupportPageData{}, ErrOrgNotFound
 	}
 	category := ""
 	if survey, found, err := s.repo.GetCreatorSurvey(ctx, org.ID); err != nil {

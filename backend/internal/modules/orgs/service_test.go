@@ -67,6 +67,7 @@ type fakeOrgRepository struct {
 	limitsDailyCap string
 	survey       *CreatorSurvey
 	support      *SupportSettings
+	suspendedHandle string
 }
 
 func orgKey(orgID, userID string) string { return orgID + "\x00" + userID }
@@ -90,7 +91,11 @@ func (r *fakeOrgRepository) SubmitCreatorKYC(_ context.Context, orgID string, in
 }
 
 func (r *fakeOrgRepository) GetOrganizationByHandle(_ context.Context, handle string) (Organization, error) {
-	return Organization{ID: "org_test", Handle: handle, AccountKind: AccountKindCreator}, nil
+	org := Organization{ID: "org_test", Handle: handle, AccountKind: AccountKindCreator}
+	if r.suspendedHandle == handle {
+		org.Suspended = true
+	}
+	return org, nil
 }
 
 func (r *fakeOrgRepository) UpsertCreatorSurvey(_ context.Context, orgID string, in CreatorSurveyInput) (CreatorSurvey, error) {

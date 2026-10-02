@@ -3,7 +3,7 @@ import { Outlet, useLocation } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
   Banknote, BarChart3, Boxes, ChevronsLeft, ChevronsRight, Clock,
-  CreditCard, Globe, KeyRound, LayoutDashboard, PieChart, Receipt, ScrollText,
+  CreditCard, Globe, HeartHandshake, KeyRound, LayoutDashboard, PieChart, Receipt, ScrollText,
   Settings, Terminal, Truck, Users, Wallet, XCircle,
 } from "lucide-react";
 import { signOut } from "@/lib/auth";
@@ -22,8 +22,7 @@ const orgMatch = (suffix: string) => (pathname: string) => {
   return !!m && (m[1] === suffix || m[1].startsWith(`${suffix}/`));
 };
 
-const NAV_GROUPS: SidebarNavGroup[] = [
-  {
+const NAV_GROUPS: SidebarNavGroup[] = [  {
     id: "overview", label: "Overview", icon: LayoutDashboard,
     items: [{ to: "/merchant", label: "Home", icon: LayoutDashboard, end: true }],
   },
@@ -62,6 +61,32 @@ const NAV_GROUPS: SidebarNavGroup[] = [
   {
     id: "team", label: "Team", icon: Users,
     items: [{ to: "/merchant/team", label: "Members", icon: Users, match: orgMatch("members") }],
+  },
+  {
+    id: "settings", label: "Settings", icon: Settings,
+    items: [{ to: "/merchant/settings", label: "Settings", icon: Settings, match: orgMatch("settings") }],
+  },
+];
+
+// Simplified creator nav (Part 6): Overview, My Page, Payments,
+// Payouts, Settings. No Members, no multi-app/developer/analytics
+// complexity by default (reachable by direct URL if ever needed).
+const CREATOR_NAV_GROUPS: SidebarNavGroup[] = [
+  {
+    id: "overview", label: "Overview", icon: LayoutDashboard,
+    items: [{ to: "/merchant", label: "Home", icon: LayoutDashboard, end: true }],
+  },
+  {
+    id: "page", label: "My Page", icon: HeartHandshake,
+    items: [{ to: "/merchant/page", label: "My Page", icon: HeartHandshake }],
+  },
+  {
+    id: "payments", label: "Payments", icon: Receipt,
+    items: [{ to: "/merchant/payments", label: "Payments", icon: Receipt }],
+  },
+  {
+    id: "money", label: "Money", icon: Wallet,
+    items: [{ to: "/merchant/withdrawals", label: "Payouts", icon: Banknote }],
   },
   {
     id: "settings", label: "Settings", icon: Settings,
@@ -111,9 +136,9 @@ const CustomerLayout = () => {
   const orgsQuery = useQuery({ queryKey: ["orgs", "mine"], queryFn: () => listMyOrgs(), staleTime: 60_000, retry: false });
   const activeOrg = (orgsQuery.data ?? []).find((o) => o.status === "active") ?? orgsQuery.data?.[0];
   const isCreator = (activeOrg?.account_kind ?? "merchant") === "creator";
-  // Creator accounts are single-member: hide the Team group (member
-  // management stays reachable via direct URL for a future manager add).
-  const groups = isCreator ? NAV_GROUPS.filter((g) => g.id !== "team") : NAV_GROUPS;
+  // Creator accounts get the simplified track nav (single-member: no
+  // Team group at all; no multi-app/developer/analytics complexity).
+  const groups = isCreator ? CREATOR_NAV_GROUPS : NAV_GROUPS;
   const statusBadge = !activeOrg ? undefined : activeOrg.kyc_status === "verified" ? (
     <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-emerald-700">
       Live

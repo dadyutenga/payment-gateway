@@ -126,6 +126,13 @@ func TestPublicCreatorSupport(t *testing.T) {
 	if err != nil || data.Enabled {
 		t.Fatalf("expected disabled page, got %+v err=%v", data, err)
 	}
+
+	// Suspended org: clean not-found even though the handle exists.
+	frozen := creatorOrgRepo()
+	frozen.suspendedHandle = "frozen.creator"
+	if _, err := NewService(frozen, nil).PublicCreatorSupport(ctx, "frozen.creator"); !errors.Is(err, ErrOrgNotFound) {
+		t.Fatalf("expected ErrOrgNotFound for suspended handle, got %v", err)
+	}
 }
 
 func TestEnsureSupportPageSeedsDefaults(t *testing.T) {

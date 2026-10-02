@@ -2,6 +2,8 @@ package payments
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -253,5 +255,60 @@ func TestCreatorWithdrawalDestinationEnforcement(t *testing.T) {
 		DestinationType: "bank", DestinationDetails: map[string]any{"account_number": "123"},
 	}); err != ErrInsufficientBalance {
 		t.Fatalf("merchant withdrawal must skip destination checks, got %v", err)
+	}
+}
+
+func TestSupportEnvironmentIsSandboxUntilVerified(t *testing.T) {
+	// The survey never appears here by design: only kyc_status decides
+	// the environment, so a "high volume" survey answer with unverified
+	// KYC still yields sandbox-only treatment.
+	for _, status := range []string{"", "pending", "submitted", "rejected"} {
+		if got := supportEnvironment(status); got != "sandbox" {
+			t.Errorf("supportEnvironment(%q) = %q, want sandbox", status, got)
+		}
+	}
+	if got := supportEnvironment("verified"); got != "live" {
+		t.Errorf("supportEnvironment(verified) = %q, want live", got)
+	}
+}
+
+func TestSupportPagePayloadLeaksNothing(t *testing.T) {
+	payload := buildSupportPagePayload(orgs.SupportPageData{
+		Org: orgs.Organization{
+			DisplayName: "Amina Creates", Handle: "amina.creates", Bio: "Videos",
+			BusinessName: "Should never appear", KYCStatus: "submitted",
+		},
+		Category: "content_creator",
+		Settings: orgs.SupportSettings{
+			Links: []orgs.SupportLink{{ID: "l1", Label: "Coffee", AmountMode: "fixed", Amount: "5000", Active: true}},
+		},
+		Enabled: true,
+	})
+	allowed := map[string]bool{
+		"display_name": true, "handle": true, "bio": true, "logo_url": true,
+		"primary_color": true, "category": true, "currency": true,
+		"environment": true, "enabled": true, "min_amount": true,
+		"max_amount": true, "links": true, "providers": true,
+	}
+	for key := range payload {
+		if !allowed[key] {
+			t.Errorf("public payload key %q is not allowlisted", key)
+		}
+	}
+	// Serialize and assert no sensitive substring can ride along in any
+	// nested value (legal name, ID, contact, KYC state, messages, wall).
+	raw, _ := json.Marshal(payload)
+	lowered := strings.ToLower(string(raw))
+	for _, leak := range []string{
+		"should never appear", "full_name", "id_number", "id_document",
+		"selfie", "tin", "submitted", "supporter_message", "wall",
+		"email", "phone",
+	} {
+		if strings.Contains(lowered, leak) {
+			t.Errorf("public payload leaks %q: %s", leak, raw)
+		}
+	}
+	if payload["environment"] != "sandbox" {
+		t.Errorf("unverified page environment = %v, want sandbox", payload["environment"])
 	}
 }
