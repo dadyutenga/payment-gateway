@@ -99,6 +99,12 @@ func (h *Handler) orgError(w http.ResponseWriter, err error, action string) {
 		httputil.Error(w, http.StatusConflict, "kind_switch_locked", "Account kind can only be switched before verification is submitted — contact support.", nil)
 	case errors.Is(err, ErrAccountKindImmutable):
 		httputil.Error(w, http.StatusConflict, "kind_immutable", "Only creator accounts can switch to the merchant track.", nil)
+	case errors.Is(err, ErrKindSwitchDisabled):
+		httputil.Error(w, http.StatusGone, "kind_immutable", "Account kind cannot be switched — business and creator accounts are fully separate. Contact support if you signed up on the wrong track.", nil)
+	case errors.Is(err, ErrNotCreatorOrg):
+		httputil.Error(w, http.StatusForbidden, "wrong_kind", "This action is only available to creator accounts.", nil)
+	case errors.Is(err, ErrNotMerchantOrg):
+		httputil.Error(w, http.StatusForbidden, "wrong_kind", "Team management is only available to business accounts — creator accounts are personal.", nil)
 	default:
 		h.fail(w, http.StatusInternalServerError, "internal_error", "Unable to complete the organization request.", err)
 	}
@@ -174,6 +180,91 @@ func (h *Handler) CreateOrganization(w http.ResponseWriter, r *http.Request) {
 	}
 	if vErrs.Any() {
 		httputil.Error(w, http.StatusUnprocessableEntity, "validation_failed", "Please check your organization input.", vErrs)
+		return
+	}
+	member, err := h.service.CheckOrgPermission(r.Context(), userID, created.ID, PermRead)
+	if err != nil {
+		h.fail(w, http.StatusInternalServerError, "create_failed", "Unable to create organization.", err)
+		return
+	}
+	httputil.JSON(w, http.StatusCreated, map[string]any{"data": OrganizationWithRole{Organization: created, Role: member.Role, Status: member.Status}})
+}
+
+type createMerchantOrgHTTPInput struct {
+	Name         string `json:"name"`
+	BusinessName string `json:"business_name"`
+}
+
+// CreateMerchantOrganization creates a business-track org. The kind comes
+// from the endpoint called, never from a client-supplied field, so a
+// client cannot flip kind post-hoc via a shared payload.
+func (h *Handler) CreateMerchantOrganization(w http.ResponseWriter, r *http.Request) {
+	userID, ok := claimsUserID(w, r)
+	if !ok {
+		return
+	}
+	var in createMerchantOrgHTTPInput
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		httputil.Error(w, http.StatusBadRequest, "invalid_request", "Unable to decode request body.", nil)
+		return
+	}
+	created, vErrs, err := h.service.CreateOrganization(r.Context(), userID, in.Name, in.BusinessName)
+	if vErrs.Any() {
+		httputil.Error(w, http.StatusUnprocessableEntity, "validation_failed", "Please check your organization input.", vErrs)
+		return
+	}
+	if err != nil {
+		if errors.Is(err, ErrSingleOrg) {
+			httputil.Error(w, http.StatusConflict, "single_org", "Each account belongs to a single organization.", nil)
+			return
+		}
+		h.fail(w, http.StatusInternalServerError, "create_failed", "Unable to create organization.", err)
+		return
+	}
+	member, err := h.service.CheckOrgPermission(r.Context(), userID, created.ID, PermRead)
+	if err != nil {
+		h.fail(w, http.StatusInternalServerError, "create_failed", "Unable to create organization.", err)
+		return
+	}
+	httputil.JSON(w, http.StatusCreated, map[string]any{"data": OrganizationWithRole{Organization: created, Role: member.Role, Status: member.Status}})
+}
+
+type createCreatorOrgHTTPInput struct {
+	Name        string `json:"name"`
+	DisplayName string `json:"display_name"`
+	Handle      string `json:"handle"`
+	Bio         string `json:"bio"`
+}
+
+// CreateCreatorOrganization creates a personal creator-track account. The
+// kind comes from the endpoint called, never from a client-supplied field.
+func (h *Handler) CreateCreatorOrganization(w http.ResponseWriter, r *http.Request) {
+	userID, ok := claimsUserID(w, r)
+	if !ok {
+		return
+	}
+	var in createCreatorOrgHTTPInput
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		httputil.Error(w, http.StatusBadRequest, "invalid_request", "Unable to decode request body.", nil)
+		return
+	}
+	created, vErrs, err := h.service.CreateCreatorOrganization(r.Context(), userID, in.Name, CreatorOrgInput{
+		DisplayName: in.DisplayName, Handle: in.Handle, Bio: in.Bio,
+	})
+	if vErrs.Any() {
+		httputil.Error(w, http.StatusUnprocessableEntity, "validation_failed", "Please check your organization input.", vErrs)
+		return
+	}
+	if err != nil {
+		if errors.Is(err, ErrSingleOrg) {
+			httputil.Error(w, http.StatusConflict, "single_org", "Each account belongs to a single organization.", nil)
+			return
+		}
+		if errors.Is(err, ErrHandleTaken) {
+			httputil.Error(w, http.StatusConflict, "handle_taken", "That handle is already taken — try another.", nil)
+			return
+		}
+		h.fail(w, http.StatusInternalServerError, "create_failed", "Unable to create organization.", err)
 		return
 	}
 	member, err := h.service.CheckOrgPermission(r.Context(), userID, created.ID, PermRead)
@@ -514,22 +605,16 @@ func (h *Handler) GetCreatorSurvey(w http.ResponseWriter, r *http.Request) {
 	httputil.JSON(w, http.StatusOK, map[string]any{"data": survey})
 }
 
-// SwitchCreatorToMerchant moves a pre-KYC creator org to the merchant
-// track (the survey's "API integration" escape hatch). Refused once any
-// KYC submission exists.
+// SwitchCreatorToMerchant is disabled: business and creator accounts are
+// fully separate tracks with no self-service conversion (each has its own
+// KYC). The route stays registered for one deploy cycle so stale clients
+// get a clear 410 instead of a bare 404; kind changes, if ever needed,
+// are support-assisted directly in the database.
 func (h *Handler) SwitchCreatorToMerchant(w http.ResponseWriter, r *http.Request) {
-	userID, ok := claimsUserID(w, r)
-	if !ok {
+	if _, ok := claimsUserID(w, r); !ok {
 		return
 	}
-	org, err := h.service.SwitchCreatorToMerchant(r.Context(), userID, r.PathValue("orgID"))
-	if err != nil {
-		h.orgError(w, err, "switch account kind")
-		return
-	}
-	h.auditAdmin(r, "org.switch_kind", "organization", org.ID,
-		map[string]any{"account_kind": "creator"}, map[string]any{"account_kind": "merchant"})
-	httputil.JSON(w, http.StatusOK, map[string]any{"data": org})
+	h.orgError(w, ErrKindSwitchDisabled, "switch account kind")
 }
 
 // ListKYCAttempts returns the submit/decide history for the Settings
@@ -650,7 +735,7 @@ func (h *Handler) UploadKYCSelfie(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	orgID := r.PathValue("orgID")
-	if _, err := h.service.CheckOrgPermission(r.Context(), userID, orgID, PermManageOrg); err != nil {
+	if _, err := h.service.RequireCreatorOrg(r.Context(), userID, orgID, PermManageOrg); err != nil {
 		h.orgError(w, err, "upload the selfie photo")
 		return
 	}
@@ -1194,14 +1279,15 @@ func (h *Handler) AdminServeKYCDocument(w http.ResponseWriter, r *http.Request) 
 	h.serveKYCDocumentPath(w, r, sub.IDDocumentURL)
 }
 
-// ServeKYCSelfie streams the creator's v1 selfie to active members.
+// ServeKYCSelfie streams the creator's v1 selfie to active members of
+// creator accounts only — merchants get 403, never an empty photo.
 func (h *Handler) ServeKYCSelfie(w http.ResponseWriter, r *http.Request) {
 	userID, ok := claimsUserID(w, r)
 	if !ok {
 		return
 	}
 	orgID := r.PathValue("orgID")
-	if _, err := h.service.CheckOrgPermission(r.Context(), userID, orgID, PermRead); err != nil {
+	if _, err := h.service.RequireCreatorOrg(r.Context(), userID, orgID, PermRead); err != nil {
 		h.orgError(w, err, "view the selfie photo")
 		return
 	}

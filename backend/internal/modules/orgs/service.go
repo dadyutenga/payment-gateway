@@ -1015,9 +1015,13 @@ func (s *Service) EnsureSupportPage(ctx context.Context, userID, orgID, appID st
 	return updated, err
 }
 
-// RequireCreatorOrg enforces a membership permission and the creator
-// track in one call for support-page management routes.
-func (s *Service) RequireCreatorOrg(ctx context.Context, userID, orgID string, perm Permission) (Organization, error) {
+// RequireAccountKind enforces a membership permission and the account
+// track in one call — the reusable kind gate for all kind-specific
+// endpoints. Shared infrastructure (payment processing, ledger, webhook
+// delivery, admin review) skips it; kind-specific endpoints 403 the wrong
+// kind instead of silently no-op-ing. Kind is always resolved from the
+// database here, never trusted from the client.
+func (s *Service) RequireAccountKind(ctx context.Context, userID, orgID string, perm Permission, kinds ...string) (Organization, error) {
 	if _, err := s.CheckOrgPermission(ctx, userID, orgID, perm); err != nil {
 		return Organization{}, err
 	}
@@ -1025,10 +1029,36 @@ func (s *Service) RequireCreatorOrg(ctx context.Context, userID, orgID string, p
 	if err != nil {
 		return Organization{}, err
 	}
-	if org.AccountKind != AccountKindCreator {
+	kind := strings.TrimSpace(org.AccountKind)
+	if kind == "" {
+		kind = AccountKindMerchant
+	}
+	for _, want := range kinds {
+		if kind == want {
+			return org, nil
+		}
+	}
+	if len(kinds) == 1 && kinds[0] == AccountKindCreator {
 		return Organization{}, ErrNotCreatorOrg
 	}
-	return org, nil
+	if len(kinds) == 1 && kinds[0] == AccountKindMerchant {
+		return Organization{}, ErrNotMerchantOrg
+	}
+	return Organization{}, ErrNotCreatorOrg
+}
+
+// RequireCreatorOrg enforces a membership permission and the creator
+// track in one call for support-page management routes.
+func (s *Service) RequireCreatorOrg(ctx context.Context, userID, orgID string, perm Permission) (Organization, error) {
+	return s.RequireAccountKind(ctx, userID, orgID, perm, AccountKindCreator)
+}
+
+// RequireMerchantOrg enforces a membership permission and the merchant
+// (business) track in one call for team-management routes. Creator
+// accounts are personal single-member workspaces — invites, role changes
+// and removals are refused with 403, never silently accepted.
+func (s *Service) RequireMerchantOrg(ctx context.Context, userID, orgID string, perm Permission) (Organization, error) {
+	return s.RequireAccountKind(ctx, userID, orgID, perm, AccountKindMerchant)
 }
 
 // GetKYCSubmission returns the evidence row plus live org status for the
@@ -1060,6 +1090,9 @@ func (s *Service) ListMembers(ctx context.Context, userID, orgID string) ([]OrgM
 
 func (s *Service) InviteMember(ctx context.Context, actorUserID, orgID, email string, role Role) (OrgMember, error) {
 	if _, err := s.CheckOrgPermission(ctx, actorUserID, orgID, PermManageMembers); err != nil {
+		return OrgMember{}, err
+	}
+	if _, err := s.RequireMerchantOrg(ctx, actorUserID, orgID, PermManageMembers); err != nil {
 		return OrgMember{}, err
 	}
 	if _, err := ParseRole(string(role)); err != nil {
@@ -1096,6 +1129,9 @@ func (s *Service) ChangeMemberRole(ctx context.Context, actorUserID, orgID, targ
 	if _, err := s.CheckOrgPermission(ctx, actorUserID, orgID, PermManageMembers); err != nil {
 		return OrgMember{}, err
 	}
+	if _, err := s.RequireMerchantOrg(ctx, actorUserID, orgID, PermManageMembers); err != nil {
+		return OrgMember{}, err
+	}
 	if _, err := ParseRole(string(role)); err != nil {
 		return OrgMember{}, err
 	}
@@ -1117,6 +1153,9 @@ func (s *Service) ChangeMemberRole(ctx context.Context, actorUserID, orgID, targ
 
 func (s *Service) RemoveMember(ctx context.Context, actorUserID, orgID, targetUserID string) error {
 	if _, err := s.CheckOrgPermission(ctx, actorUserID, orgID, PermManageMembers); err != nil {
+		return err
+	}
+	if _, err := s.RequireMerchantOrg(ctx, actorUserID, orgID, PermManageMembers); err != nil {
 		return err
 	}
 	if targetUserID == actorUserID {

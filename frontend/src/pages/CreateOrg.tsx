@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
 import { toast } from "@/components/ui/sonner";
-import { createOrg, type AccountKind } from "@/lib/orgApi";
+import { createCreatorOrg, createMerchantOrg, type AccountKind } from "@/lib/orgApi";
 import { getPendingBusinessName, getPendingDisplayName } from "@/lib/trackIntent";
 
 const CreateOrg = ({ lockedKind }: { lockedKind?: AccountKind }) => {
@@ -39,14 +39,13 @@ const CreateOrg = ({ lockedKind }: { lockedKind?: AccountKind }) => {
     try {
       const org =
         effectiveKind === "creator"
-          ? await createOrg({
+          ? await createCreatorOrg({
               name: name.trim(),
-              account_kind: "creator",
               display_name: displayName.trim(),
               handle: handle.trim().toLowerCase(),
               bio: bio.trim() || undefined,
             })
-          : await createOrg({ name: name.trim(), business_name: businessName.trim() || undefined });
+          : await createMerchantOrg({ name: name.trim(), business_name: businessName.trim() || undefined });
       toast.success(
         effectiveKind === "creator" ? "Creator page created — its sole owner is you. No team." : "Organization created — you are its owner.",
       );

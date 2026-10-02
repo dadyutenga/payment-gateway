@@ -319,7 +319,7 @@ func (h *Handler) supportOrgError(w http.ResponseWriter, err error, action strin
 	case errors.Is(err, orgs.ErrForbidden):
 		httputil.Error(w, http.StatusForbidden, "forbidden", "Your role doesn't allow "+action+".", nil)
 	case errors.Is(err, orgs.ErrNotCreatorOrg):
-		httputil.Error(w, http.StatusUnprocessableEntity, "validation_failed", "Support pages are for creator accounts only.", nil)
+		httputil.Error(w, http.StatusForbidden, "wrong_kind", "Support pages are for creator accounts only.", nil)
 	case errors.Is(err, orgs.ErrSupportPageDisabled):
 		httputil.Error(w, http.StatusConflict, "support_not_enabled", "This creator is not accepting support yet.", nil)
 	default:

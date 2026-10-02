@@ -145,8 +145,15 @@ export async function createOrg(input: { name: string; business_name?: string; a
   return (await request<OrganizationWithRole>("/api/v1/orgs", { method: "POST", body: input })).data;
 }
 
+// Server-set kind endpoints: the kind comes from the URL, never from a
+// client-supplied field. New UI uses these; the shared POST /api/v1/orgs
+// stays for one deploy cycle so stale clients keep working.
+export async function createMerchantOrg(input: { name: string; business_name?: string }) {
+  return (await request<OrganizationWithRole>("/api/v1/orgs/merchant", { method: "POST", body: input })).data;
+}
+
 export async function createCreatorOrg(input: { name: string; display_name: string; handle: string; bio?: string }) {
-  return createOrg({ ...input, account_kind: "creator" });
+  return (await request<OrganizationWithRole>("/api/v1/orgs/creator", { method: "POST", body: input })).data;
 }
 
 export async function getOrg(orgId: string) {
@@ -478,6 +485,8 @@ export async function saveCreatorSurvey(orgId: string, input: CreatorSurveyInput
   return (await request<CreatorSurvey>(`/api/v1/orgs/${orgId}/creator-survey`, { method: "PUT", body: input })).data;
 }
 
+// Deprecated: kind switching is disabled server-side (410). Kept one
+// deploy cycle so stale callers get the server's message, not a crash.
 export async function switchCreatorToMerchant(orgId: string) {
   return (await request<Organization>(`/api/v1/orgs/${orgId}/switch-kind`, { method: "POST" })).data;
 }

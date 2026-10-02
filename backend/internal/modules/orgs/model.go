@@ -214,6 +214,8 @@ var (
 	ErrHandleReserved = errors.New("that handle is reserved — pick another")
 	ErrSupportPageDisabled = errors.New("this creator is not accepting support yet")
 	ErrNotCreatorOrg = errors.New("support pages are for creator accounts only")
+	ErrNotMerchantOrg = errors.New("team management is for business accounts only")
+	ErrKindSwitchDisabled = errors.New("account kind cannot be switched — business and creator accounts are fully separate")
 )
 
 // KYCAttempt is one immutable history row: every submit and every admin
@@ -263,13 +265,18 @@ type KYCQueueItem struct {
 	TIN             string    `json:"tin"`
 	FullName        string    `json:"full_name,omitempty"`
 	IDType          string    `json:"id_type,omitempty"`
+	IDNumber        string    `json:"id_number,omitempty"`
 	// Dob is shown to reviewers so the 18+ gate can be audited.
 	Dob             string    `json:"dob,omitempty"`
+	// Category is the creator's self-reported survey category (empty for
+	// merchants) so reviewers see which track each file belongs to.
+	Category        string    `json:"category,omitempty"`
 	// Creator survey risk signal (segmentation only — never raises limits).
 	SuggestedRiskTier  string `json:"suggested_risk_tier,omitempty"`
 	ExpectedVolumeBand string `json:"expected_volume_band,omitempty"`
 	ExpectedTxnBand    string `json:"expected_txn_band,omitempty"`
 	HasDocument     bool      `json:"has_document"`
+	HasBackDocument bool      `json:"has_back_document"`
 	HasSelfie       bool      `json:"has_selfie"`
 	SubmittedAt     time.Time `json:"submitted_at"`
 	RejectionReason string    `json:"rejection_reason,omitempty"`

@@ -1,4 +1,5 @@
 import { FormEvent, useState } from "react";
+import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
@@ -6,7 +7,6 @@ import { toast } from "@/components/ui/sonner";
 import {
   getCreatorSurvey,
   saveCreatorSurvey,
-  switchCreatorToMerchant,
   type CreatorSurvey,
   type Organization,
 } from "@/lib/orgApi";
@@ -78,7 +78,6 @@ const CreatorSurveyForm = ({
   const [volume, setVolume] = useState(initial?.expected_volume_band ?? "");
   const [txn, setTxn] = useState(initial?.expected_txn_band ?? "");
   const [saving, setSaving] = useState(false);
-  const [switching, setSwitching] = useState(false);
 
   const showDisplayName = !initial;
   const effectiveDisplayName = showDisplayName ? displayName : (org.display_name ?? "");
@@ -107,20 +106,6 @@ const CreatorSurveyForm = ({
       toast.error(errorMessage(err, "Unable to save your answers."));
     } finally {
       setSaving(false);
-    }
-  };
-
-  const handleSwitch = async () => {
-    if (!window.confirm("Switch this page to a business account? Your creator profile and survey answers will be cleared. This is only possible before verification is submitted.")) return;
-    setSwitching(true);
-    try {
-      await switchCreatorToMerchant(org.id);
-      toast.success("Switched to a business account — continue with business onboarding.");
-      window.location.assign(`/org/${org.id}/members`);
-    } catch (err) {
-      toast.error(errorMessage(err, "Unable to switch account kind."));
-    } finally {
-      setSwitching(false);
     }
   };
 
@@ -196,11 +181,11 @@ const CreatorSurveyForm = ({
         {wantsAPI && (
           <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-900">
             Building your own app with our API? The <strong>business / developer track</strong> fits better (API keys,
-            webhooks, team roles). You can switch before verification is submitted —{" "}
-            <button type="button" onClick={handleSwitch} disabled={switching} className="font-medium underline disabled:opacity-50">
-              {switching ? "Switching…" : "switch to a business account"}
-            </button>
-            . Your creator profile and answers will be cleared.
+            webhooks, team roles). Business and creator accounts are fully separate —{" "}
+            <Link to="/merchant/register" className="font-medium underline">
+              create a separate business account
+            </Link>
+            .
           </div>
         )}
       </div>

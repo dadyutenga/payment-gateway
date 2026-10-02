@@ -315,6 +315,8 @@ func New(ctx context.Context) (*App, error) {
 		}
 	}), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
 	mux.Handle("GET /api/v1/orgs/{orgID}", middleware.Chain(http.HandlerFunc(orgHandler.GetOrganization), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("POST /api/v1/orgs/merchant", middleware.Chain(http.HandlerFunc(orgHandler.CreateMerchantOrganization), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("POST /api/v1/orgs/creator", middleware.Chain(http.HandlerFunc(orgHandler.CreateCreatorOrganization), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
 	mux.Handle("PATCH /api/v1/orgs/{orgID}", middleware.Chain(http.HandlerFunc(orgHandler.UpdateOrganization), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
 	mux.Handle("DELETE /api/v1/orgs/{orgID}", middleware.Chain(http.HandlerFunc(orgHandler.DeleteOrganization), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
 	mux.Handle("GET /api/v1/orgs/{orgID}/members", middleware.Chain(http.HandlerFunc(orgHandler.ListMembers), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
