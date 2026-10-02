@@ -88,8 +88,53 @@ const AdminOrgDetail = () => {
             </CardContent></Card>
           </div>
 
-          {detail.survey && (
+          {(detail.org as { account_kind?: string }).account_kind === "creator" ? (
             <Card className="mt-4"><CardContent className="p-4">
+              <h3 className="text-sm font-bold text-slate-800">
+                Current individual verification <Badge variant="outline" className="border-fuchsia-300 bg-fuchsia-50 text-fuchsia-700">creator</Badge>
+              </h3>
+              {!detail.kyc ? (
+                <p className="mt-2 text-sm text-slate-500">Never submitted.</p>
+              ) : (
+                <dl className="mt-2 space-y-1 text-sm">
+                  <div className="flex justify-between gap-2"><dt className="text-slate-500">Full legal name</dt><dd className="font-medium">{detail.kyc.full_name || "—"}</dd></div>
+                  <div className="flex justify-between gap-2"><dt className="text-slate-500">ID type</dt><dd className="font-medium">{detail.kyc.id_type || "—"}</dd></div>
+                  <div className="flex justify-between gap-2"><dt className="text-slate-500">ID number</dt><dd className="font-mono text-xs">{detail.kyc.id_number || "—"}</dd></div>
+                  <div className="flex justify-between gap-2"><dt className="text-slate-500">Date of birth</dt><dd className="font-medium">{detail.kyc.dob || "—"}</dd></div>
+                  <div className="flex justify-between gap-2"><dt className="text-slate-500">ID front</dt><dd className="text-xs">{detail.kyc.id_document_url ? "on file" : "missing"}</dd></div>
+                  <div className="flex justify-between gap-2"><dt className="text-slate-500">ID back</dt><dd className="text-xs">{detail.kyc.id_document_back_url ? "on file" : "not provided"}</dd></div>
+                  <div className="flex justify-between gap-2"><dt className="text-slate-500">Selfie</dt><dd className="text-xs">{detail.kyc.selfie_url ? "on file" : "missing"}</dd></div>
+                  <div className="flex justify-between gap-2"><dt className="text-slate-500">Submitted</dt><dd className="text-xs">{formatDate(detail.kyc.submitted_at)}</dd></div>
+                  {detail.kyc.rejection_reason && (
+                    <div className="flex justify-between gap-2"><dt className="text-slate-500">Rejection reason</dt><dd className="max-w-xs text-right text-xs text-rose-600">{detail.kyc.rejection_reason}</dd></div>
+                  )}
+                </dl>
+              )}
+              <Link to="/admin/kyc" className="mt-3 inline-block text-xs text-blue-600 hover:underline">Open in KYC review →</Link>
+            </CardContent></Card>
+          ) : (
+            <Card className="mt-4"><CardContent className="p-4">
+              <h3 className="text-sm font-bold text-slate-800">
+                Current business verification <Badge variant="outline" className="border-emerald-300 bg-emerald-50 text-emerald-700">business</Badge>
+              </h3>
+              {!detail.kyc ? (
+                <p className="mt-2 text-sm text-slate-500">Never submitted.</p>
+              ) : (
+                <dl className="mt-2 space-y-1 text-sm">
+                  <div className="flex justify-between gap-2"><dt className="text-slate-500">Business name</dt><dd className="font-medium">{detail.kyc.business_name || "—"}</dd></div>
+                  <div className="flex justify-between gap-2"><dt className="text-slate-500">TIN</dt><dd className="font-mono text-xs">{detail.kyc.tin || "—"}</dd></div>
+                  <div className="flex justify-between gap-2"><dt className="text-slate-500">Document</dt><dd className="text-xs">{detail.kyc.id_document_url ? "on file" : "missing"}</dd></div>
+                  <div className="flex justify-between gap-2"><dt className="text-slate-500">Submitted</dt><dd className="text-xs">{formatDate(detail.kyc.submitted_at)}</dd></div>
+                  {detail.kyc.rejection_reason && (
+                    <div className="flex justify-between gap-2"><dt className="text-slate-500">Rejection reason</dt><dd className="max-w-xs text-right text-xs text-rose-600">{detail.kyc.rejection_reason}</dd></div>
+                  )}
+                </dl>
+              )}
+              <Link to="/admin/kyc" className="mt-3 inline-block text-xs text-blue-600 hover:underline">Open in KYC review →</Link>
+            </CardContent></Card>
+          )}
+
+          {detail.survey && (            <Card className="mt-4"><CardContent className="p-4">
               <h3 className="text-sm font-bold text-slate-800">
                 Onboarding survey{" "}
                 <Badge variant={detail.survey.suggested_risk_tier === "high" ? "destructive" : "secondary"}>

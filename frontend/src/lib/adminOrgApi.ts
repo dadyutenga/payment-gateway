@@ -92,11 +92,14 @@ export type KYCQueueItem = {
   tin: string;
   full_name?: string;
   id_type?: string;
+  id_number?: string;
+  category?: string;
   dob?: string;
   suggested_risk_tier?: string;
   expected_volume_band?: string;
   expected_txn_band?: string;
   has_document: boolean;
+  has_back_document?: boolean;
   has_selfie?: boolean;
   submitted_at: string;
   rejection_reason?: string;

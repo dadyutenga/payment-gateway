@@ -45,6 +45,8 @@ const AdminKYCReview = () => {
     staleTime: 15_000,
   });
   const items = queueQuery.data ?? [];
+  const [kindFilter, setKindFilter] = useState<"all" | "merchant" | "creator">("all");
+  const visible = items.filter((item) => kindFilter === "all" || (item.account_kind ?? "merchant") === kindFilter);
 
   const [actingOrgId, setActingOrgId] = useState<string | null>(null);
   const [rejectItem, setRejectItem] = useState<KYCQueueItem | null>(null);
@@ -146,24 +148,30 @@ const AdminKYCReview = () => {
       <div>
         <h2 className="text-2xl font-bold text-slate-900">KYC review</h2>
         <p className="mt-1 text-sm text-slate-500">
-          Approve or reject organization verification. Approval unlocks live API keys and live payments.
+          Approve or reject verification — business KYC for merchant accounts, individual KYC (ID + selfie) for creator accounts. Approval unlocks live payments.
         </p>
       </div>
 
-      <div className="mt-4 flex gap-1.5">
+      <div className="mt-4 flex flex-wrap gap-1.5">
         {STATUS_TABS.map((tab) => (
           <Button key={tab} size="sm" variant={status === tab ? "default" : "outline"} onClick={() => setStatus(tab)}>
             {tab}
+          </Button>
+        ))}
+        <span className="mx-1 inline-block w-px self-stretch bg-slate-200" aria-hidden />
+        {(["all", "merchant", "creator"] as const).map((kind) => (
+          <Button key={kind} size="sm" variant={kindFilter === kind ? "secondary" : "ghost"} onClick={() => setKindFilter(kind)}>
+            {kind === "all" ? "both tracks" : kind === "merchant" ? "business" : "creator"}
           </Button>
         ))}
       </div>
 
       {queueQuery.isLoading ? (
         <Skeleton className="mt-4 h-48 w-full" />
-      ) : items.length === 0 ? (
+      ) : visible.length === 0 ? (
         <Card className="mt-4">
           <CardContent className="p-10 text-center text-sm text-slate-500">
-            Nothing in the {status} queue.
+            Nothing in the {status} queue{kindFilter !== "all" ? ` for ${kindFilter} accounts` : ""}.
           </CardContent>
         </Card>
       ) : (
@@ -181,17 +189,17 @@ const AdminKYCReview = () => {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {items.map((item) => (
+                {visible.map((item) => (
                   <TableRow key={item.org_id}>
                     <TableCell>
                       <p className="text-sm font-semibold text-slate-900">{item.org_name}</p>
-                      <p className="text-xs text-slate-400">{item.slug} · <Badge variant="secondary">{item.kyc_status}</Badge>{item.account_kind === "creator" ? " · creator" : ""}{item.suggested_risk_tier && item.suggested_risk_tier !== "standard" ? (<> · <Badge variant={item.suggested_risk_tier === "high" ? "destructive" : "outline"}>{item.suggested_risk_tier} risk</Badge></>) : null}</p>
+                      <p className="text-xs text-slate-400">{item.slug} · <Badge variant="secondary">{item.kyc_status}</Badge>{item.account_kind === "creator" ? (<> · <Badge variant="outline" className="border-fuchsia-300 bg-fuchsia-50 text-fuchsia-700">creator</Badge></>) : (<> · <Badge variant="outline" className="border-emerald-300 bg-emerald-50 text-emerald-700">business</Badge></>)}{item.category ? <> · <span className="text-slate-500">{item.category.replace(/_/g, " ")}</span> : null}{item.suggested_risk_tier && item.suggested_risk_tier !== "standard" ? (<> · <Badge variant={item.suggested_risk_tier === "high" ? "destructive" : "outline"}>{item.suggested_risk_tier} risk</Badge></>) : null}</p>
                       {item.rejection_reason && (
                         <p className="mt-0.5 text-xs text-rose-600">Rejected: {item.rejection_reason}</p>
                       )}
                     </TableCell>
                     <TableCell className="text-xs text-slate-600">
-                      {item.account_kind === "creator" ? (<>{item.full_name || "—"}<br /><span className="text-slate-400">{item.id_type || "ID"} on file{item.dob ? ` · born ${item.dob}` : ""}</span></>) : (<>{item.business_name || "—"}<br /><span className="text-slate-400">TIN {item.tin || "—"}</span></>)}
+                      {item.account_kind === "creator" ? (<>{item.full_name || "—"}<br /><span className="text-slate-400">{item.id_type || "ID"}{item.id_number ? ` · ${item.id_number}` : ""}{item.dob ? ` · born ${item.dob}` : ""}</span></>) : (<>{item.business_name || "—"}<br /><span className="text-slate-400">TIN {item.tin || "—"}</span></>)}
                     </TableCell>
                     <TableCell className="text-xs text-slate-600">
                       {item.owner_name || item.owner_email || "—"}
@@ -202,13 +210,14 @@ const AdminKYCReview = () => {
                     <TableCell>
                       {item.has_document ? (
                         <Button size="sm" variant="outline" disabled={viewingDocId === item.org_id} onClick={() => handleViewDocument(item)}>
-                          <FileText className="h-3.5 w-3.5 mr-1" /> {viewingDocId === item.org_id ? "Loading..." : "View"}
+                          <FileText className="h-3.5 w-3.5 mr-1" /> {viewingDocId === item.org_id ? "Loading..." : item.account_kind === "creator" ? "ID front" : "View"}
                         </Button>
                       ) : (
                         <span className="text-xs text-slate-400">none</span>
                       )}
                       {item.account_kind === "creator" && (
-                        <div className="mt-1">
+                        <div className="mt-1 space-y-1">
+                          <p className="text-xs text-slate-400">ID back: {item.has_back_document ? "on file" : "not provided"}</p>
                           {item.has_selfie ? (
                             <Button size="sm" variant="outline" disabled={viewingSelfieId === item.org_id} onClick={() => handleViewSelfie(item)}>
                               <FileText className="h-3.5 w-3.5 mr-1" /> {viewingSelfieId === item.org_id ? "Loading..." : "Selfie"}

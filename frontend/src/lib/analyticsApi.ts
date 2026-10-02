@@ -182,10 +182,15 @@ export type NegativeBalance = {
 export type AdminOrgDetail = {
   org: {
     id: string; name: string; slug: string; kyc_status: string;
+    account_kind?: string; display_name?: string; handle?: string;
     business_name?: string; tin?: string; live_max_txn_amount?: string; live_daily_volume_cap?: string;
   };
   members: { user_id: string; email: string; full_name?: string; phone?: string; role: string; status: string }[];
-  kyc?: { business_name: string; tin: string; submitted_at: string; reviewed_by?: string; reviewed_at?: string; rejection_reason?: string };
+  kyc?: {
+    business_name: string; tin: string; submitted_at: string; reviewed_by?: string; reviewed_at?: string; rejection_reason?: string;
+    full_name?: string; id_type?: string; id_number?: string; dob?: string;
+    id_document_url?: string; id_document_back_url?: string; selfie_url?: string;
+  };
   attempts: { id: string; status: string; created_at: string; reviewed_by?: string; rejection_reason?: string }[];
   survey?: {
     category: string; category_other?: string; referral_source: string; use_cases: string[];
