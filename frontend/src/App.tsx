@@ -2,7 +2,7 @@ import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/sonner";
 import AdminRoute from "@/components/AdminRoute";
-import MerchantRoute from "@/components/MerchantRoute";
+import TrackRoute, { AuthOnly } from "@/components/TrackRoute";
 import AdminLayout from "@/pages/AdminLayout";
 import AdminDashboard from "@/pages/AdminDashboard";
 import AdminOrgDetail from "@/pages/AdminOrgDetail";
@@ -12,7 +12,8 @@ import AdminAnalyticsMerchants from "@/pages/AdminAnalyticsMerchants";
 import AdminAnalyticsFailures from "@/pages/AdminAnalyticsFailures";
 import AdminOps from "@/pages/AdminOps";
 import AdminAudit from "@/pages/AdminAudit";
-import CustomerLayout from "@/pages/CustomerLayout";
+import MerchantLayout from "@/pages/MerchantLayout";
+import CreatorLayout from "@/pages/CreatorLayout";
 import SignIn from "@/pages/SignIn";
 import AuthChooser from "@/pages/AuthChooser";
 import MerchantLogin from "@/pages/MerchantLogin";
@@ -27,9 +28,14 @@ import AdminPaymentProviders from "@/pages/AdminPaymentProviders";
 import AdminKYCReview from "@/pages/AdminKYCReview";
 import MerchantApps from "@/pages/MerchantApps";
 import MerchantAppDetail from "@/pages/MerchantAppDetail";
-import MerchantHome from "@/pages/MerchantHome";
+import MerchantDashboard from "@/pages/MerchantDashboard";
+import MerchantPayments from "@/pages/MerchantPayments";
 import MyPage from "@/pages/MyPage";
-import PaymentsRoute from "@/pages/PaymentsRoute";
+import CreatorOverview from "@/pages/CreatorOverview";
+import CreatorPayments from "@/pages/CreatorPayments";
+import CreatorPayouts from "@/pages/CreatorPayouts";
+import CreatorSettingsPage from "@/pages/CreatorSettingsPage";
+import MerchantSettingsPage from "@/pages/MerchantSettingsPage";
 import MerchantWithdrawals from "@/pages/MerchantWithdrawals";
 import MerchantWebhooks from "@/pages/MerchantWebhooks";
 import MerchantApiKeys from "@/pages/MerchantApiKeys";
@@ -54,8 +60,7 @@ import CreateOrg from "@/pages/CreateOrg";
 import CreatorOnboarding from "@/pages/CreatorOnboarding";
 import CreatorSupport from "@/pages/CreatorSupport";
 import OrgMembers from "@/pages/OrgMembers";
-import OrgSettings from "@/pages/OrgSettings";
-import SignUp from "@/pages/SignUp";
+import { OrgSettingsRouter, OrgVerifyRouter } from "@/pages/OrgRouteGate";
 import OnboardingKYC from "@/pages/OnboardingKYC";
 import Welcome from "@/pages/Welcome";
 
@@ -103,19 +108,20 @@ const App = () => (
             <Route path="payments/providers" element={<AdminPaymentProviders />} />
             <Route path="kyc" element={<AdminKYCReview />} />
           </Route>
+          {/* Merchant workspace: kind-guarded shell (emerald). Creators
+              landing here are redirected to /creator with a notice. */}
           <Route
             path="/merchant"
             element={
-              <MerchantRoute>
-                <CustomerLayout />
-              </MerchantRoute>
+              <TrackRoute kind="merchant">
+                <MerchantLayout />
+              </TrackRoute>
             }
           >
-            <Route index element={<MerchantHome />} />
-            <Route path="page" element={<MyPage />} />
+            <Route index element={<MerchantDashboard />} />
             <Route path="apps" element={<MerchantApps />} />
             <Route path="apps/:id" element={<MerchantAppDetail />} />
-            <Route path="payments" element={<PaymentsRoute />} />
+            <Route path="payments" element={<MerchantPayments />} />
             <Route path="withdrawals" element={<MerchantWithdrawals />} />
             <Route path="webhooks" element={<MerchantWebhooks />} />
             <Route path="api-keys" element={<MerchantApiKeys />} />
@@ -129,22 +135,41 @@ const App = () => (
             <Route path="team" element={<MerchantTeamIndex />} />
             <Route path="settings" element={<MerchantSettings />} />
           </Route>
+          {/* Creator workspace: kind-guarded shell (fuchsia). Merchants
+              landing here are redirected to /merchant with a notice. */}
+          <Route
+            path="/creator"
+            element={
+              <TrackRoute kind="creator">
+                <CreatorLayout />
+              </TrackRoute>
+            }
+          >
+            <Route index element={<CreatorOverview />} />
+            <Route path="page" element={<MyPage />} />
+            <Route path="payments" element={<CreatorPayments />} />
+            <Route path="payouts" element={<CreatorPayouts />} />
+            <Route path="settings" element={<CreatorSettingsPage />} />
+          </Route>
+          {/* Legacy generic setup (kept one cycle): still offers the
+              Business|Creator choice. New flows use the locked track
+              setups below. */}
           <Route
             path="/onboarding/create-org"
             element={
-              <MerchantRoute>
-                <CustomerLayout />
-              </MerchantRoute>
+              <AuthOnly>
+                <div className="min-h-screen bg-slate-50 py-10">
+                  <CreateOrg />
+                </div>
+              </AuthOnly>
             }
-          >
-            <Route index element={<CreateOrg />} />
-          </Route>
+          />
           <Route
             path="/merchant/setup"
             element={
-              <MerchantRoute>
-                <CustomerLayout />
-              </MerchantRoute>
+              <TrackRoute kind="merchant">
+                <MerchantLayout />
+              </TrackRoute>
             }
           >
             <Route index element={<CreateOrg lockedKind="merchant" />} />
@@ -152,23 +177,46 @@ const App = () => (
           <Route
             path="/creator/setup"
             element={
-              <MerchantRoute>
-                <CustomerLayout />
-              </MerchantRoute>
+              <TrackRoute kind="creator">
+                <CreatorLayout />
+              </TrackRoute>
             }
           >
             <Route index element={<CreateOrg lockedKind="creator" />} />
           </Route>
+          {/* Track verification entries. */}
+          <Route
+            path="/merchant/verify/:orgId"
+            element={
+              <TrackRoute kind="merchant">
+                <MerchantLayout />
+              </TrackRoute>
+            }
+          >
+            <Route index element={<OnboardingKYC lockedKind="merchant" />} />
+          </Route>
+          <Route
+            path="/creator/verify/:orgId"
+            element={
+              <TrackRoute kind="creator">
+                <CreatorLayout />
+              </TrackRoute>
+            }
+          >
+            <Route index element={<OnboardingKYC lockedKind="creator" />} />
+          </Route>
+          {/* Legacy org deep links (kept one cycle). Members/analytics/
+              settlements are merchant-only; settings/verification resolve
+              to the matching track. */}
           <Route
             path="/org/:orgId"
             element={
-              <MerchantRoute>
-                <CustomerLayout />
-              </MerchantRoute>
+              <TrackRoute kind="merchant">
+                <MerchantLayout />
+              </TrackRoute>
             }
           >
             <Route path="members" element={<OrgMembers />} />
-            <Route path="settings" element={<OrgSettings />} />
             <Route path="analytics" element={<MerchantAnalyticsOverview />} />
             <Route path="analytics/methods" element={<MerchantAnalyticsMethods />} />
             <Route path="analytics/peak-hours" element={<MerchantAnalyticsPeakHours />} />
@@ -177,21 +225,22 @@ const App = () => (
             <Route path="settlements" element={<MerchantSettlements />} />
           </Route>
           <Route
-            path="/onboarding/kyc/:orgId"
+            path="/org/:orgId/settings"
             element={
-              <MerchantRoute>
-                <CustomerLayout />
-              </MerchantRoute>
+              <AuthOnly>
+                <MerchantLayout />
+              </AuthOnly>
             }
           >
-            <Route index element={<OnboardingKYC />} />
+            <Route index element={<OrgSettingsRouter />} />
           </Route>
+          <Route path="/onboarding/kyc/:orgId" element={<OrgVerifyRouter />} />
           <Route
             path="/onboarding/creator/:orgId"
             element={
-              <MerchantRoute>
-                <CustomerLayout />
-              </MerchantRoute>
+              <TrackRoute kind="creator">
+                <CreatorLayout />
+              </TrackRoute>
             }
           >
             <Route index element={<CreatorOnboarding />} />

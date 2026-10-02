@@ -38,12 +38,34 @@ func (h *Handler) orgMember(w http.ResponseWriter, r *http.Request, orgID string
 
 // scoped pins Params to the caller's org (+ optional app_id validated to
 // belong to that org) and reads the environment toggle (live default).
+// Merchant track only — creator accounts use scopedCreator and their own
+// /api/v1/creator/* analytics endpoints instead.
 func (h *Handler) scoped(w http.ResponseWriter, r *http.Request, p Params) (Params, orgs.OrgMember, string, bool) {
+	return h.scopedForKind(w, r, p, orgs.AccountKindMerchant)
+}
+
+// scopedCreator pins Params exactly like scoped but enforces the creator
+// track — the gate for /api/v1/creator/orgs/* analytics endpoints.
+func (h *Handler) scopedCreator(w http.ResponseWriter, r *http.Request, p Params) (Params, orgs.OrgMember, string, bool) {
+	return h.scopedForKind(w, r, p, orgs.AccountKindCreator)
+}
+
+func (h *Handler) scopedForKind(w http.ResponseWriter, r *http.Request, p Params, kind string) (Params, orgs.OrgMember, string, bool) {
 	orgID := strings.TrimSpace(r.PathValue("orgID"))
 	member, ok := h.orgMember(w, r, orgID, orgs.PermRead, "view analytics")
 	if !ok {
 		return p, member, "", false
 	}
+	if h.orgs == nil {
+		h.fail(w, http.StatusInternalServerError, "internal_error", "Organization service is not configured.", nil)
+		return p, member, "", false
+	}
+	org, err := h.orgs.RequireAccountKind(r.Context(), member.UserID, orgID, orgs.PermRead, kind)
+	if err != nil {
+		httputil.Error(w, http.StatusForbidden, "wrong_kind", "This analytics view belongs to the other workspace — use your matching dashboard instead.", nil)
+		return p, member, "", false
+	}
+	_ = org
 	env := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("environment")))
 	if env == "" {
 		env = "live"

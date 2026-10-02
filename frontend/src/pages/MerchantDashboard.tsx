@@ -79,7 +79,7 @@ const MerchantDashboard = () => {
         <div className="flex items-center gap-2">
           {org && org.kyc_status !== "verified" && (
             <Button size="sm" variant="outline" asChild>
-              <Link to={`/onboarding/kyc/${org.id}`}>Verify organization <ArrowRight className="h-3.5 w-3.5 ml-1" /></Link>
+              <Link to={`/merchant/verify/${org.id}`}>Verify organization <ArrowRight className="h-3.5 w-3.5 ml-1" /></Link>
             </Button>
           )}
           <Button size="sm" asChild>

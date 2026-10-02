@@ -302,6 +302,33 @@ func New(ctx context.Context) (*App, error) {
 	mux.Handle("GET /api/v1/merchant/orgs/{orgID}/payout-destination", middleware.Chain(http.HandlerFunc(paymentHandler.GetPayoutDestination), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
 	mux.Handle("POST /api/v1/merchant/orgs/{orgID}/payout-destination", middleware.Chain(http.HandlerFunc(paymentHandler.SavePayoutDestination), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
 
+	// ---- Creator money plane: distinct /api/v1/creator/* endpoints for
+	// personal creator workspaces. Same ledger/order/withdrawal service
+	// core as the merchant track; each handler enforces the creator track
+	// first (merchants get 403 wrong_kind). No API keys, webhook
+	// endpoints, or delivery logs — creators have no Developers surface.
+	creatorAuth := middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)
+	mux.Handle("GET /api/v1/creator/apps", middleware.Chain(http.HandlerFunc(paymentHandler.CreatorListMyApps), creatorAuth))
+	mux.Handle("GET /api/v1/creator/apps/{id}/balance", middleware.Chain(http.HandlerFunc(paymentHandler.CreatorGetAppBalance), creatorAuth))
+	mux.Handle("GET /api/v1/creator/apps/{id}/ledger", middleware.Chain(http.HandlerFunc(paymentHandler.CreatorListLedgerEntries), creatorAuth))
+	mux.Handle("GET /api/v1/creator/apps/{id}/orders", middleware.Chain(http.HandlerFunc(paymentHandler.CreatorSearchOrders), creatorAuth))
+	mux.Handle("GET /api/v1/creator/apps/{id}/withdrawals", middleware.Chain(http.HandlerFunc(paymentHandler.CreatorListWithdrawals), creatorAuth))
+	mux.Handle("POST /api/v1/creator/apps/{id}/withdrawals", middleware.Chain(http.HandlerFunc(paymentHandler.CreatorCreateWithdrawal), creatorAuth))
+	mux.Handle("POST /api/v1/creator/apps/{id}/withdrawals/{withdrawalID}/approve", middleware.Chain(http.HandlerFunc(paymentHandler.CreatorApproveWithdrawal), creatorAuth))
+	mux.Handle("POST /api/v1/creator/apps/{id}/withdrawals/{withdrawalID}/reject", middleware.Chain(http.HandlerFunc(paymentHandler.CreatorRejectWithdrawal), creatorAuth))
+	mux.Handle("GET /api/v1/creator/orgs/{orgID}/limits-usage", middleware.Chain(http.HandlerFunc(paymentHandler.CreatorOrgLimitsUsage), creatorAuth))
+	// Creator support-page + payout-destination management under the
+	// creator namespace (same creator-gated handlers; the /merchant/
+	// paths above stay for one deploy cycle so stale clients keep working).
+	mux.Handle("POST /api/v1/creator/orgs/{orgID}/support-page/enable", middleware.Chain(http.HandlerFunc(paymentHandler.EnableSupportPage), creatorAuth))
+	mux.Handle("GET /api/v1/creator/orgs/{orgID}/support-settings", middleware.Chain(http.HandlerFunc(paymentHandler.GetSupportSettings), creatorAuth))
+	mux.Handle("PUT /api/v1/creator/orgs/{orgID}/support-settings", middleware.Chain(http.HandlerFunc(paymentHandler.UpdateSupportSettings), creatorAuth))
+	mux.Handle("GET /api/v1/creator/orgs/{orgID}/payout-destination", middleware.Chain(http.HandlerFunc(paymentHandler.GetPayoutDestination), creatorAuth))
+	mux.Handle("POST /api/v1/creator/orgs/{orgID}/payout-destination", middleware.Chain(http.HandlerFunc(paymentHandler.SavePayoutDestination), creatorAuth))
+	// Creator analytics: overview + supporters only (same rollup core).
+	mux.Handle("GET /api/v1/creator/orgs/{orgID}/analytics/overview", middleware.Chain(http.HandlerFunc(analyticsHandler.CreatorOverview), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+	mux.Handle("GET /api/v1/creator/orgs/{orgID}/analytics/supporters", middleware.Chain(http.HandlerFunc(analyticsHandler.CreatorSupporters), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)))
+
 	// ---- Organizations & roles (session-authenticated; role checks run
 	// inside the handlers/services against the member's own row) ----
 	mux.Handle("/api/v1/orgs", middleware.Chain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

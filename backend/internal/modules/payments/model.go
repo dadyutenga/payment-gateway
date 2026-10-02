@@ -72,6 +72,7 @@ const (
 	IdempotencyEndpointOrdersCreate              = "payments.orders.create"
 	IdempotencyEndpointAdminWithdrawalsCreate    = "admin.withdrawals.create"
 	IdempotencyEndpointMerchantWithdrawalsCreate = "merchant.withdrawals.create"
+	IdempotencyEndpointCreatorWithdrawalsCreate  = "creator.withdrawals.create"
 )
 
 // IdempotencyRecord is one stored key. A NULL response (Completed false)

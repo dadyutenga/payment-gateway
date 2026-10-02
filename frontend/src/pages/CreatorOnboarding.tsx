@@ -59,7 +59,7 @@ const CreatorOnboarding = () => {
             <p className="font-medium text-slate-800">Answers saved ✓</p>
             <p className="mt-1">You can change them anytime under Settings → Survey. Next step is ID verification.</p>
             <div className="mt-4 flex gap-2">
-              <Button onClick={() => navigate(`/onboarding/kyc/${orgId}`)}>Continue to verification</Button>
+              <Button onClick={() => navigate(`/creator/verify/${orgId}`)}>Continue to verification</Button>
               <Button variant="outline" onClick={() => navigate(`/org/${orgId}/settings`)}>Back to settings</Button>
             </div>
           </CardContent>

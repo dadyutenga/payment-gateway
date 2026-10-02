@@ -3,7 +3,7 @@ import { Outlet, useLocation } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
   Banknote, BarChart3, Boxes, ChevronsLeft, ChevronsRight, Clock,
-  CreditCard, Globe, HeartHandshake, KeyRound, LayoutDashboard, PieChart, Receipt, ScrollText,
+  CreditCard, Globe, KeyRound, LayoutDashboard, PieChart, Receipt, ScrollText,
   Settings, Terminal, Truck, Users, Wallet, XCircle,
 } from "lucide-react";
 import { signOut } from "@/lib/auth";
@@ -11,6 +11,7 @@ import { listMyOrgs } from "@/lib/orgApi";
 import SandboxModeBanner from "@/components/SandboxModeBanner";
 import Sidebar, { type SidebarNavGroup } from "@/components/Sidebar";
 import SpaceTopbar from "@/components/SpaceTopbar";
+import { TrackNoticeToast } from "@/components/TrackRoute";
 
 const COLLAPSED_KEY = "lipago_sidebar_merchant_collapsed";
 const EXPAND_KEY = "lipago_nav_merchant";
@@ -22,7 +23,10 @@ const orgMatch = (suffix: string) => (pathname: string) => {
   return !!m && (m[1] === suffix || m[1].startsWith(`${suffix}/`));
 };
 
-const NAV_GROUPS: SidebarNavGroup[] = [  {
+// Merchant workspace nav: Overview, Payments, Money, Developers,
+// Analytics, Team, Settings. Business-only surface.
+const NAV_GROUPS: SidebarNavGroup[] = [
+  {
     id: "overview", label: "Overview", icon: LayoutDashboard,
     items: [{ to: "/merchant", label: "Home", icon: LayoutDashboard, end: true }],
   },
@@ -68,35 +72,9 @@ const NAV_GROUPS: SidebarNavGroup[] = [  {
   },
 ];
 
-// Simplified creator nav (Part 6): Overview, My Page, Payments,
-// Payouts, Settings. No Members, no multi-app/developer/analytics
-// complexity by default (reachable by direct URL if ever needed).
-const CREATOR_NAV_GROUPS: SidebarNavGroup[] = [
-  {
-    id: "overview", label: "Overview", icon: LayoutDashboard,
-    items: [{ to: "/merchant", label: "Home", icon: LayoutDashboard, end: true }],
-  },
-  {
-    id: "page", label: "My Page", icon: HeartHandshake,
-    items: [{ to: "/merchant/page", label: "My Page", icon: HeartHandshake }],
-  },
-  {
-    id: "payments", label: "Payments", icon: Receipt,
-    items: [{ to: "/merchant/payments", label: "Payments", icon: Receipt }],
-  },
-  {
-    id: "money", label: "Money", icon: Wallet,
-    items: [{ to: "/merchant/withdrawals", label: "Payouts", icon: Banknote }],
-  },
-  {
-    id: "settings", label: "Settings", icon: Settings,
-    items: [{ to: "/merchant/settings", label: "Settings", icon: Settings, match: orgMatch("settings") }],
-  },
-];
-
-// Merchant (customer) space layout: sidebar navigation, slim top bar with
-// sandbox/live status and user menu. Never renders admin links.
-const CustomerLayout = () => {
+// Merchant workspace shell: emerald business identity. Never renders
+// creator or admin links.
+const MerchantLayout = () => {
   const location = useLocation();
   const [collapsed, setCollapsed] = useState(() => {
     try {
@@ -135,10 +113,6 @@ const CustomerLayout = () => {
   // with SandboxModeBanner — one network call).
   const orgsQuery = useQuery({ queryKey: ["orgs", "mine"], queryFn: () => listMyOrgs(), staleTime: 60_000, retry: false });
   const activeOrg = (orgsQuery.data ?? []).find((o) => o.status === "active") ?? orgsQuery.data?.[0];
-  const isCreator = (activeOrg?.account_kind ?? "merchant") === "creator";
-  // Creator accounts get the simplified track nav (single-member: no
-  // Team group at all; no multi-app/developer/analytics complexity).
-  const groups = isCreator ? CREATOR_NAV_GROUPS : NAV_GROUPS;
   const statusBadge = !activeOrg ? undefined : activeOrg.kyc_status === "verified" ? (
     <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-emerald-700">
       Live
@@ -151,17 +125,17 @@ const CustomerLayout = () => {
 
   const brand = (
     <>
-      <Wallet className="h-5 w-5" />
+      <Wallet className="h-5 w-5 text-emerald-600" />
       LipaGO
       <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-emerald-700">
-        {isCreator ? "Creator" : "Merchant"}
+        Merchant
       </span>
     </>
   );
 
   const sidebar = (
     <Sidebar
-      groups={groups}
+      groups={NAV_GROUPS}
       accent="merchant"
       spaceBadge={brand}
       collapsed={collapsed}
@@ -182,8 +156,9 @@ const CustomerLayout = () => {
 
   return (
     <div className="min-h-screen bg-slate-50 lg:flex">
+      <TrackNoticeToast />
       <aside
-        className={`sticky top-0 hidden h-screen shrink-0 transition-[width] lg:block ${
+        className={`sticky top-0 hidden h-screen shrink-0 border-t-4 border-emerald-500 transition-[width] lg:block ${
           collapsed ? "w-16" : "w-64"
         }`}
       >
@@ -197,7 +172,7 @@ const CustomerLayout = () => {
             onClick={() => setDrawerOpen(false)}
             aria-hidden
           />
-          <aside className="absolute inset-y-0 left-0 w-72 max-w-[85vw] shadow-xl">
+          <aside className="absolute inset-y-0 left-0 w-72 max-w-[85vw] border-t-4 border-emerald-500 shadow-xl">
             {sidebar}
           </aside>
         </div>
@@ -208,7 +183,7 @@ const CustomerLayout = () => {
           onMenu={() => setDrawerOpen(true)}
           brand={brand}
           statusBadge={statusBadge}
-          userLabel="Account"
+          userLabel="Business account"
           userLinks={[{ to: "/merchant/settings", label: "Settings" }]}
           onSignOut={() => {
             signOut();
@@ -216,7 +191,7 @@ const CustomerLayout = () => {
           }}
         />
         <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-6 sm:px-6">
-          <SandboxModeBanner />
+          <SandboxModeBanner track="merchant" />
           <Outlet />
         </main>
       </div>
@@ -224,4 +199,4 @@ const CustomerLayout = () => {
   );
 };
 
-export default CustomerLayout;
+export default MerchantLayout;

@@ -97,8 +97,11 @@ func requestIP(r *http.Request) string {
 }
 
 // requireOrgRole resolves the caller's active role for the path app and
-// enforces one permission from the central matrix (orgs.Can). The app id
-// always comes from the verified route parameter, never client input.
+// enforces one permission from the central matrix (orgs.Can) plus the
+// merchant track — every /api/v1/merchant/apps/* handler funnels through
+// here, so creator accounts get 403 wrong_kind instead of reaching
+// business money movement. The app id always comes from the verified
+// route parameter, never client input.
 // Returns the caller user id for handlers that need it.
 func (h *Handler) requireOrgRole(w http.ResponseWriter, r *http.Request, appID string, perm orgs.Permission) (string, bool) {
 	claims, ok := middleware.ClaimsFromContext(r.Context())
@@ -111,13 +114,17 @@ func (h *Handler) requireOrgRole(w http.ResponseWriter, r *http.Request, appID s
 		httputil.Error(w, http.StatusInternalServerError, "internal_error", "Merchant access is not configured.", nil)
 		return "", false
 	}
-	if _, err := h.orgs.CheckAppPermission(r.Context(), claims.Subject, appID, perm); err != nil {
-		if errors.Is(err, orgs.ErrNotOrgMember) {
+	if _, err := h.orgs.RequireMerchantApp(r.Context(), claims.Subject, appID, perm); err != nil {
+		if errors.Is(err, orgs.ErrNotOrgMember) || errors.Is(err, orgs.ErrOrgNotFound) {
 			httputil.Error(w, http.StatusForbidden, "forbidden", "You don't have access to this app.", nil)
 			return "", false
 		}
 		if errors.Is(err, orgs.ErrForbidden) {
 			httputil.Error(w, http.StatusForbidden, "forbidden", "Your role doesn't allow this action.", nil)
+			return "", false
+		}
+		if errors.Is(err, orgs.ErrNotMerchantOrg) {
+			httputil.Error(w, http.StatusForbidden, "wrong_kind", "This action is only available to business accounts — use your creator workspace instead.", nil)
 			return "", false
 		}
 		h.fail(w, http.StatusInternalServerError, "internal_error", "Unable to verify app access.", err)
@@ -1376,6 +1383,30 @@ func (h *Handler) ListMyApps(w http.ResponseWriter, r *http.Request) {
 		httputil.Error(w, http.StatusUnauthorized, "unauthorized", "Missing authenticated user.", nil)
 		return
 	}
+	if h.orgs == nil {
+		h.log().Error("org service not wired for merchant route", "path", r.URL.Path)
+		httputil.Error(w, http.StatusInternalServerError, "internal_error", "Merchant access is not configured.", nil)
+		return
+	}
+	// Merchant track only: creator accounts list their receiving app via
+	// GET /api/v1/creator/apps instead. Accounts with no org yet (still
+	// onboarding) fall through to the empty list below.
+	if mine, err := h.orgs.ListMyOrganizations(r.Context(), claims.Subject); err == nil {
+		for _, o := range mine {
+			if o.Status != orgs.MemberStatusActive {
+				continue
+			}
+			kind := strings.TrimSpace(o.AccountKind)
+			if kind == "" {
+				kind = orgs.AccountKindMerchant
+			}
+			if kind != orgs.AccountKindMerchant {
+				httputil.Error(w, http.StatusForbidden, "wrong_kind", "This action is only available to business accounts — use your creator workspace instead.", nil)
+				return
+			}
+			break
+		}
+	}
 
 	apps, err := h.service.ListAppsForUser(r.Context(), claims.Subject)
 	if err != nil {
@@ -1425,6 +1456,16 @@ func (h *Handler) MerchantCreateApp(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, orgs.ErrForbidden) {
 			httputil.Error(w, http.StatusForbidden, "forbidden", "Your role doesn't allow creating apps.", nil)
+			return
+		}
+		h.fail(w, http.StatusInternalServerError, "internal_error", "Unable to verify organization access.", err)
+		return
+	}
+	// Merchant track only: creators receive through the support page's
+	// managed app (EnableSupportPage), never self-service creation.
+	if _, err := h.orgs.RequireMerchantOrg(r.Context(), claims.Subject, orgID, orgs.PermDevelop); err != nil {
+		if errors.Is(err, orgs.ErrNotMerchantOrg) {
+			httputil.Error(w, http.StatusForbidden, "wrong_kind", "App creation is only available to business accounts — creators receive through their support page.", nil)
 			return
 		}
 		h.fail(w, http.StatusInternalServerError, "internal_error", "Unable to verify organization access.", err)
@@ -1572,7 +1613,14 @@ func (h *Handler) MerchantCreateWithdrawal(w http.ResponseWriter, r *http.Reques
 	if !h.requireNotSuspended(w, r, appID) {
 		return
 	}
+	h.createWithdrawalForApp(w, r, appID, userID, IdempotencyEndpointMerchantWithdrawalsCreate)
+}
 
+// createWithdrawalForApp runs the shared withdrawal-creation flow for one
+// app: body decode, per-app idempotency scope, kind-aware destination
+// enforcement in the service, identical error mapping. Merchant and creator
+// handlers differ only in their gate and idempotency endpoint namespace.
+func (h *Handler) createWithdrawalForApp(w http.ResponseWriter, r *http.Request, appID, userID, idempotencyEndpoint string) {
 	var in createWithdrawalHTTPInput
 	rawBody, ok := readBodyJSON(w, r, h.maxBodyBytes, &in, "Unable to decode request body.")
 	if !ok {
@@ -1580,8 +1628,8 @@ func (h *Handler) MerchantCreateWithdrawal(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Idempotency-Key is scoped to the path app (never the body — a
-	// merchant must not be able to address another app's key space).
-	state, handled := h.checkIdempotency(w, r, appID, IdempotencyEndpointMerchantWithdrawalsCreate, rawBody)
+	// caller must not be able to address another app's key space).
+	state, handled := h.checkIdempotency(w, r, appID, idempotencyEndpoint, rawBody)
 	if handled {
 		return
 	}
@@ -1834,6 +1882,16 @@ func (h *Handler) MerchantOrgLimitsUsage(w http.ResponseWriter, r *http.Request)
 	orgID := r.PathValue("orgID")
 	if _, err := h.orgs.CheckOrgPermission(r.Context(), claims.Subject, orgID, orgs.PermRead); err != nil {
 		httputil.Error(w, http.StatusForbidden, "forbidden", "You don't have access to this organization.", nil)
+		return
+	}
+	// Merchant track only: creators read the same caps via
+	// GET /api/v1/creator/orgs/{orgID}/limits-usage instead.
+	if _, err := h.orgs.RequireMerchantOrg(r.Context(), claims.Subject, orgID, orgs.PermRead); err != nil {
+		if errors.Is(err, orgs.ErrNotMerchantOrg) {
+			httputil.Error(w, http.StatusForbidden, "wrong_kind", "This action is only available to business accounts — use your creator workspace instead.", nil)
+			return
+		}
+		h.fail(w, http.StatusInternalServerError, "internal_error", "Unable to verify organization access.", err)
 		return
 	}
 	usage, err := h.service.OrgLimitsUsage(r.Context(), orgID)

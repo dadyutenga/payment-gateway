@@ -262,6 +262,10 @@ export async function getLimitsUsage(orgId: string) {
   return (await request<OrgLimitsUsage>(`/api/v1/merchant/orgs/${orgId}/limits-usage`)).data;
 }
 
+export async function getCreatorLimitsUsage(orgId: string) {
+  return (await request<OrgLimitsUsage>(`/api/v1/creator/orgs/${orgId}/limits-usage`)).data;
+}
+
 // ---------- Creator payout destinations (OTP-gated, 24h cooling) ----------
 
 export type PayoutDestination = {
@@ -279,7 +283,7 @@ export type PayoutDestination = {
 };
 
 export async function getPayoutDestination(orgId: string): Promise<PayoutDestination | null> {
-  return (await request<PayoutDestination | null>(`/api/v1/merchant/orgs/${orgId}/payout-destination`)).data;
+  return (await request<PayoutDestination | null>(`/api/v1/creator/orgs/${orgId}/payout-destination`)).data;
 }
 
 export async function savePayoutDestination(
@@ -287,7 +291,7 @@ export async function savePayoutDestination(
   input: { provider: string; phone: string; account_name: string; otp_channel: string; otp_code: string },
 ) {
   return (
-    await request<PayoutDestination>(`/api/v1/merchant/orgs/${orgId}/payout-destination`, { method: "POST", body: input })
+    await request<PayoutDestination>(`/api/v1/creator/orgs/${orgId}/payout-destination`, { method: "POST", body: input })
   ).data;
 }
 
@@ -437,18 +441,18 @@ export type SupportSettingsInput = {
 };
 
 export async function getSupportSettings(orgId: string) {
-  return (await request<SupportSettings>(`/api/v1/merchant/orgs/${orgId}/support-settings`)).data;
+  return (await request<SupportSettings>(`/api/v1/creator/orgs/${orgId}/support-settings`)).data;
 }
 
 export async function updateSupportSettings(orgId: string, input: SupportSettingsInput) {
   return (
-    await request<SupportSettings>(`/api/v1/merchant/orgs/${orgId}/support-settings`, { method: "PUT", body: input })
+    await request<SupportSettings>(`/api/v1/creator/orgs/${orgId}/support-settings`, { method: "PUT", body: input })
   ).data;
 }
 
 export async function enableSupportPage(orgId: string) {
   return (
-    await request<SupportSettings>(`/api/v1/merchant/orgs/${orgId}/support-page/enable`, { method: "POST" })
+    await request<SupportSettings>(`/api/v1/creator/orgs/${orgId}/support-page/enable`, { method: "POST" })
   ).data;
 }
 

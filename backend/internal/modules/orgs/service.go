@@ -1061,6 +1061,50 @@ func (s *Service) RequireMerchantOrg(ctx context.Context, userID, orgID string, 
 	return s.RequireAccountKind(ctx, userID, orgID, perm, AccountKindMerchant)
 }
 
+// requireKindApp resolves an app to its org, enforces one permission from
+// the central matrix, then enforces the account track — the reusable gate
+// for app-scoped money-plane endpoints in both tracks. Kind is resolved
+// from the database alongside the membership, never trusted from the
+// client. It returns the owning org id for handlers that need it.
+func (s *Service) requireKindApp(ctx context.Context, userID, appID string, perm Permission, kinds ...string) (string, error) {
+	if _, err := s.CheckAppPermission(ctx, userID, appID, perm); err != nil {
+		return "", err
+	}
+	orgID, err := s.repo.GetAppOrgID(ctx, strings.TrimSpace(appID))
+	if err != nil {
+		return "", ErrNotOrgMember
+	}
+	org, err := s.repo.GetOrganization(ctx, orgID)
+	if err != nil {
+		return "", err
+	}
+	kind := strings.TrimSpace(org.AccountKind)
+	if kind == "" {
+		kind = AccountKindMerchant
+	}
+	for _, want := range kinds {
+		if kind == want {
+			return orgID, nil
+		}
+	}
+	if len(kinds) == 1 && kinds[0] == AccountKindMerchant {
+		return "", ErrNotMerchantOrg
+	}
+	return "", ErrNotCreatorOrg
+}
+
+// RequireMerchantApp enforces a membership permission and the merchant
+// track for one app — the gate for every /api/v1/merchant/apps/* handler.
+func (s *Service) RequireMerchantApp(ctx context.Context, userID, appID string, perm Permission) (string, error) {
+	return s.requireKindApp(ctx, userID, appID, perm, AccountKindMerchant)
+}
+
+// RequireCreatorApp enforces a membership permission and the creator
+// track for one app — the gate for every /api/v1/creator/apps/* handler.
+func (s *Service) RequireCreatorApp(ctx context.Context, userID, appID string, perm Permission) (string, error) {
+	return s.requireKindApp(ctx, userID, appID, perm, AccountKindCreator)
+}
+
 // GetKYCSubmission returns the evidence row plus live org status for the
 // status view (any active member may read).
 func (s *Service) GetKYCSubmission(ctx context.Context, userID, orgID string) (KYCSubmission, string, error) {

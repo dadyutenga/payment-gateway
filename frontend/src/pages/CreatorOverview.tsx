@@ -9,8 +9,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { listMyOrgs } from "@/lib/orgApi";
-import { listMerchantOrders, listMyApps } from "@/lib/merchantApi";
-import { fetchMerchantCustomers, fetchMerchantOverview } from "@/lib/merchantAnalyticsApi";
+import { fetchCreatorOverview, fetchCreatorSupporters, listCreatorApps, listCreatorOrders } from "@/lib/creatorApi";
 import { EnvToggle } from "@/pages/merchantAnalyticsCommon";
 import { DateRangePicker, moneyText, useFilterParams } from "@/pages/analyticsCommon";
 
@@ -37,23 +36,23 @@ const CreatorOverview = () => {
   const orgId = org?.id ?? "";
 
   const overviewQuery = useQuery({
-    queryKey: ["merchant", "analytics", "overview", orgId, from, to, env],
-    queryFn: () => fetchMerchantOverview(orgId, { from, to, granularity: "day", environment: env }),
+    queryKey: ["creator", "analytics", "overview", orgId, from, to, env],
+    queryFn: () => fetchCreatorOverview(orgId, { from, to, granularity: "day", environment: env }),
     enabled: !!orgId,
     staleTime: 30_000,
   });
   const customersQuery = useQuery({
-    queryKey: ["merchant", "analytics", "customers", orgId, from, to, env],
-    queryFn: () => fetchMerchantCustomers(orgId, { from, to, granularity: "day", environment: env }),
+    queryKey: ["creator", "analytics", "supporters", orgId, from, to, env],
+    queryFn: () => fetchCreatorSupporters(orgId, { from, to, granularity: "day", environment: env }),
     enabled: !!orgId,
     staleTime: 30_000,
   });
-  const appsQuery = useQuery({ queryKey: ["merchant", "my-apps"], queryFn: () => listMyApps(), staleTime: 30_000 });
+  const appsQuery = useQuery({ queryKey: ["creator", "my-apps"], queryFn: () => listCreatorApps(), staleTime: 30_000 });
   const apps = appsQuery.data ?? [];
   const orderQueries = useQueries({
     queries: apps.map((app) => ({
-      queryKey: ["merchant", app.id, "orders", ""],
-      queryFn: () => listMerchantOrders(app.id),
+      queryKey: ["creator", app.id, "orders", ""],
+      queryFn: () => listCreatorOrders(app.id),
       staleTime: 15_000,
     })),
   });
@@ -103,7 +102,7 @@ const CreatorOverview = () => {
           <DateRangePicker from={from} to={to} onChange={setRange} />
           {org && org.kyc_status !== "verified" && (
             <Button size="sm" variant="outline" asChild>
-              <Link to={`/onboarding/kyc/${org.id}`}>Verify identity <ArrowRight className="h-3.5 w-3.5 ml-1" /></Link>
+              <Link to={`/creator/verify/${org.id}`}>Verify identity <ArrowRight className="h-3.5 w-3.5 ml-1" /></Link>
             </Button>
           )}
           {org?.handle && (
@@ -128,7 +127,7 @@ const CreatorOverview = () => {
             <Card><CardContent className="p-4">
               <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Total received</p>
               <p className="mt-1 text-xl font-extrabold text-slate-900">{moneyText(data.tpv)}</p>
-              <Link to="/merchant/payments" className="mt-2 inline-block text-xs text-blue-600 hover:underline">View payments →</Link>
+              <Link to="/creator/payments" className="mt-2 inline-block text-xs text-fuchsia-700 hover:underline">View payments →</Link>
             </CardContent></Card>
             <Card><CardContent className="p-4">
               <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Transactions</p>
@@ -170,7 +169,7 @@ const CreatorOverview = () => {
           <Card className="mt-4"><CardContent className="p-4">
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-bold text-slate-800">Recent supporters</h3>
-              <Link to="/merchant/payments" className="text-xs text-blue-600 hover:underline">View all →</Link>
+              <Link to="/creator/payments" className="text-xs text-fuchsia-700 hover:underline">View all →</Link>
             </div>
             <p className="mt-1 text-xs text-slate-400">Identities masked — messages are private to you.</p>
             {recentSupporters.length === 0 ? (

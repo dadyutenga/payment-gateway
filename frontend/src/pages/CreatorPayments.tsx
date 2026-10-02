@@ -5,7 +5,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { toast } from "@/components/ui/sonner";
-import { listMerchantOrders, listMyApps } from "@/lib/merchantApi";
+import { listCreatorApps, listCreatorOrders } from "@/lib/creatorApi";
 
 function maskPhone(phone?: string) {
   const digits = (phone ?? "").replace(/\D/g, "");
@@ -20,12 +20,12 @@ function maskedSupporter(name?: string, phone?: string) {
 
 const CreatorPayments = () => {
   const [status, setStatus] = useState("");
-  const appsQuery = useQuery({ queryKey: ["merchant", "my-apps"], queryFn: () => listMyApps(), staleTime: 30_000 });
+  const appsQuery = useQuery({ queryKey: ["creator", "my-apps"], queryFn: () => listCreatorApps(), staleTime: 30_000 });
   const apps = appsQuery.data ?? [];
   const orderQueries = useQueries({
     queries: apps.map((app) => ({
       queryKey: ["creator", app.id, "payments", status],
-      queryFn: () => listMerchantOrders(app.id, status || undefined),
+      queryFn: () => listCreatorOrders(app.id, status || undefined),
       staleTime: 15_000,
     })),
   });

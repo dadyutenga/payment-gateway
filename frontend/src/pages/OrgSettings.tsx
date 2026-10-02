@@ -1,20 +1,18 @@
 import { FormEvent, useEffect, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, CheckCircle2, Clock, Copy, Trash2, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
-import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { toast } from "@/components/ui/sonner";
 import {
   deleteOrg,
+  getCreatorLimitsUsage,
   getLimitsUsage,
   getNotificationPrefs,
-  getOrg,
   getPayoutDestination,
   listKYCAttempts,
   listOrgMembers,
@@ -80,9 +78,14 @@ function formFromOrg(org: Organization): ProfileForm {
   };
 }
 
-const isCreatorOrg = (org: Organization) => (org.account_kind ?? "merchant") === "creator";
+export const isCreatorOrg = (org: Organization) => (org.account_kind ?? "merchant") === "creator";
 
-const GeneralTab = ({ org, isOwner }: { org: Organization; isOwner: boolean }) => {
+// Track-specific verification entry: business and creator verification
+// are separate flows, so every link must point at the matching one.
+export const verifyPathFor = (org: Organization) =>
+  isCreatorOrg(org) ? `/creator/verify/${org.id}` : `/merchant/verify/${org.id}`;
+
+export const GeneralTab = ({ org, isOwner }: { org: Organization; isOwner: boolean }) => {
   const queryClient = useQueryClient();
   const [form, setForm] = useState<ProfileForm>(() => formFromOrg(org));
   const [saving, setSaving] = useState(false);
@@ -214,7 +217,7 @@ const GeneralTab = ({ org, isOwner }: { org: Organization; isOwner: boolean }) =
           {!isCreator && locked && (
             <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-900">
               Business name and TIN are locked after verification. Changing them requires re-verification —{" "}
-              <Link to={`/onboarding/kyc/${org.id}`} className="font-medium underline">request a change via resubmission</Link>.
+              <Link to={verifyPathFor(org)} className="font-medium underline">request a change via resubmission</Link>.
             </div>
           )}
           {isCreator && org.handle && (
@@ -236,7 +239,7 @@ const GeneralTab = ({ org, isOwner }: { org: Organization; isOwner: boolean }) =
 
 // ---------- Verification tab ----------
 
-const VerificationTab = ({ org, isOwner }: { org: Organization; isOwner: boolean }) => {
+export const VerificationTab = ({ org, isOwner }: { org: Organization; isOwner: boolean }) => {
   const status = KYC_STATUS[org.kyc_status] ?? KYC_STATUS.pending;
   const Icon = status.icon;
   const creator = isCreatorOrg(org);
@@ -272,10 +275,10 @@ const VerificationTab = ({ org, isOwner }: { org: Organization; isOwner: boolean
       </Card>
 
       {isOwner && org.kyc_status === "pending" && (
-        <Button asChild><Link to={`/onboarding/kyc/${org.id}`}>Submit verification</Link></Button>
+        <Button asChild><Link to={verifyPathFor(org)}>Submit verification</Link></Button>
       )}
       {isOwner && org.kyc_status === "rejected" && (
-        <Button asChild><Link to={`/onboarding/kyc/${org.id}`}>Resubmit verification</Link></Button>
+        <Button asChild><Link to={verifyPathFor(org)}>Resubmit verification</Link></Button>
       )}
 
       <Card>
@@ -323,20 +326,21 @@ function feeText(app: { fee_type: string; fee_percent: string; fee_fixed: string
   return `${app.fee_percent}% per transaction`;
 }
 
-const LimitsTab = ({ org }: { org: Organization }) => {
+export const LimitsTab = ({ org, track = "merchant" }: { org: Organization; track?: "merchant" | "creator" }) => {
   const usageQuery = useQuery({
-    queryKey: ["orgs", org.id, "limits-usage"],
-    queryFn: () => getLimitsUsage(org.id),
+    queryKey: ["orgs", org.id, "limits-usage", track],
+    queryFn: () => (track === "creator" ? getCreatorLimitsUsage(org.id) : getLimitsUsage(org.id)),
     staleTime: 15_000,
   });
   const usage = usageQuery.data;
+  const isCreatorTrack = track === "creator";
 
   return (
     <div className="mt-4 space-y-3">
       <p className="text-xs text-slate-500">
         Read-only — caps are set by platform defaults or an admin override. Ask an admin to adjust them.
         Volume is computed live from the ledger, live environment only.
-        {isCreatorOrg(org) && (
+        {isCreatorTrack && (
           <> Creator accounts start on a stricter tier than businesses — an admin can raise your org individually.</>
         )}
       </p>
@@ -346,7 +350,11 @@ const LimitsTab = ({ org }: { org: Organization }) => {
         <Card key={app.app_id}>
           <CardContent className="p-4">
             <div className="flex flex-wrap items-center gap-2">
-              <Link to={`/merchant/apps/${app.app_id}`} className="text-sm font-semibold text-blue-600 hover:underline">{app.name}</Link>
+              {isCreatorTrack ? (
+                <span className="text-sm font-semibold text-slate-800">{app.name}</span>
+              ) : (
+                <Link to={`/merchant/apps/${app.app_id}`} className="text-sm font-semibold text-blue-600 hover:underline">{app.name}</Link>
+              )}
               <Badge variant="outline">{feeText(app)}</Badge>
             </div>
             <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -400,7 +408,7 @@ function sourceLabel(source: string) {
 
 // ---------- Security tab (own profile + own password) ----------
 
-const SecurityTab = () => {
+export const SecurityTab = () => {
   const queryClient = useQueryClient();
   const profileQuery = useQuery({ queryKey: ["auth", "profile"], queryFn: () => getOwnProfile(), staleTime: 30_000 });
   const profile = profileQuery.data;
@@ -517,7 +525,7 @@ const NOTIF_FIELDS: { key: keyof Omit<NotificationPrefs, "org_id">; label: strin
   { key: "kyc_decisions", label: "Verification decisions", helper: "Admin approve / reject outcomes." },
 ];
 
-const NotificationsTab = ({ org, isOwner }: { org: Organization; isOwner: boolean }) => {
+export const NotificationsTab = ({ org, isOwner }: { org: Organization; isOwner: boolean }) => {
   const queryClient = useQueryClient();
   const prefsQuery = useQuery({
     queryKey: ["orgs", org.id, "notif-prefs"],
@@ -590,7 +598,7 @@ const NotificationsTab = ({ org, isOwner }: { org: Organization; isOwner: boolea
 
 // ---------- Branding tab ----------
 
-const BrandingTab = ({ org, isOwner }: { org: Organization; isOwner: boolean }) => {
+export const BrandingTab = ({ org, isOwner }: { org: Organization; isOwner: boolean }) => {
   const queryClient = useQueryClient();
   const [logoUrl, setLogoUrl] = useState(org.logo_url ?? "");
   const [primaryColor, setPrimaryColor] = useState(org.primary_color || "#0f172a");
@@ -744,7 +752,7 @@ function destinationSummary(w: { destination_type: string; destination_details: 
   return [d.bank_name, d.account_number].filter(Boolean).join(" · ") || "Bank transfer";
 }
 
-const PayoutsTab = ({ org, isOwner }: { org: Organization; isOwner: boolean }) => {
+export const PayoutsTab = ({ org, isOwner }: { org: Organization; isOwner: boolean }) => {
   if (org && isCreatorOrg(org)) {
     return <CreatorPayoutDestinationCard org={org} isOwner={isOwner} />;
   }
@@ -810,7 +818,7 @@ const PayoutsTab = ({ org, isOwner }: { org: Organization; isOwner: boolean }) =
 
 const MOBILE_PROVIDERS = ["mpesa", "tigo", "airtel", "halotel"] as const;
 
-const CreatorPayoutDestinationCard = ({ org, isOwner }: { org: Organization; isOwner: boolean }) => {
+export const CreatorPayoutDestinationCard = ({ org, isOwner }: { org: Organization; isOwner: boolean }) => {
   const queryClient = useQueryClient();
   const destQuery = useQuery({
     queryKey: ["orgs", org.id, "payout-destination"],
@@ -949,7 +957,7 @@ const CreatorPayoutDestinationCard = ({ org, isOwner }: { org: Organization; isO
 
 // ---------- Survey tab (creator onboarding answers, editable) ----------
 
-const SurveyTab = ({ org, isOwner }: { org: Organization; isOwner: boolean }) => {
+export const SurveyTab = ({ org, isOwner }: { org: Organization; isOwner: boolean }) => {
   const queryClient = useQueryClient();
   const surveyQuery = useQuery({
     queryKey: ["orgs", org.id, "creator-survey"],
@@ -985,7 +993,7 @@ const SurveyTab = ({ org, isOwner }: { org: Organization; isOwner: boolean }) =>
 
 // ---------- Support page tab (creator receiving config) ----------
 
-const SupportPageTab = ({ org, isOwner }: { org: Organization; isOwner: boolean }) => {
+export const SupportPageTab = ({ org, isOwner }: { org: Organization; isOwner: boolean }) => {
   return (
     <Card className="mt-4">
       <CardContent className="p-4 sm:p-6">
@@ -1001,7 +1009,7 @@ const SupportPageTab = ({ org, isOwner }: { org: Organization; isOwner: boolean 
 
 // ---------- Danger zone ----------
 
-const DangerTab = ({ org, isOwner }: { org: Organization; isOwner: boolean }) => {
+export const DangerTab = ({ org, isOwner, homePath = "/merchant/apps" }: { org: Organization; isOwner: boolean; homePath?: string }) => {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [deleting, setDeleting] = useState(false);
@@ -1013,7 +1021,7 @@ const DangerTab = ({ org, isOwner }: { org: Organization; isOwner: boolean }) =>
       await deleteOrg(org.id);
       toast.success("Organization deleted.");
       queryClient.invalidateQueries({ queryKey: ["orgs", "mine"] });
-      navigate("/merchant/apps", { replace: true });
+      navigate(homePath, { replace: true });
     } catch (err) {
       toast.error(errorMessage(err, "Unable to delete organization."));
     } finally {
@@ -1041,59 +1049,9 @@ const DangerTab = ({ org, isOwner }: { org: Organization; isOwner: boolean }) =>
   );
 };
 
-// ---------- Page ----------
-
-const OrgSettings = () => {
-  const { orgId = "" } = useParams();
-
-  const orgQuery = useQuery({ queryKey: ["orgs", orgId], queryFn: () => getOrg(orgId), staleTime: 30_000 });
-  const org = orgQuery.data;
-  const isOwner = org?.role === "owner";
-
-  return (
-    <div>
-      <div>
-        <h2 className="text-2xl font-bold text-slate-900">Settings — {org?.name ?? "…"}</h2>
-        <p className="mt-1 flex flex-wrap items-center gap-2 text-sm text-slate-500">
-          {org && isCreatorOrg(org) ? "Creator page settings." : "Organization settings."}
-          {org && <Badge variant="secondary">{org.role}</Badge>}
-          {org && isCreatorOrg(org) && <Badge variant="outline">creator</Badge>}
-        </p>
-      </div>
-
-      {orgQuery.isLoading ? (
-        <Skeleton className="mt-4 h-40 w-full" />
-      ) : org ? (
-        <Tabs defaultValue="general" className="mt-4">
-          <TabsList className="flex-wrap">
-            <TabsTrigger value="general">General</TabsTrigger>
-            {org && isCreatorOrg(org) && <TabsTrigger value="survey">Survey</TabsTrigger>}
-            {org && isCreatorOrg(org) && <TabsTrigger value="support">Support page</TabsTrigger>}
-            <TabsTrigger value="verification">Verification</TabsTrigger>
-            <TabsTrigger value="limits">Limits &amp; Fees</TabsTrigger>
-            <TabsTrigger value="security">Security</TabsTrigger>
-            <TabsTrigger value="notifications">Notifications</TabsTrigger>
-            <TabsTrigger value="branding">Branding</TabsTrigger>
-            <TabsTrigger value="payouts">Payouts</TabsTrigger>
-            <TabsTrigger value="danger">Danger zone</TabsTrigger>
-          </TabsList>
-
-          <TabsContent value="general"><GeneralTab org={org} isOwner={!!isOwner} /></TabsContent>
-          {org && isCreatorOrg(org) && <TabsContent value="survey"><SurveyTab org={org} isOwner={!!isOwner} /></TabsContent>}
-          {org && isCreatorOrg(org) && <TabsContent value="support"><SupportPageTab org={org} isOwner={!!isOwner} /></TabsContent>}
-          <TabsContent value="verification"><VerificationTab org={org} isOwner={!!isOwner} /></TabsContent>
-          <TabsContent value="limits"><LimitsTab org={org} /></TabsContent>
-          <TabsContent value="security"><SecurityTab /></TabsContent>
-          <TabsContent value="notifications"><NotificationsTab org={org} isOwner={!!isOwner} /></TabsContent>
-          <TabsContent value="branding"><BrandingTab org={org} isOwner={!!isOwner} /></TabsContent>
-          <TabsContent value="payouts"><PayoutsTab org={org} isOwner={!!isOwner} /></TabsContent>
-          <TabsContent value="danger"><DangerTab org={org} isOwner={!!isOwner} /></TabsContent>
-        </Tabs>
-      ) : (
-        <p className="mt-4 text-sm text-slate-500">Organization not found.</p>
-      )}
-    </div>
-  );
-};
-
-export default OrgSettings;
+// ---------- Page split ----------
+//
+// The old shared OrgSettings page was split into two distinct pages —
+// MerchantSettingsPage (business tabs) and CreatorSettingsPage (personal
+// tabs) — composed from the tab building blocks above. There is no shared
+// settings page anymore.

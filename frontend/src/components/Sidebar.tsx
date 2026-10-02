@@ -37,7 +37,7 @@ const Sidebar = ({
   footer,
 }: {
   groups: SidebarNavGroup[];
-  accent: "merchant" | "admin";
+  accent: "merchant" | "creator" | "admin";
   spaceBadge: React.ReactNode;
   collapsed: boolean;
   storageKey: string;
@@ -90,7 +90,11 @@ const Sidebar = ({
 
   const isOpen = (id: string) => expanded[id] ?? true;
   const activeClasses =
-    accent === "admin" ? "bg-red-700 text-white" : "bg-slate-900 text-white";
+    accent === "admin"
+      ? "bg-red-700 text-white"
+      : accent === "creator"
+        ? "bg-fuchsia-700 text-white"
+        : "bg-slate-900 text-white";
 
   return (
     <nav

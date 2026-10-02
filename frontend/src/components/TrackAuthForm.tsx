@@ -45,7 +45,7 @@ export default function TrackAuthForm({ kind, mode }: { kind: AccountKind; mode:
   const oppositeRegister = isCreator ? "/merchant/register" : "/creator/register";
   const ownOtherMode = mode === "login" ? (isCreator ? "/creator/register" : "/merchant/register") : isCreator ? "/creator/login" : "/merchant/login";
 
-  const setupPath = `/onboarding/create-org?track=${kind}`;
+  const setupPath = kind === "creator" ? "/creator/setup" : "/merchant/setup";
 
   const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();

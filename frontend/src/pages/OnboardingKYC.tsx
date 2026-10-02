@@ -36,7 +36,7 @@ const STATUS_BADGE: Record<string, string> = {
   rejected: "bg-rose-100 text-rose-800",
 };
 
-const OnboardingKYC = () => {
+const OnboardingKYC = ({ lockedKind }: { lockedKind?: "merchant" | "creator" }) => {
   const { orgId = "" } = useParams();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -54,7 +54,10 @@ const OnboardingKYC = () => {
 
   const isOwner = orgQuery.data?.role === "owner";
   const status = orgQuery.data?.kyc_status ?? "pending";
-  const isCreator = (orgQuery.data?.account_kind ?? "merchant") === "creator";
+  const orgKind = (orgQuery.data?.account_kind ?? "merchant") as "merchant" | "creator";
+  const isCreator = (lockedKind ?? orgKind) === "creator";
+  const kindMismatch = lockedKind !== undefined && orgQuery.data !== undefined && lockedKind !== orgKind;
+  const settingsPath = isCreator ? "/creator/settings" : `/org/${orgId}/settings`;
 
   const [businessName, setBusinessName] = useState("");
   const [tin, setTin] = useState("");
@@ -160,7 +163,7 @@ const OnboardingKYC = () => {
       queryClient.invalidateQueries({ queryKey: ["orgs", orgId] });
       queryClient.invalidateQueries({ queryKey: ["kyc", orgId] });
       queryClient.invalidateQueries({ queryKey: ["orgs", "mine"] });
-      navigate(`/org/${orgId}/settings`, { replace: true });
+      navigate(settingsPath, { replace: true });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Unable to submit verification.");
     } finally {
@@ -182,10 +185,27 @@ const OnboardingKYC = () => {
             <Badge className={STATUS_BADGE[status] ?? ""} variant="secondary">{status}</Badge>
           </p>
         </div>
-        <Link to={`/org/${orgId}/settings`} className="text-sm text-blue-600 hover:underline">Back</Link>
+        <Link to={settingsPath} className="text-sm text-blue-600 hover:underline">Back</Link>
       </div>
 
-      {orgQuery.isLoading ? (
+      {kindMismatch ? (
+        <Card className="mt-4">
+          <CardContent className="p-4 text-sm text-slate-600">
+            <p className="font-medium text-slate-800">Wrong verification track</p>
+            <p className="mt-1">
+              {lockedKind === "creator"
+                ? "This is a business account — it needs business verification instead."
+                : "This is a creator account — it needs individual verification instead."}
+            </p>
+            <Link
+              to={lockedKind === "creator" ? `/merchant/verify/${orgId}` : `/creator/verify/${orgId}`}
+              className="mt-2 inline-block font-medium text-blue-600 hover:underline"
+            >
+              Go to the correct verification →
+            </Link>
+          </CardContent>
+        </Card>
+      ) : orgQuery.isLoading ? (
         <Skeleton className="mt-4 h-64 w-full" />
       ) : !isOwner ? (
         <Card className="mt-4">

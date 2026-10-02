@@ -80,7 +80,7 @@ export function SandboxGuide({ orgId }: { orgId: string }) {
         Create a sandbox API key under <Link to="/merchant/apps" className="underline">My Apps</Link>, send a test
         order, and come back. Verification unlocks live payments.
       </p>
-      <Link to={`/onboarding/kyc/${orgId}`} className="mt-2 inline-block font-medium text-amber-950 underline">
+      <Link to={`/merchant/verify/${orgId}`} className="mt-2 inline-block font-medium text-amber-950 underline">
         Open verification →
       </Link>
     </div>

@@ -71,3 +71,31 @@ func TestTeamManagementAllowsMerchantOrg(t *testing.T) {
 		t.Fatalf("merchant invite should succeed, got %v", err)
 	}
 }
+
+// App-scoped kind gates resolve the app's org kind from the database:
+// merchant apps pass the merchant gate, creator apps pass the creator
+// gate, and each rejects the other track with a 403-mapped error.
+func TestRequireAppKindGates(t *testing.T) {
+	ctx := context.Background()
+
+	merchantSvc := NewService(ownerRepo(), nil)
+	if _, err := merchantSvc.RequireMerchantApp(ctx, "owner-1", "app_test", PermRead); err != nil {
+		t.Fatalf("merchant app should pass merchant gate, got %v", err)
+	}
+	if _, err := merchantSvc.RequireCreatorApp(ctx, "owner-1", "app_test", PermRead); !errors.Is(err, ErrNotCreatorOrg) {
+		t.Fatalf("merchant app should fail creator gate with ErrNotCreatorOrg, got %v", err)
+	}
+
+	creatorSvc := NewService(creatorOrgRepo(), nil)
+	if _, err := creatorSvc.RequireCreatorApp(ctx, "owner-1", "app_test", PermRead); err != nil {
+		t.Fatalf("creator app should pass creator gate, got %v", err)
+	}
+	if _, err := creatorSvc.RequireMerchantApp(ctx, "owner-1", "app_test", PermRead); !errors.Is(err, ErrNotMerchantOrg) {
+		t.Fatalf("creator app should fail merchant gate with ErrNotMerchantOrg, got %v", err)
+	}
+
+	// Unknown app surfaces as not-a-member (no kind leak).
+	if _, err := NewService(newFakeOrgRepository(), nil).RequireMerchantApp(ctx, "ghost", "app_missing", PermRead); !errors.Is(err, ErrNotOrgMember) {
+		t.Fatalf("unknown app should fail with ErrNotOrgMember, got %v", err)
+	}
+}
