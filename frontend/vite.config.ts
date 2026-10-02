@@ -6,6 +6,9 @@ export default defineConfig({
   server: {
     host: "::",
     port: 5173,
+    headers: {
+      "Cache-Control": "no-store",
+    },
   },
   plugins: [react()],
   resolve: {
