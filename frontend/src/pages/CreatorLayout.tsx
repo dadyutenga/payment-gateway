@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Outlet, useLocation } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
-  Banknote, ChevronsLeft, ChevronsRight, HeartHandshake,
+  Banknote, HeartHandshake,
   LayoutDashboard, Receipt, Settings,
 } from "lucide-react";
 import { signOut } from "@/lib/auth";
@@ -112,16 +112,7 @@ const CreatorLayout = () => {
       collapsed={collapsed}
       storageKey={EXPAND_KEY}
       onNavigate={() => setDrawerOpen(false)}
-      footer={
-        <button
-          type="button"
-          onClick={toggleCollapsed}
-          aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-          className="hidden w-full items-center justify-center gap-1 rounded-md px-2 py-1.5 text-slate-500 hover:bg-sidebar-accent lg:flex"
-        >
-          {collapsed ? <ChevronsRight className="h-4 w-4" /> : <><ChevronsLeft className="h-4 w-4" /> Collapse</>}
-        </button>
-      }
+      onToggleCollapse={toggleCollapsed}
     />
   );
 
