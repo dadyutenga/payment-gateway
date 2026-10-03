@@ -17,6 +17,7 @@ export const CREATOR_CATEGORIES = [
   { value: "freelancer_consultant", label: "Freelancer / consultant" },
   { value: "coach_educator", label: "Coach / educator" },
   { value: "nonprofit_cause", label: "Nonprofit / cause" },
+  { value: "personal_use", label: "Personal use / receiving from friends and family" },
   { value: "other", label: "Other" },
 ] as const;
 
@@ -56,7 +57,7 @@ function errorMessage(err: unknown, fallback: string) {
   return err instanceof Error ? err.message : fallback;
 }
 
-// Shared creator onboarding survey form (Part 2). Used by the onboarding
+// Shared individual onboarding survey form (Part 2). Used by the onboarding
 // page (first run) and the Settings survey tab (editing). Display name
 // (Q1) saves onto the org row with the same submit.
 const CreatorSurveyForm = ({

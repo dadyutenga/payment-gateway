@@ -121,11 +121,11 @@ export const GeneralTab = ({ org, isOwner }: { org: Organization; isOwner: boole
         handle: isCreator ? form.handle.trim().toLowerCase() || undefined : undefined,
         bio: isCreator ? form.bio.trim() || undefined : undefined,
       });
-      toast.success(isCreator ? "Creator page updated." : "Organization updated.");
+      toast.success(isCreator ? "Personal profile updated." : "Organization updated.");
       queryClient.invalidateQueries({ queryKey: ["orgs", org.id] });
       queryClient.invalidateQueries({ queryKey: ["orgs", "mine"] });
     } catch (err) {
-      toast.error(errorMessage(err, "Unable to update organization."));
+      toast.error(errorMessage(err, isCreator ? "Unable to update personal profile." : "Unable to update organization."));
     } finally {
       setSaving(false);
     }
@@ -160,7 +160,7 @@ export const GeneralTab = ({ org, isOwner }: { org: Organization; isOwner: boole
       <CardContent className="p-4 sm:p-6">
         <form onSubmit={handleSave} className="space-y-4">
           <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5">
-            <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Organization owner</p>
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">{isCreator ? "Personal account" : "Organization owner"}</p>
             {membersQuery.isLoading ? (
               <p className="mt-1 text-sm text-slate-500">Loading owner…</p>
             ) : owner ? (
@@ -178,7 +178,7 @@ export const GeneralTab = ({ org, isOwner }: { org: Organization; isOwner: boole
             )}
           </div>
           <div>
-            <label className="text-sm font-medium text-slate-700">Org ID</label>
+            <label className="text-sm font-medium text-slate-700">{isCreator ? "Account ID" : "Org ID"}</label>
             <div className="mt-1 flex items-center gap-2">
               <code className="flex-1 truncate rounded-md bg-slate-100 px-3 py-2 font-mono text-xs text-slate-600">{org.id}</code>
               <Button type="button" size="sm" variant="outline" onClick={copyId}>
@@ -187,7 +187,7 @@ export const GeneralTab = ({ org, isOwner }: { org: Organization; isOwner: boole
             </div>
             <p className="mt-1 text-xs text-slate-400">Read-only identifier used in API paths and support requests.</p>
           </div>
-          {field("Organization name", "Workspace label shown in navigation — internal only.", "name")}
+          {!isCreator && field("Organization name", "Workspace label shown in navigation — internal only.", "name")}
           {isCreator ? (
             <>
               {field("Display name", "Public name on your support page.", "display_name", { placeholder: "Amina Creates" })}
@@ -341,7 +341,7 @@ export const LimitsTab = ({ org, track = "merchant" }: { org: Organization; trac
         Read-only — caps are set by platform defaults or an admin override. Ask an admin to adjust them.
         Volume is computed live from the ledger, live environment only.
         {isCreatorTrack && (
-          <> Creator accounts start on a stricter tier than businesses — an admin can raise your org individually.</>
+          <> Personal accounts start on a stricter tier than businesses — an admin can raise your account individually.</>
         )}
       </p>
       {usageQuery.isLoading && <p className="text-sm text-slate-500">Loading limits…</p>}
@@ -468,7 +468,7 @@ export const SecurityTab = () => {
     <Card>
       <CardContent className="p-4 sm:p-6">
         <h3 className="text-sm font-bold text-slate-800">My profile</h3>
-        <p className="mt-1 text-xs text-slate-500">Your display name and phone — shown as the organization owner&apos;s contact.</p>
+        <p className="mt-1 text-xs text-slate-500">Your display name and phone — used for your personal account and verification contact.</p>
         {profileQuery.isLoading ? (
           <p className="mt-3 text-sm text-slate-500">Loading profile…</p>
         ) : profile ? (
@@ -564,7 +564,7 @@ export const NotificationsTab = ({ org, isOwner }: { org: Organization; isOwner:
       <CardContent className="p-4 sm:p-6">
         <h3 className="text-sm font-bold text-slate-800">Notifications</h3>
         <p className="mt-1 text-xs text-slate-500">
-          Which events this organization wants to hear about. Delivery is log-only until a mail/SMS provider is wired.
+          Which events this account wants to hear about. Delivery is log-only until a mail/SMS provider is wired.
         </p>
         {prefsQuery.isLoading && <p className="mt-3 text-sm text-slate-500">Loading preferences…</p>}
         {prefs && (
@@ -1013,17 +1013,18 @@ export const DangerTab = ({ org, isOwner, homePath = "/merchant/apps" }: { org: 
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [deleting, setDeleting] = useState(false);
+  const isPersonal = isCreatorOrg(org);
 
   const handleDelete = async () => {
-    if (!window.confirm(`Delete ${org?.name}? Only empty orgs (no apps) can be deleted.`)) return;
+    if (!window.confirm(`Delete ${isPersonal ? (org?.display_name || "your personal account") : org?.name}? Only empty accounts (no apps) can be deleted.`)) return;
     setDeleting(true);
     try {
       await deleteOrg(org.id);
-      toast.success("Organization deleted.");
+      toast.success(isPersonal ? "Personal account deleted." : "Organization deleted.");
       queryClient.invalidateQueries({ queryKey: ["orgs", "mine"] });
       navigate(homePath, { replace: true });
     } catch (err) {
-      toast.error(errorMessage(err, "Unable to delete organization."));
+      toast.error(errorMessage(err, isPersonal ? "Unable to delete personal account." : "Unable to delete organization."));
     } finally {
       setDeleting(false);
     }
@@ -1034,15 +1035,16 @@ export const DangerTab = ({ org, isOwner, homePath = "/merchant/apps" }: { org: 
       <CardContent className="p-4 sm:p-6">
         <h3 className="text-sm font-bold text-red-700">Danger zone</h3>
         <p className="mt-1 text-xs text-slate-500">
-          Deleting the organization is permanent. Only empty organizations (no apps) can be deleted —
-          delete or move the apps first.
+          {isPersonal
+            ? "Deleting your personal account is permanent. Only accounts with no apps can be deleted."
+            : "Deleting the organization is permanent. Only empty organizations (no apps) can be deleted — delete or move the apps first."}
         </p>
         {isOwner ? (
           <Button variant="destructive" className="mt-4" disabled={deleting} onClick={handleDelete}>
-            <Trash2 className="h-3.5 w-3.5 mr-1" />{deleting ? "Deleting..." : "Delete organization"}
+            <Trash2 className="h-3.5 w-3.5 mr-1" />{deleting ? "Deleting..." : isPersonal ? "Delete personal account" : "Delete organization"}
           </Button>
         ) : (
-          <p className="mt-4 text-sm text-slate-500">Only owners can delete the organization.</p>
+          <p className="mt-4 text-sm text-slate-500">{isPersonal ? "Only the account owner can delete this account." : "Only owners can delete the organization."}</p>
         )}
       </CardContent>
     </Card>

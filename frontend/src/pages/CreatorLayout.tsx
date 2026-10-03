@@ -98,7 +98,7 @@ const CreatorLayout = () => {
       <Sparkles className="h-5 w-5 text-fuchsia-600" />
       LipaGO
       <span className="rounded bg-fuchsia-100 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-fuchsia-700">
-        Creator
+        Individual
       </span>
     </>
   );
@@ -153,7 +153,7 @@ const CreatorLayout = () => {
           onMenu={() => setDrawerOpen(true)}
           brand={brand}
           statusBadge={statusBadge}
-          userLabel="Creator account"
+          userLabel="Personal account"
           userLinks={[{ to: "/creator/settings", label: "Settings" }]}
           onSignOut={() => {
             signOut();

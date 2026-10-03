@@ -135,7 +135,7 @@ func ValidCreatorCategory(category string) bool {
 	switch strings.ToLower(strings.TrimSpace(category)) {
 	case CreatorCategoryContentCreator, CreatorCategoryMusicianArtist,
 		CreatorCategoryFreelancerConsultant, CreatorCategoryCoachEducator,
-		CreatorCategoryNonprofitCause, CreatorCategoryOther:
+		CreatorCategoryNonprofitCause, CreatorCategoryPersonalUse, CreatorCategoryOther:
 		return true
 	default:
 		return false
@@ -461,11 +461,11 @@ func decimalLessThan(a, b string) bool {
 // history, and the creator onboarding survey (segmentation/risk signal).
 // No actor check — route-gated by RequireAdminAuth.
 type AdminOrgDetail struct {
-	Org       Organization `json:"org"`
-	Members   []OrgMember  `json:"members"`
-	KYC       *KYCSubmission `json:"kyc,omitempty"`
-	Attempts  []KYCAttempt `json:"attempts"`
-	Survey    *CreatorSurvey `json:"survey,omitempty"`
+	Org      Organization   `json:"org"`
+	Members  []OrgMember    `json:"members"`
+	KYC      *KYCSubmission `json:"kyc,omitempty"`
+	Attempts []KYCAttempt   `json:"attempts"`
+	Survey   *CreatorSurvey `json:"survey,omitempty"`
 }
 
 func (s *Service) AdminOrgDetail(ctx context.Context, orgID string) (AdminOrgDetail, error) {
@@ -784,7 +784,7 @@ func (s *Service) SaveCreatorSurvey(ctx context.Context, userID, orgID string, i
 		validation.MaxRunes(in.DisplayName, 100, "Display name must be 100 characters or fewer.", errs, "display_name")
 	}
 	if !ValidCreatorCategory(in.Category) {
-		errs.Add("category", "Category must be content_creator, musician_artist, freelancer_consultant, coach_educator, nonprofit_cause, or other.")
+		errs.Add("category", "Category must be content_creator, musician_artist, freelancer_consultant, coach_educator, nonprofit_cause, personal_use, or other.")
 	}
 	if in.Category == CreatorCategoryOther {
 		validation.Required(in.CategoryOther, "Describe your category when selecting Other.", errs, "category_other")

@@ -24,6 +24,12 @@ const CreateOrg = ({ lockedKind }: { lockedKind?: AccountKind }) => {
   const [bio, setBio] = useState("");
   const [creating, setCreating] = useState(false);
 
+  // Creator accounts are provisioned automatically during registration.
+  // This legacy business setup page must never render for the individual track.
+  if (locked === "creator") {
+    return <Navigate to="/creator" replace />;
+  }
+
   // One org per account — anyone who already holds one is sent back to
   // their apps instead of hitting a 409 here.
   const orgsQuery = useQuery({ queryKey: ["orgs", "mine"], queryFn: () => import("@/lib/orgApi").then((m) => m.listMyOrgs()), staleTime: 30_000 });

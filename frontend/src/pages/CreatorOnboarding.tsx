@@ -26,13 +26,13 @@ const CreatorOnboarding = () => {
   const isCreator = (org?.account_kind ?? "merchant") === "creator";
 
   if (!orgQuery.isLoading && !org) {
-    return <p className="mt-4 text-sm text-slate-500">Organization not found.</p>;
+    return <p className="mt-4 text-sm text-slate-500">Personal account not found.</p>;
   }
   if (!orgQuery.isLoading && org && !isCreator) {
     return (
       <div className="mx-auto max-w-xl">
         <Card className="mt-4"><CardContent className="p-4 text-sm text-slate-600">
-          This survey is for creator accounts. Your account is on the business track —{" "}
+          This survey is for individual accounts. Your account is on the business track —{" "}
           <Link to={`/org/${orgId}/members`} className="text-blue-600 hover:underline">continue to your team</Link>.
         </CardContent></Card>
       </div>
@@ -44,7 +44,7 @@ const CreatorOnboarding = () => {
       <div className="flex items-center gap-2">
         <HeartHandshake className="h-6 w-6 text-slate-700" />
         <div>
-          <h2 className="text-2xl font-bold text-slate-900">Tell us about your page</h2>
+          <h2 className="text-2xl font-bold text-slate-900">Tell us about yourself</h2>
           <p className="mt-1 text-sm text-slate-500">
             A few quick questions so we can set safe starting defaults. Next: ID verification.
           </p>
@@ -60,7 +60,7 @@ const CreatorOnboarding = () => {
             <p className="mt-1">You can change them anytime under Settings → Survey. Next step is ID verification.</p>
             <div className="mt-4 flex gap-2">
               <Button onClick={() => navigate(`/creator/verify/${orgId}`)}>Continue to verification</Button>
-              <Button variant="outline" onClick={() => navigate(`/org/${orgId}/settings`)}>Back to settings</Button>
+              <Button variant="outline" onClick={() => navigate("/creator/settings")}>Back to settings</Button>
             </div>
           </CardContent>
         </Card>

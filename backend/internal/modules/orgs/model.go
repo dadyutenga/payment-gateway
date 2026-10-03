@@ -75,12 +75,12 @@ const (
 )
 
 type Organization struct {
-	ID           string    `json:"id"`
-	Name         string    `json:"name"`
-	Slug         string    `json:"slug"`
-	KYCStatus    string    `json:"kyc_status"`
-	BusinessName string    `json:"business_name,omitempty"`
-	TIN          string    `json:"tin,omitempty"`
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Slug         string `json:"slug"`
+	KYCStatus    string `json:"kyc_status"`
+	BusinessName string `json:"business_name,omitempty"`
+	TIN          string `json:"tin,omitempty"`
 	// AccountKind is merchant|creator, set at signup and immutable after
 	// (changing kind is support-assisted, not self-service).
 	AccountKind string `json:"account_kind"`
@@ -90,19 +90,19 @@ type Organization struct {
 	Bio         string `json:"bio,omitempty"`
 	// LiveMaxTxnAmount / LiveDailyVolumeCap are per-org live guardrail
 	// overrides (positive decimals). Empty means platform default.
-	LiveMaxTxnAmount   string    `json:"live_max_txn_amount,omitempty"`
-	LiveDailyVolumeCap string    `json:"live_daily_volume_cap,omitempty"`
+	LiveMaxTxnAmount   string `json:"live_max_txn_amount,omitempty"`
+	LiveDailyVolumeCap string `json:"live_daily_volume_cap,omitempty"`
 	// Extended profile (Settings > General / Branding). All optional.
-	Address       string    `json:"address,omitempty"`
-	Phone         string    `json:"phone,omitempty"`
-	ContactEmail  string    `json:"contact_email,omitempty"`
-	LogoURL       string    `json:"logo_url,omitempty"`
-	PrimaryColor  string    `json:"primary_color,omitempty"`
+	Address      string `json:"address,omitempty"`
+	Phone        string `json:"phone,omitempty"`
+	ContactEmail string `json:"contact_email,omitempty"`
+	LogoURL      string `json:"logo_url,omitempty"`
+	PrimaryColor string `json:"primary_color,omitempty"`
 	// Suspended orgs cannot move live money until unsuspended.
 	Suspended       bool      `json:"suspended"`
 	SuspendedReason string    `json:"suspended_reason,omitempty"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 // OrgProfileUpdate carries the editable Settings fields. Empty TIN /
@@ -167,20 +167,20 @@ type OrgMember struct {
 // (review fields cleared); organizations.kyc_status stays the enforced
 // source of truth. Admin review (approve/reject) lands in a later block.
 type KYCSubmission struct {
-	OrgID           string     `json:"org_id"`
-	BusinessName    string     `json:"business_name"`
-	TIN             string     `json:"tin"`
+	OrgID        string `json:"org_id"`
+	BusinessName string `json:"business_name"`
+	TIN          string `json:"tin"`
 	// Creator (individual) KYC. Empty for merchant accounts.
-	FullName        string     `json:"full_name,omitempty"`
-	IDType          string     `json:"id_type,omitempty"`
-	IDNumber        string     `json:"id_number,omitempty"`
+	FullName string `json:"full_name,omitempty"`
+	IDType   string `json:"id_type,omitempty"`
+	IDNumber string `json:"id_number,omitempty"`
 	// Dob is the creator's date of birth (YYYY-MM-DD). 18+ is enforced
 	// at submit; under-18 submissions are refused as validation errors
 	// so nothing age-identifying is ever stored for them.
-	Dob               string   `json:"dob,omitempty"`
-	IDDocumentURL     string   `json:"id_document_url"`
+	Dob           string `json:"dob,omitempty"`
+	IDDocumentURL string `json:"id_document_url"`
 	// IDDocumentBackURL is the optional back side of the ID document.
-	IDDocumentBackURL string   `json:"id_document_back_url,omitempty"`
+	IDDocumentBackURL string `json:"id_document_back_url,omitempty"`
 	// SelfieURL is the v1 selfie photo (simple capture; true liveness
 	// detection is future scope, not a blocker).
 	SelfieURL       string     `json:"selfie_url,omitempty"`
@@ -191,53 +191,53 @@ type KYCSubmission struct {
 }
 
 var (
-	ErrOrgNotFound      = errors.New("organization not found")
-	ErrNotOrgMember     = errors.New("not a member of this organization")
-	ErrForbidden        = errors.New("insufficient privileges for this action")
-	ErrAlreadyMember    = errors.New("user is already a member of this organization")
-	ErrUserNotFound     = errors.New("no account found for that email")
-	ErrLastOwner        = errors.New("organization must keep at least one owner")
-	ErrOrgNotEmpty      = errors.New("organization still has apps — delete or move them first")
-	ErrInviteNotFound       = errors.New("no pending invite for this user")
-	ErrCannotRemoveSelf     = errors.New("use leave instead of removing yourself")
-	ErrSingleOrg            = errors.New("each account belongs to a single organization")
-	ErrKYCNotSubmitted      = errors.New("no kyc submission for this organization")
-	ErrKYCNotInReview       = errors.New("organization has no submission awaiting review")
-	ErrKYCQueueStatusUnknown = errors.New("unknown kyc queue status")
-	ErrReverificationRequired = errors.New("business name and TIN are locked after verification — resubmit verification to change them")
+	ErrOrgNotFound                   = errors.New("organization not found")
+	ErrNotOrgMember                  = errors.New("not a member of this organization")
+	ErrForbidden                     = errors.New("insufficient privileges for this action")
+	ErrAlreadyMember                 = errors.New("user is already a member of this organization")
+	ErrUserNotFound                  = errors.New("no account found for that email")
+	ErrLastOwner                     = errors.New("organization must keep at least one owner")
+	ErrOrgNotEmpty                   = errors.New("organization still has apps — delete or move them first")
+	ErrInviteNotFound                = errors.New("no pending invite for this user")
+	ErrCannotRemoveSelf              = errors.New("use leave instead of removing yourself")
+	ErrSingleOrg                     = errors.New("each account belongs to a single organization")
+	ErrKYCNotSubmitted               = errors.New("no kyc submission for this organization")
+	ErrKYCNotInReview                = errors.New("organization has no submission awaiting review")
+	ErrKYCQueueStatusUnknown         = errors.New("unknown kyc queue status")
+	ErrReverificationRequired        = errors.New("business name and TIN are locked after verification — resubmit verification to change them")
 	ErrReverificationRequiredCreator = errors.New("name and ID are locked after verification — resubmit verification to change them")
-	ErrAccountKindImmutable = errors.New("account kind cannot be changed after signup")
-	ErrHandleTaken = errors.New("that handle is already taken")
-	ErrHandleInvalid = errors.New("handle must be 3-30 lowercase letters, numbers, dots, hyphens or underscores")
-	ErrSurveyNotFound = errors.New("no onboarding survey for this organization")
-	ErrKindSwitchSubmitted = errors.New("account kind can only be switched before verification is submitted")
-	ErrHandleReserved = errors.New("that handle is reserved — pick another")
-	ErrSupportPageDisabled = errors.New("this creator is not accepting support yet")
-	ErrNotCreatorOrg = errors.New("support pages are for creator accounts only")
-	ErrNotMerchantOrg = errors.New("team management is for business accounts only")
-	ErrKindSwitchDisabled = errors.New("account kind cannot be switched — business and creator accounts are fully separate")
+	ErrAccountKindImmutable          = errors.New("account kind cannot be changed after signup")
+	ErrHandleTaken                   = errors.New("that handle is already taken")
+	ErrHandleInvalid                 = errors.New("handle must be 3-30 lowercase letters, numbers, dots, hyphens or underscores")
+	ErrSurveyNotFound                = errors.New("no onboarding survey for this organization")
+	ErrKindSwitchSubmitted           = errors.New("account kind can only be switched before verification is submitted")
+	ErrHandleReserved                = errors.New("that handle is reserved — pick another")
+	ErrSupportPageDisabled           = errors.New("this creator is not accepting support yet")
+	ErrNotCreatorOrg                 = errors.New("support pages are for creator accounts only")
+	ErrNotMerchantOrg                = errors.New("team management is for business accounts only")
+	ErrKindSwitchDisabled            = errors.New("account kind cannot be switched — business and creator accounts are fully separate")
 )
 
 // KYCAttempt is one immutable history row: every submit and every admin
 // decision appends one. The live kyc_submissions row stays the enforced
 // source of truth.
 type KYCAttempt struct {
-	ID             string     `json:"id"`
-	OrgID          string     `json:"org_id"`
-	BusinessName   string     `json:"business_name"`
-	TIN            string     `json:"tin"`
-	FullName       string     `json:"full_name,omitempty"`
-	IDType         string     `json:"id_type,omitempty"`
-	IDNumber       string     `json:"id_number,omitempty"`
-	Dob            string     `json:"dob,omitempty"`
-	IDDocumentURL  string     `json:"id_document_url"`
-	IDDocumentBackURL string  `json:"id_document_back_url,omitempty"`
-	SelfieURL      string     `json:"selfie_url,omitempty"`
-	Status         string     `json:"status"`
-	RejectionReason string    `json:"rejection_reason,omitempty"`
-	ReviewedBy     string     `json:"reviewed_by,omitempty"`
-	ReviewedAt     *time.Time `json:"reviewed_at,omitempty"`
-	CreatedAt      time.Time  `json:"created_at"`
+	ID                string     `json:"id"`
+	OrgID             string     `json:"org_id"`
+	BusinessName      string     `json:"business_name"`
+	TIN               string     `json:"tin"`
+	FullName          string     `json:"full_name,omitempty"`
+	IDType            string     `json:"id_type,omitempty"`
+	IDNumber          string     `json:"id_number,omitempty"`
+	Dob               string     `json:"dob,omitempty"`
+	IDDocumentURL     string     `json:"id_document_url"`
+	IDDocumentBackURL string     `json:"id_document_back_url,omitempty"`
+	SelfieURL         string     `json:"selfie_url,omitempty"`
+	Status            string     `json:"status"`
+	RejectionReason   string     `json:"rejection_reason,omitempty"`
+	ReviewedBy        string     `json:"reviewed_by,omitempty"`
+	ReviewedAt        *time.Time `json:"reviewed_at,omitempty"`
+	CreatedAt         time.Time  `json:"created_at"`
 }
 
 // NotificationPrefs gates per-org event notifications. Absent row == all
@@ -256,33 +256,33 @@ type NotificationPrefs struct {
 // current submission evidence plus the owner's contact (first active
 // owner) so reviewers can reach the business.
 type KYCQueueItem struct {
-	OrgID           string    `json:"org_id"`
-	OrgName         string    `json:"org_name"`
-	Slug            string    `json:"slug"`
-	KYCStatus       string    `json:"kyc_status"`
-	AccountKind     string    `json:"account_kind"`
-	BusinessName    string    `json:"business_name"`
-	TIN             string    `json:"tin"`
-	FullName        string    `json:"full_name,omitempty"`
-	IDType          string    `json:"id_type,omitempty"`
-	IDNumber        string    `json:"id_number,omitempty"`
+	OrgID        string `json:"org_id"`
+	OrgName      string `json:"org_name"`
+	Slug         string `json:"slug"`
+	KYCStatus    string `json:"kyc_status"`
+	AccountKind  string `json:"account_kind"`
+	BusinessName string `json:"business_name"`
+	TIN          string `json:"tin"`
+	FullName     string `json:"full_name,omitempty"`
+	IDType       string `json:"id_type,omitempty"`
+	IDNumber     string `json:"id_number,omitempty"`
 	// Dob is shown to reviewers so the 18+ gate can be audited.
-	Dob             string    `json:"dob,omitempty"`
+	Dob string `json:"dob,omitempty"`
 	// Category is the creator's self-reported survey category (empty for
 	// merchants) so reviewers see which track each file belongs to.
-	Category        string    `json:"category,omitempty"`
+	Category string `json:"category,omitempty"`
 	// Creator survey risk signal (segmentation only — never raises limits).
-	SuggestedRiskTier  string `json:"suggested_risk_tier,omitempty"`
-	ExpectedVolumeBand string `json:"expected_volume_band,omitempty"`
-	ExpectedTxnBand    string `json:"expected_txn_band,omitempty"`
-	HasDocument     bool      `json:"has_document"`
-	HasBackDocument bool      `json:"has_back_document"`
-	HasSelfie       bool      `json:"has_selfie"`
-	SubmittedAt     time.Time `json:"submitted_at"`
-	RejectionReason string    `json:"rejection_reason,omitempty"`
-	OwnerEmail      string    `json:"owner_email,omitempty"`
-	OwnerName       string    `json:"owner_name,omitempty"`
-	OwnerPhone      string    `json:"owner_phone,omitempty"`
+	SuggestedRiskTier  string    `json:"suggested_risk_tier,omitempty"`
+	ExpectedVolumeBand string    `json:"expected_volume_band,omitempty"`
+	ExpectedTxnBand    string    `json:"expected_txn_band,omitempty"`
+	HasDocument        bool      `json:"has_document"`
+	HasBackDocument    bool      `json:"has_back_document"`
+	HasSelfie          bool      `json:"has_selfie"`
+	SubmittedAt        time.Time `json:"submitted_at"`
+	RejectionReason    string    `json:"rejection_reason,omitempty"`
+	OwnerEmail         string    `json:"owner_email,omitempty"`
+	OwnerName          string    `json:"owner_name,omitempty"`
+	OwnerPhone         string    `json:"owner_phone,omitempty"`
 }
 
 // ReservedHandle reports whether a handle is blocked from registration:
@@ -308,13 +308,13 @@ func ReservedHandle(handle string) bool {
 // (fixed preset or buyer-entered open amount). The Block 3 payment_links
 // shape to converge on once that table lands.
 type SupportLink struct {
-	ID         string `json:"id"`
-	OrgID      string `json:"org_id"`
-	Label      string `json:"label"`
-	AmountMode string `json:"amount_mode"`
-	Amount     string `json:"amount,omitempty"`
-	SortOrder  int    `json:"sort_order"`
-	Active     bool   `json:"active"`
+	ID         string    `json:"id"`
+	OrgID      string    `json:"org_id"`
+	Label      string    `json:"label"`
+	AmountMode string    `json:"amount_mode"`
+	Amount     string    `json:"amount,omitempty"`
+	SortOrder  int       `json:"sort_order"`
+	Active     bool      `json:"active"`
 	CreatedAt  time.Time `json:"created_at"`
 }
 
@@ -380,16 +380,17 @@ const (
 	CreatorCategoryFreelancerConsultant = "freelancer_consultant"
 	CreatorCategoryCoachEducator        = "coach_educator"
 	CreatorCategoryNonprofitCause       = "nonprofit_cause"
+	CreatorCategoryPersonalUse          = "personal_use"
 	CreatorCategoryOther                = "other"
 )
 
 const (
-	CreatorReferralSocialMedia  = "social_media"
-	CreatorReferralFriend       = "friend_colleague"
-	CreatorReferralSearch       = "search_engine"
-	CreatorReferralEvent        = "event_conference"
+	CreatorReferralSocialMedia   = "social_media"
+	CreatorReferralFriend        = "friend_colleague"
+	CreatorReferralSearch        = "search_engine"
+	CreatorReferralEvent         = "event_conference"
 	CreatorReferralAdvertisement = "advertisement"
-	CreatorReferralOther        = "other"
+	CreatorReferralOther         = "other"
 )
 
 const (
@@ -400,11 +401,11 @@ const (
 )
 
 const (
-	CreatorVolumeUnder100K  = "under_100k"
-	CreatorVolume100KTo1M   = "100k_1m"
-	CreatorVolume1MTo10M    = "1m_10m"
-	CreatorVolume10MTo100M  = "10m_100m"
-	CreatorVolumeOver100M   = "over_100m"
+	CreatorVolumeUnder100K = "under_100k"
+	CreatorVolume100KTo1M  = "100k_1m"
+	CreatorVolume1MTo10M   = "1m_10m"
+	CreatorVolume10MTo100M = "10m_100m"
+	CreatorVolumeOver100M  = "over_100m"
 )
 
 const (
@@ -436,8 +437,8 @@ type CreatorSurvey struct {
 	ExpectedTxnBand    string   `json:"expected_txn_band"`
 	// SuggestedRiskTier is derived from the bands, not stored.
 	SuggestedRiskTier string    `json:"suggested_risk_tier"`
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 // CreatorSurveyInput carries survey answers. DisplayName (Q1) is applied
@@ -454,14 +455,14 @@ type CreatorSurveyInput struct {
 
 // CreatorKYCInput carries individual verification evidence.
 type CreatorKYCInput struct {
-	FullName    string
-	IDType      string
-	IDNumber    string
+	FullName string
+	IDType   string
+	IDNumber string
 	// Dob is the date of birth (YYYY-MM-DD). Must be 18+.
-	Dob         string
-	DocURL      string
+	Dob    string
+	DocURL string
 	// DocBackURL is the optional back side of the ID document.
-	DocBackURL  string
+	DocBackURL string
 	// SelfieURL is the v1 selfie photo (required).
-	SelfieURL   string
+	SelfieURL string
 }

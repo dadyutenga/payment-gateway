@@ -18,8 +18,7 @@ const Welcome = () => {
         </h1>
         <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-600 sm:text-base">
           LipaGO lets your app take mobile-money payments, tracks a real
-          per-app ledger balance, and pays out via withdrawals. Businesses
-          verify their organization (KYC) and creators verify their identity
+          per-app ledger balance, and pays out via withdrawals. Businesses verify their business (KYC) and individuals verify their identity
           to unlock live payments — sandbox mode works immediately.
         </p>
 
@@ -56,14 +55,14 @@ const Welcome = () => {
             <CardContent className="flex h-full flex-col p-6">
               <div className="flex items-center gap-2">
                 <HeartHandshake className="h-5 w-5 text-fuchsia-600" />
-                <h2 className="text-lg font-bold text-slate-900">Creators</h2>
+                <h2 className="text-lg font-bold text-slate-900">Individuals</h2>
                 <span className="rounded bg-fuchsia-100 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-fuchsia-700">
                   Individual
                 </span>
               </div>
               <ul className="mt-3 list-disc space-y-1 pl-5 text-sm text-slate-600">
-                <li>Create a personal account — no team, no org setup</li>
-                <li>Get your support page and share it with fans</li>
+                <li>Create a personal account — no team or business setup</li>
+                <li>Receive payments, share a support page, or collect tips</li>
                 <li>Verify your identity to unlock live payouts</li>
               </ul>
               <div className="mt-5 flex flex-wrap gap-2">
@@ -71,7 +70,7 @@ const Welcome = () => {
                   <Link to="/creator/register">Create account <ArrowRight className="h-3.5 w-3.5 ml-1" /></Link>
                 </Button>
                 <Button variant="outline" asChild>
-                  <Link to="/creator/login">Creator sign in</Link>
+                  <Link to="/creator/login">Individual sign in</Link>
                 </Button>
               </div>
               <p className="mt-3 text-xs text-slate-400">

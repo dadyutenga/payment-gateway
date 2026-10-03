@@ -13,7 +13,7 @@ export default function AuthChooser({ mode }: { mode: "login" | "register" }) {
       <Card className="w-full max-w-lg">
         <CardContent className="p-6">
           <h1 className="text-lg font-bold text-slate-900">{title}</h1>
-          <p className="mt-1 text-sm text-slate-500">Choose your workspace. Business and creator accounts are fully separate — no switching.</p>
+          <p className="mt-1 text-sm text-slate-500">Choose your workspace. Business and personal accounts are fully separate — no switching.</p>
           <div className="mt-5 grid gap-3 sm:grid-cols-2">
             <Link to={`/merchant/${mode}${suffix}`} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm transition hover:border-slate-300 hover:shadow">
               <Building2 className="h-5 w-5 text-slate-700" />
@@ -23,9 +23,9 @@ export default function AuthChooser({ mode }: { mode: "login" | "register" }) {
             </Link>
             <Link to={`/creator/${mode}${suffix}`} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm transition hover:border-slate-300 hover:shadow">
               <HeartHandshake className="h-5 w-5 text-slate-700" />
-              <p className="mt-2 font-semibold text-slate-900">I&apos;m a creator / individual</p>
-              <p className="mt-1 text-xs text-slate-500">Personal workspace: your page, payouts, individual verification (ID + selfie). No team.</p>
-              <p className="mt-2 text-xs font-medium text-blue-600">Go to Creator {mode === "login" ? "sign in" : "signup"} →</p>
+              <p className="mt-2 font-semibold text-slate-900">I&apos;m an individual</p>
+              <p className="mt-1 text-xs text-slate-500">Personal workspace: receive payments, share a support page, and manage payouts. Individual verification (ID + selfie).</p>
+              <p className="mt-2 text-xs font-medium text-blue-600">Go to Individual {mode === "login" ? "sign in" : "signup"} →</p>
             </Link>
           </div>
         </CardContent>

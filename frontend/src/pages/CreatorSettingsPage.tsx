@@ -36,9 +36,9 @@ const CreatorSettingsPage = () => {
       <div>
         <h2 className="text-2xl font-bold text-slate-900">Settings — {org.display_name || org.name}</h2>
         <p className="mt-1 flex flex-wrap items-center gap-2 text-sm text-slate-500">
-          Creator page settings.
+          Personal account settings.
           <Badge variant="secondary">{org.role}</Badge>
-          <Badge variant="outline">creator</Badge>
+          <Badge variant="outline">individual</Badge>
         </p>
       </div>
 

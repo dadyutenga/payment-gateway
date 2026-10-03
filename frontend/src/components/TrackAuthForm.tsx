@@ -22,10 +22,10 @@ const COPY: Record<AccountKind, { loginTitle: string; loginSub: string; register
     registerSub: "For companies and organizations. Team members, API keys, business verification (TIN).",
   },
   creator: {
-    loginTitle: "Creator sign in",
-    loginSub: "Access your personal creator workspace — your page, payouts, support.",
-    registerTitle: "Create your creator account",
-    registerSub: "For individuals. One personal account, no team — handle, individual verification (ID + selfie).",
+    loginTitle: "Individual sign in",
+    loginSub: "Access your personal workspace — receive payments, support page, and payouts.",
+    registerTitle: "Create your personal account",
+    registerSub: "For any individual. Receive payments, share a support page, or collect tips — no business setup required."
   },
 };
 
@@ -80,7 +80,7 @@ export default function TrackAuthForm({ kind, mode }: { kind: AccountKind; mode:
       <Card className="w-full max-w-sm">
         <CardContent className="p-6">
           <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">
-            {isCreator ? "Creator / Individual" : "Merchant / Business"}
+            {isCreator ? "Individual / Personal" : "Merchant / Business"}
           </p>
           <h1 className="mt-1 text-lg font-bold text-slate-900">{mode === "login" ? copy.loginTitle : copy.registerTitle}</h1>
           <p className="mt-1 text-sm text-slate-500">{mode === "login" ? copy.loginSub : copy.registerSub}</p>
@@ -96,7 +96,7 @@ export default function TrackAuthForm({ kind, mode }: { kind: AccountKind; mode:
                   <div>
                     <label className="text-sm font-medium text-slate-700">Handle</label>
                     <Input value={handle} onChange={(e) => setHandle(e.target.value.toLowerCase().replace(/[^a-z0-9._-]/g, ""))} required minLength={3} maxLength={30} placeholder="amina.creates" className="mt-1" />
-                    <p className="mt-1 text-xs text-slate-400">Your personal support link. No organization setup is required.</p>
+                    <p className="mt-1 text-xs text-slate-400">Your personal support link. No business setup is required.</p>
                   </div>
                 </>
               ) : (
@@ -125,7 +125,7 @@ export default function TrackAuthForm({ kind, mode }: { kind: AccountKind; mode:
               <>
                 New here?{" "}
                 <Link to={ownOtherMode + (next ? `?next=${encodeURIComponent(next)}` : "")} className="text-blue-600 hover:underline">
-                  Create a {isCreator ? "creator" : "business"} account
+                  Create a {isCreator ? "personal" : "business"} account
                 </Link>
               </>
             ) : (
@@ -147,9 +147,9 @@ export default function TrackAuthForm({ kind, mode }: { kind: AccountKind; mode:
               </>
             ) : (
               <>
-                Creator or individual?{" "}
+                Individual account?{" "}
                 <Link to={mode === "login" ? oppositeLogin : oppositeRegister} className="text-blue-600 hover:underline">
-                  Go to Creator {mode === "login" ? "sign in" : "signup"} →
+                  Go to Individual {mode === "login" ? "sign in" : "signup"} →
                 </Link>
               </>
             )}
