@@ -347,6 +347,9 @@ func (s *Service) RegisterKind(ctx context.Context, email, password, kind, displ
 		return User{}, "", fmt.Errorf("create user: %w", err)
 	}
 	u.IsAdmin = false
+	// The inbox is best-effort: account creation must not fail if an older
+	// deployment has not applied the dashboard notification migration yet.
+	_, _ = s.db.ExecEx(ctx, `INSERT INTO app.dashboard_notifications (recipient_id, audience, title, description, emoji) VALUES ($1::uuid, 'customer', $2, $3, $4)`, nil, u.ID, "Welcome to LipaGO", "Your workspace is ready. Complete verification when you’re ready to enable live payments.", "👋")
 	if kind == "creator" && s.creatorAccountProvisioner != nil {
 		if err := s.creatorAccountProvisioner(ctx, u.ID, displayName, handle, bio); err != nil {
 			_, _ = s.db.ExecEx(ctx, `DELETE FROM app.users WHERE id = $1::uuid`, nil, u.ID)
@@ -652,6 +655,85 @@ type AdminProfile struct {
 	IsAdmin   bool   `json:"is_admin"`
 	HasTOTP   bool   `json:"has_totp"`
 	LastLogin string `json:"last_login_at,omitempty"`
+}
+
+type DashboardNotification struct {
+	ID          string     `json:"id"`
+	Title       string     `json:"title"`
+	Description string     `json:"description"`
+	Emoji       string     `json:"emoji,omitempty"`
+	Link        string     `json:"link,omitempty"`
+	ReadAt      *time.Time `json:"read_at,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+}
+
+func (s *Service) listDashboardNotifications(ctx context.Context, recipientID, audience string) ([]DashboardNotification, error) {
+	rows, err := s.db.QueryEx(ctx, `
+		SELECT id::text, title, description, emoji, link, read_at, created_at
+		FROM app.dashboard_notifications
+		WHERE recipient_id = $1::uuid AND audience = $2
+		ORDER BY created_at DESC LIMIT 50`, nil, recipientID, audience)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	notifications := make([]DashboardNotification, 0)
+	for rows.Next() {
+		var item DashboardNotification
+		var emoji, link string
+		if err := rows.Scan(&item.ID, &item.Title, &item.Description, &emoji, &link, &item.ReadAt, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		item.Emoji = emoji
+		item.Link = link
+		notifications = append(notifications, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return notifications, nil
+}
+
+func (s *Service) markAllDashboardNotificationsRead(ctx context.Context, recipientID, audience string) (int64, error) {
+	tag, err := s.db.ExecEx(ctx, `
+		UPDATE app.dashboard_notifications
+		SET read_at = COALESCE(read_at, NOW())
+		WHERE recipient_id = $1::uuid AND audience = $2 AND read_at IS NULL`, nil, recipientID, audience)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
+func (s *Service) handleDashboardNotifications(w http.ResponseWriter, r *http.Request, audience string) {
+	claims, ok := ClaimsFromContext(r.Context())
+	if !ok {
+		httputil.Error(w, http.StatusUnauthorized, "unauthorized", "Missing authenticated user.", nil)
+		return
+	}
+	if r.Method == http.MethodPatch && r.URL.Path != "" {
+		updated, err := s.markAllDashboardNotificationsRead(r.Context(), claims.Subject, audience)
+		if err != nil {
+			httputil.Error(w, http.StatusInternalServerError, "internal_error", "Unable to update notifications.", nil)
+			return
+		}
+		httputil.JSON(w, http.StatusOK, map[string]any{"data": map[string]any{"updated": updated}})
+		return
+	}
+	notifications, err := s.listDashboardNotifications(r.Context(), claims.Subject, audience)
+	if err != nil {
+		httputil.Error(w, http.StatusInternalServerError, "internal_error", "Unable to load notifications.", nil)
+		return
+	}
+	httputil.JSON(w, http.StatusOK, map[string]any{"data": notifications})
+}
+
+func (s *Service) HandleCustomerNotifications(w http.ResponseWriter, r *http.Request) {
+	s.handleDashboardNotifications(w, r, AudienceCustomer)
+}
+
+func (s *Service) HandleAdminNotifications(w http.ResponseWriter, r *http.Request) {
+	s.handleDashboardNotifications(w, r, AudienceAdmin)
 }
 
 // GetAdminProfile loads the operator identity from app.admin_users.

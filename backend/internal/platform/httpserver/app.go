@@ -186,9 +186,13 @@ func New(ctx context.Context) (*App, error) {
 	mux.Handle("POST /api/v1/auth/password", middleware.Chain(http.HandlerFunc(authService.HandlePasswordChange), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, false)))
 	mux.Handle("GET /api/v1/auth/profile", middleware.Chain(http.HandlerFunc(authService.HandleGetOwnProfile), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, false)))
 	mux.Handle("PATCH /api/v1/auth/profile", middleware.Chain(http.HandlerFunc(authService.HandleUpdateOwnProfile), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, false)))
+	mux.Handle("GET /api/v1/auth/notifications", middleware.Chain(http.HandlerFunc(authService.HandleCustomerNotifications), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, false)))
+	mux.Handle("PATCH /api/v1/auth/notifications/read-all", middleware.Chain(http.HandlerFunc(authService.HandleCustomerNotifications), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, false)))
 	// Canonical identity endpoints per space.
 	mux.Handle("GET /api/v1/auth/me", middleware.Chain(http.HandlerFunc(authService.HandleCustomerMe), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, false)))
 	mux.Handle("GET /api/v1/admin/auth/me", middleware.Chain(http.HandlerFunc(authService.HandleAdminMe), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))
+	mux.Handle("GET /api/v1/admin/auth/notifications", middleware.Chain(http.HandlerFunc(authService.HandleAdminNotifications), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))
+	mux.Handle("PATCH /api/v1/admin/auth/notifications/read-all", middleware.Chain(http.HandlerFunc(authService.HandleAdminNotifications), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))
 
 	mux.HandleFunc("GET /api/v1/health", func(w http.ResponseWriter, r *http.Request) {
 		dbStatus := "up"

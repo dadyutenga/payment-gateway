@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { Link } from "react-router-dom";
 import { useQueries, useQuery } from "@tanstack/react-query";
-import { ArrowRight } from "lucide-react";
+import { ArrowRight, ShieldCheck } from "lucide-react";
 import { Area, AreaChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -12,6 +12,8 @@ import { listMyOrgs } from "@/lib/orgApi";
 import { fetchCreatorOverview, fetchCreatorSupporters, listCreatorApps, listCreatorOrders } from "@/lib/creatorApi";
 import { EnvToggle } from "@/pages/merchantAnalyticsCommon";
 import { DateRangePicker, moneyText, useFilterParams } from "@/pages/analyticsCommon";
+import DashboardGreeting from "@/components/DashboardGreeting";
+import OutstandingTasks from "@/components/OutstandingTasks";
 
 // Masking helpers (Phase 2 privacy rule): supporter identities stay
 // masked — first name plus partially hidden phone, never full details.
@@ -87,16 +89,7 @@ const CreatorOverview = () => {
   return (
     <div>
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <h2 className="text-2xl font-bold text-slate-900">
-            {org ? `Karibu, ${org.display_name || org.name}` : "Overview"}
-          </h2>
-          <p className="mt-1 text-sm text-slate-500">
-            {org && org.kyc_status !== "verified"
-              ? "Sandbox mode — verify your identity to unlock live support payments."
-              : "Live mode — your page accepts real support."}
-          </p>
-        </div>
+        <DashboardGreeting description={org && org.kyc_status !== "verified" ? "A quick identity check helps keep your page secure and unlocks live support payments." : "See how your page is performing and stay close to the people supporting your work."} />
         <div className="flex flex-wrap items-center gap-2">
           <EnvToggle env={env} onChange={setEnv} />
           <DateRangePicker from={from} to={to} onChange={setRange} />
@@ -112,6 +105,8 @@ const CreatorOverview = () => {
           )}
         </div>
       </div>
+
+      {org && org.kyc_status !== "verified" && <OutstandingTasks items={[{ icon: ShieldCheck, label: "Verify your identity", status: "Required for live support payments", action: { label: "Start verification", to: `/creator/verify/${org.id}` } }]} />}
 
       {loading ? (
         <div className="mt-6 grid gap-3 sm:grid-cols-3">

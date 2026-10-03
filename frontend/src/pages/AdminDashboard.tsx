@@ -6,6 +6,9 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { getPlatformStats, listKYCQueue } from "@/lib/adminOrgApi";
+import DashboardGreeting from "@/components/DashboardGreeting";
+import OutstandingTasks from "@/components/OutstandingTasks";
+import { ClipboardCheck } from "lucide-react";
 
 // Operator home dashboard: tenant counts, verification funnel, payout
 // workload, and the actionable KYC queue — doors to every admin section.
@@ -36,10 +39,9 @@ const AdminDashboard = () => {
 
   return (
     <div>
-      <div>
-        <h2 className="text-2xl font-bold text-slate-900">Karibu, Operator</h2>
-        <p className="mt-1 text-sm text-slate-500">Platform at a glance — tenants, verification, and payout workload.</p>
-      </div>
+      <DashboardGreeting space="admin" description="Review platform health, verification workload, and payout operations from one place." />
+
+      {(stats?.kyc_awaiting_review ?? 0) > 0 && <OutstandingTasks items={[{ icon: ClipboardCheck, label: "Review pending KYC", status: `${stats?.kyc_awaiting_review} awaiting review`, action: { label: "Open review queue", to: "/admin/kyc" } }]} />}
 
       {loading ? (
         <div className="mt-6 grid gap-3 sm:grid-cols-3">

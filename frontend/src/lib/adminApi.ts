@@ -103,7 +103,7 @@ async function request<T>(
 // ---------- Identity ----------
 
 export async function getAdminMe() {
-  return (await request<{ email: string; is_admin: boolean }>("/api/v1/admin/me")).data;
+  return (await request<{ email: string; is_admin: boolean; full_name?: string }>("/api/v1/admin/auth/me")).data;
 }
 
 // ---------- Payments ----------

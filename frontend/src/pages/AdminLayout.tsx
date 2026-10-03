@@ -126,7 +126,7 @@ const AdminLayout = () => {
   );
 
   return (
-    <div className="min-h-screen bg-slate-50 lg:flex">
+    <div className="min-h-screen bg-background lg:flex">
       <aside
         className={`sticky top-0 hidden h-screen shrink-0 transition-[width] lg:block ${
           collapsed ? "w-16" : "w-64"
@@ -151,14 +151,14 @@ const AdminLayout = () => {
       <div className="flex min-h-screen min-w-0 flex-1 flex-col">
         <SpaceTopbar
           onMenu={() => setDrawerOpen(true)}
-          brand={brand}
           userLabel="Operator"
+          space="admin"
           onSignOut={() => {
             signOut();
             window.location.assign("/admin/login");
           }}
         />
-        <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-6 sm:px-6">
+        <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-8 sm:px-6">
           <Outlet />
         </main>
       </div>

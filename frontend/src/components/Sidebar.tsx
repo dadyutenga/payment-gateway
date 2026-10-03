@@ -100,7 +100,7 @@ const Sidebar = ({
     <nav
       role="navigation"
       aria-label={typeof spaceBadge === "string" ? spaceBadge : "Primary"}
-      className="flex h-full w-full flex-col overflow-y-auto border-r border-sidebar-border bg-sidebar"
+      className="flex h-full w-full flex-col overflow-y-auto bg-sidebar"
     >
       <div className="flex items-center gap-2 px-4 pb-2 pt-4 font-bold text-sidebar-foreground">
         {!collapsed && spaceBadge}

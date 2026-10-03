@@ -1,6 +1,6 @@
 import { Link } from "react-router-dom";
 import { useQueries, useQuery } from "@tanstack/react-query";
-import { ArrowRight, Plus } from "lucide-react";
+import { ArrowRight, Plus, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
@@ -13,6 +13,8 @@ import {
   listMerchantWithdrawals,
   listMyApps,
 } from "@/lib/merchantApi";
+import DashboardGreeting from "@/components/DashboardGreeting";
+import OutstandingTasks from "@/components/OutstandingTasks";
 
 // Merchant home dashboard: org verification state, balances across apps,
 // recent payments, and pending withdrawals — with doors to every section.
@@ -66,16 +68,7 @@ const MerchantDashboard = () => {
   return (
     <div>
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <h2 className="text-2xl font-bold text-slate-900">
-            {org ? `Karibu, ${org.name}` : "Dashboard"}
-          </h2>
-          <p className="mt-1 text-sm text-slate-500">
-            {org && org.kyc_status !== "verified"
-              ? "Sandbox mode — verify your organization to unlock live payments."
-              : "Live mode — your organization is verified."}
-          </p>
-        </div>
+        <DashboardGreeting description={org && org.kyc_status !== "verified" ? "To keep your account secure and enable live payments, verify your organization when you’re ready." : "Your payment workspace is ready. Monitor activity, manage apps, and keep your payouts moving."} />
         <div className="flex items-center gap-2">
           {org && org.kyc_status !== "verified" && (
             <Button size="sm" variant="outline" asChild>
@@ -87,6 +80,8 @@ const MerchantDashboard = () => {
           </Button>
         </div>
       </div>
+
+      {org && org.kyc_status !== "verified" && <OutstandingTasks items={[{ icon: ShieldCheck, label: "Verify your organization", status: "Required for live payments", action: { label: "Start verification", to: `/merchant/verify/${org.id}` } }]} />}
 
       {loading ? (
         <div className="mt-6 grid gap-3 sm:grid-cols-3">

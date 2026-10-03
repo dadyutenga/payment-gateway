@@ -126,7 +126,7 @@ const CreatorLayout = () => {
   );
 
   return (
-    <div className="min-h-screen bg-fuchsia-50/40 lg:flex">
+    <div className="min-h-screen bg-background lg:flex">
       <TrackNoticeToast />
       <aside
         className={`sticky top-0 hidden h-screen shrink-0 border-t-4 border-fuchsia-500 transition-[width] lg:block ${
@@ -152,16 +152,14 @@ const CreatorLayout = () => {
       <div className="flex min-h-screen min-w-0 flex-1 flex-col">
         <SpaceTopbar
           onMenu={() => setDrawerOpen(true)}
-          brand={brand}
-          statusBadge={statusBadge}
           userLabel="Personal account"
-          userLinks={[{ to: "/creator/settings", label: "Settings" }]}
+          space="customer"
           onSignOut={() => {
             signOut();
             window.location.assign("/login");
           }}
         />
-        <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-6 sm:px-6">
+        <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-8 sm:px-6">
           <SandboxModeBanner track="creator" />
           <Outlet />
         </main>

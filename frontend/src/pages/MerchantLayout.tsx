@@ -156,7 +156,7 @@ const MerchantLayout = () => {
   );
 
   return (
-    <div className="min-h-screen bg-slate-50 lg:flex">
+    <div className="min-h-screen bg-background lg:flex">
       <TrackNoticeToast />
       <aside
         className={`sticky top-0 hidden h-screen shrink-0 border-t-4 border-emerald-500 transition-[width] lg:block ${
@@ -182,16 +182,14 @@ const MerchantLayout = () => {
       <div className="flex min-h-screen min-w-0 flex-1 flex-col">
         <SpaceTopbar
           onMenu={() => setDrawerOpen(true)}
-          brand={brand}
-          statusBadge={statusBadge}
           userLabel="Business account"
-          userLinks={[{ to: "/merchant/settings", label: "Settings" }]}
+          space="customer"
           onSignOut={() => {
             signOut();
             window.location.assign("/login");
           }}
         />
-        <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-6 sm:px-6">
+        <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-8 sm:px-6">
           <SandboxModeBanner track="merchant" />
           <Outlet />
         </main>
