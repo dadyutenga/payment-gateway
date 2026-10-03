@@ -3,12 +3,13 @@ import { Outlet, useLocation } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
   Banknote, ChevronsLeft, ChevronsRight, HeartHandshake,
-  LayoutDashboard, Receipt, Settings, Sparkles,
+  LayoutDashboard, Receipt, Settings,
 } from "lucide-react";
 import { signOut } from "@/lib/auth";
 import { listMyOrgs } from "@/lib/orgApi";
 import SandboxModeBanner from "@/components/SandboxModeBanner";
 import Sidebar, { type SidebarNavGroup } from "@/components/Sidebar";
+import BrandMark from "@/components/BrandMark";
 import SpaceTopbar from "@/components/SpaceTopbar";
 import { TrackNoticeToast } from "@/components/TrackRoute";
 
@@ -95,7 +96,7 @@ const CreatorLayout = () => {
 
   const brand = (
     <>
-      <Sparkles className="h-5 w-5 text-fuchsia-600" />
+      <BrandMark className="h-6 w-6" />
       LipaGO
       <span className="rounded bg-fuchsia-100 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-fuchsia-700">
         Individual

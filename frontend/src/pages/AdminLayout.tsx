@@ -8,6 +8,7 @@ import {
 import { signOut } from "@/lib/auth";
 import { getAdminMe } from "@/lib/adminApi";
 import Sidebar, { type SidebarNavGroup } from "@/components/Sidebar";
+import BrandMark from "@/components/BrandMark";
 import SpaceTopbar from "@/components/SpaceTopbar";
 
 const COLLAPSED_KEY = "lipago_sidebar_admin_collapsed";
@@ -95,7 +96,7 @@ const AdminLayout = () => {
 
   const brand = (
     <>
-      <Wallet className="h-5 w-5" />
+      <BrandMark className="h-6 w-6" />
       LipaGO
       <span className="rounded bg-red-100 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-red-700">
         Admin

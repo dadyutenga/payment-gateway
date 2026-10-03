@@ -1,4 +1,5 @@
 import { Building2, Check, HeartHandshake, Smartphone, Wallet } from "lucide-react";
+import BrandMark from "@/components/BrandMark";
 import { Link } from "react-router-dom";
 
 const networkRows = [
@@ -26,7 +27,7 @@ const Welcome = () => (
         <header className="flex items-center justify-between border-b border-white/15 pb-5">
           <Link to="/" className="group inline-flex items-center gap-2.5 rounded-sm text-[#F4EFE6] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#F4B942] focus-visible:ring-offset-2 focus-visible:ring-offset-[#102A43]">
             <span className="grid h-9 w-9 place-items-center bg-[#F4B942] text-[#102A43] transition-transform group-hover:rotate-6">
-              <Wallet className="h-5 w-5" strokeWidth={2.5} />
+              <BrandMark className="h-7 w-7" />
             </span>
             <span className="font-landing-display text-xl font-bold tracking-[-0.04em]">LipaGO</span>
           </Link>
@@ -158,7 +159,7 @@ const Welcome = () => (
     </section>
 
     <footer className="mx-auto flex max-w-7xl flex-col gap-3 px-5 py-8 text-xs text-[#486581] sm:flex-row sm:items-center sm:justify-between sm:px-8 lg:px-10">
-      <div className="flex items-center gap-2 font-bold text-[#102A43]"><Wallet className="h-4 w-4 text-[#0B7285]" /> LipaGO</div>
+      <div className="flex items-center gap-2 font-bold text-[#102A43]"><BrandMark className="h-6 w-6" /> LipaGO</div>
       <p>Sandbox first. Verify to unlock live payments.</p>
     </footer>
   </main>
