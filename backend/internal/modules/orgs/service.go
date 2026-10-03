@@ -835,10 +835,9 @@ func (s *Service) GetCreatorSurvey(ctx context.Context, userID, orgID string) (C
 // track (the Q4 "API integration" escape hatch). Refused once any KYC
 // submission exists — after that, kind changes are support-assisted.
 func (s *Service) SwitchCreatorToMerchant(ctx context.Context, userID, orgID string) (Organization, error) {
-	if _, err := s.CheckOrgPermission(ctx, userID, orgID, PermManageOrg); err != nil {
-		return Organization{}, err
-	}
-	return s.repo.SwitchCreatorToMerchant(ctx, strings.TrimSpace(orgID))
+	// Account kind is immutable. Keep this method only as a compatibility
+	// surface for old callers; never reach the repository conversion path.
+	return Organization{}, ErrKindSwitchDisabled
 }
 
 // SupportPageData is everything the public support page needs that is

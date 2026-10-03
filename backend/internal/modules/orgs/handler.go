@@ -560,6 +560,10 @@ func (h *Handler) GetCreatorSurvey(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if _, err := h.service.RequireCreatorOrg(r.Context(), userID, r.PathValue("orgID"), PermRead); err != nil {
+		h.orgError(w, err, "view the individual onboarding survey")
+		return
+	}
 	survey, err := h.service.GetCreatorSurvey(r.Context(), userID, r.PathValue("orgID"))
 	if err != nil {
 		h.orgError(w, err, "view the onboarding survey")
