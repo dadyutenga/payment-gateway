@@ -27,8 +27,9 @@ const AdminOrgDetail = () => {
   const detail = detailQuery.data;
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
+  const [severity, setSeverity] = useState("info");
   const [notice, setNotice] = useState("");
-  const send = useMutation({ mutationFn: () => sendAdminOrgNotification(orgId, { title, body, severity: "info" }), onSuccess: () => { setTitle(""); setBody(""); setNotice("Notification sent."); }, onError: (error) => setNotice(error instanceof Error ? error.message : "Unable to send notification.") });
+  const send = useMutation({ mutationFn: () => sendAdminOrgNotification(orgId, { title, body, severity }), onSuccess: () => { setTitle(""); setBody(""); setNotice("Notification sent."); }, onError: (error) => setNotice(error instanceof Error ? error.message : "Unable to send notification.") });
   const submitNotification = (event: FormEvent) => { event.preventDefault(); setNotice(""); send.mutate(); };
 
   return (
@@ -54,7 +55,7 @@ const AdminOrgDetail = () => {
 
           <form onSubmit={submitNotification} className="mt-4 rounded-xl border border-border bg-card p-4">
             <div className="flex items-center gap-2"><Send className="h-4 w-4 text-primary" /><h3 className="text-sm font-semibold text-foreground">Send notification to this organization</h3></div>
-            <div className="mt-3 grid gap-3 sm:grid-cols-2"><input required value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Title" className="rounded-md border border-input bg-background px-3 py-2 text-sm" maxLength={160} /><input required value={body} onChange={(event) => setBody(event.target.value)} placeholder="Short message" className="rounded-md border border-input bg-background px-3 py-2 text-sm" maxLength={1000} /></div>
+            <div className="mt-3 grid gap-3 sm:grid-cols-2"><input required value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Title" className="rounded-md border border-input bg-background px-3 py-2 text-sm" maxLength={160} /><input required value={body} onChange={(event) => setBody(event.target.value)} placeholder="Short message" className="rounded-md border border-input bg-background px-3 py-2 text-sm" maxLength={1000} /><select value={severity} onChange={(event) => setSeverity(event.target.value)} className="rounded-md border border-input bg-background px-3 py-2 text-sm" aria-label="Notification severity"><option value="info">Info</option><option value="success">Success</option><option value="warning">Warning</option><option value="alert">Alert</option></select></div>
             <div className="mt-3 flex items-center gap-3"><Button size="sm" type="submit" disabled={send.isPending}>{send.isPending ? "Sending…" : "Send notification"}</Button>{notice && <span className="text-xs text-muted-foreground" role="status">{notice}</span>}</div>
           </form>
 

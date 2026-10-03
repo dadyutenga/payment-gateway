@@ -13,6 +13,7 @@ import (
 
 	"lipago/internal/shared/notify"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx"
 )
 
@@ -81,6 +82,9 @@ func (s *Service) Dispatch(ctx context.Context, event notify.Event) error {
 	if value, ok := event.Data["severity"].(string); ok && isSeverity(value) {
 		template.Severity = value
 	}
+	if value, ok := event.Data["icon"].(string); ok {
+		template.Icon = strings.TrimSpace(value)
+	}
 	title := render(template.Title, event.Data)
 	body := render(template.Body, event.Data)
 	if body == "{body}" || body == "" {
@@ -101,7 +105,12 @@ func (s *Service) Dispatch(ctx context.Context, event notify.Event) error {
 		return err
 	}
 	for _, recipient := range recipients {
-		id, inserted, err := s.insertNotification(ctx, event, recipient, title, body, template)
+		critical := isCritical(event.EventType, template.Severity)
+		inAppEnabled, err := s.channelEnabled(ctx, event, recipient, ChannelInApp, critical)
+		if err != nil {
+			return err
+		}
+		id, inserted, err := s.insertNotification(ctx, event, recipient, title, body, template, inAppEnabled)
 		if err != nil {
 			return err
 		}
@@ -177,7 +186,7 @@ func (s *Service) recipients(ctx context.Context, event notify.Event) ([]recipie
 	return out, rows.Err()
 }
 
-func (s *Service) insertNotification(ctx context.Context, event notify.Event, to recipient, title, body string, template Template) (string, bool, error) {
+func (s *Service) insertNotification(ctx context.Context, event notify.Event, to recipient, title, body string, template Template, inAppEnabled bool) (string, bool, error) {
 	var id string
 	var org any
 	if to.OrgID != "" {
@@ -193,10 +202,10 @@ func (s *Service) insertNotification(ctx context.Context, event notify.Event, to
 	}
 	err := s.db.QueryRowEx(ctx, `
 		INSERT INTO app.notifications
-		(recipient_org_id, recipient_user_id, recipient_admin_id, event_type, reference_id, dedupe_key, title, body, icon, severity, link_url, source, created_by_admin_id)
-		VALUES (NULLIF($1, '')::uuid, NULLIF($2, '')::uuid, NULLIF($3, '')::uuid, $4, NULLIF($5, '')::uuid, NULLIF($6, ''), $7, $8, $9, $10, $11, $12, NULLIF($13, '')::uuid)
+		(recipient_org_id, recipient_user_id, recipient_admin_id, event_type, reference_id, dedupe_key, title, body, icon, severity, link_url, source, created_by_admin_id, in_app_enabled)
+		VALUES (NULLIF($1, '')::uuid, NULLIF($2, '')::uuid, NULLIF($3, '')::uuid, $4, NULLIF($5, '')::uuid, NULLIF($6, ''), $7, $8, $9, $10, $11, $12, NULLIF($13, '')::uuid, $14)
 		ON CONFLICT ((COALESCE(recipient_user_id, recipient_admin_id)), dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING
-		RETURNING id::text`, nil, stringOrEmpty(org), stringOrEmpty(user), stringOrEmpty(admin), event.EventType, event.ReferenceID, event.DedupeKey, title, body, template.Icon, template.Severity, event.LinkURL, event.Source, event.CreatedByAdminID).Scan(&id)
+		RETURNING id::text`, nil, stringOrEmpty(org), stringOrEmpty(user), stringOrEmpty(admin), event.EventType, event.ReferenceID, event.DedupeKey, title, body, template.Icon, template.Severity, event.LinkURL, event.Source, event.CreatedByAdminID, inAppEnabled).Scan(&id)
 	if err == pgx.ErrNoRows {
 		return "", false, nil
 	}
@@ -269,10 +278,10 @@ func (s *Service) List(ctx context.Context, userID, adminID string, unreadOnly b
 	args := []interface{}{}
 	where := ""
 	if adminID != "" {
-		where = "n.recipient_admin_id = $1::uuid"
+		where = "n.recipient_admin_id = $1::uuid AND n.in_app_enabled = TRUE"
 		args = append(args, adminID)
 	} else {
-		where = `n.recipient_user_id = $1::uuid AND (n.recipient_org_id IS NULL OR EXISTS (SELECT 1 FROM app.org_members m WHERE m.user_id = $1::uuid AND m.status = 'active' AND m.org_id = n.recipient_org_id))`
+		where = `n.recipient_user_id = $1::uuid AND n.in_app_enabled = TRUE AND (n.recipient_org_id IS NULL OR EXISTS (SELECT 1 FROM app.org_members m WHERE m.user_id = $1::uuid AND m.status = 'active' AND m.org_id = n.recipient_org_id))`
 		args = append(args, userID)
 	}
 	if unreadOnly {
@@ -332,9 +341,9 @@ func (s *Service) MarkAllRead(ctx context.Context, userID, adminID string) (int6
 }
 
 func (s *Service) UnreadCount(ctx context.Context, userID, adminID string) (int64, error) {
-	where, args := "recipient_user_id = $1::uuid", []interface{}{userID}
+	where, args := "recipient_user_id = $1::uuid AND in_app_enabled = TRUE", []interface{}{userID}
 	if adminID != "" {
-		where, args = "recipient_admin_id = $1::uuid", []interface{}{adminID}
+		where, args = "recipient_admin_id = $1::uuid AND in_app_enabled = TRUE", []interface{}{adminID}
 	}
 	var count int64
 	err := s.db.QueryRowEx(ctx, "SELECT COUNT(*) FROM app.notifications WHERE "+where+" AND read_at IS NULL", nil, args...).Scan(&count)
@@ -433,6 +442,43 @@ func (s *Service) SavePreference(ctx context.Context, scopeKind, scopeID, eventT
 	return err
 }
 
+// ValidatePreferenceScope prevents a customer from reading or changing a
+// different workspace's preferences while still allowing merchant owners to
+// manage org-scoped defaults and individual users to manage personal ones.
+func (s *Service) ValidatePreferenceScope(ctx context.Context, userID, adminID, scopeKind, scopeID string, write bool) error {
+	switch scopeKind {
+	case "admin":
+		if adminID == "" || adminID != scopeID {
+			return errors.New("notification preference scope is not accessible")
+		}
+		return nil
+	case "user":
+		if adminID != "" || userID == "" || userID != scopeID {
+			return errors.New("notification preference scope is not accessible")
+		}
+		return nil
+	case "org":
+		if adminID != "" || userID == "" || scopeID == "" {
+			return errors.New("notification preference scope is not accessible")
+		}
+		var allowed bool
+		query := `SELECT EXISTS (SELECT 1 FROM app.org_members WHERE org_id = $1::uuid AND user_id = $2::uuid AND status = 'active'`
+		if write {
+			query += ` AND role = 'owner'`
+		}
+		query += `)`
+		if err := s.db.QueryRowEx(ctx, query, nil, scopeID, userID).Scan(&allowed); err != nil {
+			return err
+		}
+		if !allowed {
+			return errors.New("notification preference scope is not accessible")
+		}
+		return nil
+	default:
+		return errors.New("invalid preference scope")
+	}
+}
+
 func (s *Service) Broadcast(ctx context.Context, adminID string, in BroadcastRequest) (string, int, error) {
 	if strings.TrimSpace(in.Title) == "" || strings.TrimSpace(in.Body) == "" {
 		return "", 0, errors.New("title and body are required")
@@ -443,15 +489,93 @@ func (s *Service) Broadcast(ctx context.Context, adminID string, in BroadcastReq
 	if in.Target == nil {
 		in.Target = map[string]any{"kind": "all"}
 	}
+	if err := validateBroadcastTarget(in.Target); err != nil {
+		return "", 0, err
+	}
 	targetJSON, err := json.Marshal(in.Target)
 	if err != nil {
 		return "", 0, err
 	}
+	var scheduled any
+	if strings.TrimSpace(in.ScheduledFor) != "" {
+		when, parseErr := time.Parse(time.RFC3339, strings.TrimSpace(in.ScheduledFor))
+		if parseErr != nil {
+			return "", 0, errors.New("scheduled_for must be an RFC3339 timestamp")
+		}
+		scheduled = when.UTC()
+	}
 	var broadcastID string
-	err = s.db.QueryRowEx(ctx, `INSERT INTO app.admin_broadcasts (title, body, icon, severity, target, created_by_admin_id) VALUES ($1, $2, $3, $4, $5::jsonb, $6::uuid) RETURNING id::text`, nil, in.Title, in.Body, in.Icon, in.Severity, string(targetJSON), adminID).Scan(&broadcastID)
+	err = s.db.QueryRowEx(ctx, `INSERT INTO app.admin_broadcasts (title, body, icon, severity, target, scheduled_for, created_by_admin_id) VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7::uuid) RETURNING id::text`, nil, in.Title, in.Body, in.Icon, in.Severity, string(targetJSON), scheduled, adminID).Scan(&broadcastID)
 	if err != nil {
 		return "", 0, err
 	}
+	// Fan-out is claimed by ProcessDueBroadcasts in the API/worker loop.
+	return broadcastID, 0, nil
+}
+
+type broadcastJob struct {
+	id, title, body, icon, severity, target, adminID string
+}
+
+// ProcessDueBroadcasts claims queued broadcasts and fans them out in the
+// background. The row lock makes running API and standalone workers together
+// safe, just like notification delivery processing.
+func (s *Service) ProcessDueBroadcasts(ctx context.Context, limit int) (int, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	rows, err := s.db.QueryEx(ctx, `
+		WITH due AS (
+			SELECT id
+			FROM app.admin_broadcasts
+			WHERE (status = 'queued' AND (scheduled_for IS NULL OR scheduled_for <= NOW()))
+			   OR (status = 'processing' AND processing_started_at <= NOW() - INTERVAL '10 minutes')
+			ORDER BY created_at
+			FOR UPDATE SKIP LOCKED
+			LIMIT $1
+		), claimed AS (
+			UPDATE app.admin_broadcasts b
+			SET status = 'processing', processing_started_at = NOW()
+			FROM due
+			WHERE b.id = due.id
+			RETURNING b.id::text, b.title, b.body, b.icon, b.severity, b.target::text, b.created_by_admin_id::text
+		)
+		SELECT id, title, body, icon, severity, target, created_by_admin_id FROM claimed`, nil, limit)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	jobs := make([]broadcastJob, 0)
+	for rows.Next() {
+		var job broadcastJob
+		if err := rows.Scan(&job.id, &job.title, &job.body, &job.icon, &job.severity, &job.target, &job.adminID); err != nil {
+			return 0, err
+		}
+		jobs = append(jobs, job)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	processed := 0
+	for _, job := range jobs {
+		var target map[string]any
+		if err := json.Unmarshal([]byte(job.target), &target); err != nil {
+			_, _ = s.db.ExecEx(ctx, `UPDATE app.admin_broadcasts SET status = 'failed', last_error = $2, processing_started_at = NULL, processed_at = NOW() WHERE id = $1::uuid`, nil, job.id, err.Error())
+			processed++
+			continue
+		}
+		count, fanoutErr := s.fanOutBroadcast(ctx, job.id, job.adminID, BroadcastRequest{Title: job.title, Body: job.body, Icon: job.icon, Severity: job.severity, Target: target})
+		if fanoutErr != nil {
+			_, _ = s.db.ExecEx(ctx, `UPDATE app.admin_broadcasts SET status = 'failed', last_error = $2, processing_started_at = NULL, processed_at = NOW() WHERE id = $1::uuid`, nil, job.id, fanoutErr.Error())
+		} else {
+			_, _ = s.db.ExecEx(ctx, `UPDATE app.admin_broadcasts SET status = 'sent', recipient_count = $2, last_error = '', processing_started_at = NULL, processed_at = NOW() WHERE id = $1::uuid`, nil, job.id, count)
+		}
+		processed++
+	}
+	return processed, nil
+}
+
+func (s *Service) fanOutBroadcast(ctx context.Context, broadcastID, adminID string, in BroadcastRequest) (int, error) {
 	kind, _ := in.Target["kind"].(string)
 	args := []interface{}{}
 	where := "m.status = 'active'"
@@ -462,38 +586,66 @@ func (s *Service) Broadcast(ctx context.Context, adminID string, in BroadcastReq
 	case "org":
 		orgID, _ := in.Target["org_id"].(string)
 		if orgID == "" {
-			return "", 0, errors.New("target org_id is required")
+			return 0, errors.New("target org_id is required")
 		}
 		where += " AND o.id = $1::uuid"
 		args = append(args, orgID)
 	case "kyc_status":
 		status, _ := in.Target["status"].(string)
 		if status == "" {
-			return "", 0, errors.New("target status is required")
+			return 0, errors.New("target status is required")
 		}
 		where += " AND o.kyc_status = $1"
 		args = append(args, status)
 	case "all", "":
 	default:
-		return "", 0, errors.New("unsupported broadcast target")
+		return 0, errors.New("unsupported broadcast target")
 	}
-	rows, err := s.db.QueryEx(ctx, `SELECT u.id::text, m.org_id::text FROM app.org_members m JOIN app.organizations o ON o.id = m.org_id JOIN app.users u ON u.id = m.user_id WHERE `+where, nil, args...)
+	rows, err := s.db.QueryEx(ctx, `SELECT DISTINCT ON (u.id) u.id::text, m.org_id::text FROM app.org_members m JOIN app.organizations o ON o.id = m.org_id JOIN app.users u ON u.id = m.user_id WHERE `+where+` ORDER BY u.id, m.org_id`, nil, args...)
 	if err != nil {
-		return "", 0, err
+		return 0, err
 	}
 	defer rows.Close()
 	count := 0
 	for rows.Next() {
 		var userID, orgID string
 		if err := rows.Scan(&userID, &orgID); err != nil {
-			return "", count, err
+			return count, err
 		}
-		if err := s.Dispatch(ctx, notify.Event{EventType: "admin.broadcast", UserID: userID, OrgID: orgID, ReferenceID: broadcastID, DedupeKey: "broadcast:" + broadcastID + ":" + userID, Data: map[string]any{"title": in.Title, "body": in.Body, "severity": in.Severity}, Source: "admin", CreatedByAdminID: adminID}); err != nil {
-			return "", count, err
+		if err := s.Dispatch(ctx, notify.Event{EventType: "admin.broadcast", UserID: userID, OrgID: orgID, ReferenceID: broadcastID, DedupeKey: "broadcast:" + broadcastID + ":" + userID, Data: map[string]any{"title": in.Title, "body": in.Body, "severity": in.Severity, "icon": in.Icon}, Source: "admin", CreatedByAdminID: adminID}); err != nil {
+			return count, err
 		}
 		count++
 	}
-	return broadcastID, count, rows.Err()
+	return count, rows.Err()
+}
+
+func validateBroadcastTarget(target map[string]any) error {
+	kind, _ := target["kind"].(string)
+	switch kind {
+	case "all", "merchant", "creator":
+		return nil
+	case "org":
+		if value, _ := target["org_id"].(string); strings.TrimSpace(value) != "" {
+			if _, err := uuid.Parse(strings.TrimSpace(value)); err != nil {
+				return errors.New("target org_id must be a UUID")
+			}
+			return nil
+		}
+		return errors.New("target org_id is required")
+	case "kyc_status":
+		if value, _ := target["status"].(string); strings.TrimSpace(value) != "" {
+			switch strings.ToLower(strings.TrimSpace(value)) {
+			case "pending", "submitted", "verified", "rejected":
+				return nil
+			default:
+				return errors.New("target status is invalid")
+			}
+		}
+		return errors.New("target status is required")
+	default:
+		return errors.New("unsupported broadcast target")
+	}
 }
 
 func (s *Service) SendToOrg(ctx context.Context, adminID, orgID string, in TargetedRequest) error {

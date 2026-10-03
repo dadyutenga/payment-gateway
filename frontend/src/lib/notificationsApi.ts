@@ -46,10 +46,17 @@ export async function listNotifications(space: DashboardSpace, options: { limit?
 }
 export async function markNotificationRead(space: DashboardSpace, id: string) { return request<{ id: string; read: boolean }>(space, `/${encodeURIComponent(id)}/read`, { method: "POST" }); }
 export async function markAllNotificationsRead(space: DashboardSpace) { return request<{ updated: number }>(space, "/read-all", { method: "POST" }); }
-export async function listNotificationPreferences(space: DashboardSpace) { const result = await request<NotificationPreference[]>(space, "/preferences"); return result?.data ?? []; }
-export async function updateNotificationPreference(space: DashboardSpace, preference: { event_type: string; channel: string; enabled: boolean }) { const result = await request<NotificationPreference[]>(space, "/preferences", { method: "PATCH", body: JSON.stringify(preference) }); return result?.data ?? []; }
-export type BroadcastPayload = { title: string; body: string; icon?: string; severity: string; target: Record<string, unknown> };
-export async function sendAdminBroadcast(payload: BroadcastPayload) { return request<{ id: string; recipients: number }>("admin", "/broadcast", { method: "POST", body: JSON.stringify(payload) }); }
+export type PreferenceScope = { scope_kind?: "org" | "user" | "admin"; scope_id?: string };
+export async function listNotificationPreferences(space: DashboardSpace, scope: PreferenceScope = {}) {
+  const result = await request<NotificationPreference[]>(space, "/preferences", {}, { scope_kind: scope.scope_kind, scope_id: scope.scope_id });
+  return result?.data ?? [];
+}
+export async function updateNotificationPreference(space: DashboardSpace, preference: { event_type: string; channel: string; enabled: boolean } & PreferenceScope) {
+  const result = await request<NotificationPreference[]>(space, "/preferences", { method: "PATCH", body: JSON.stringify(preference) });
+  return result?.data ?? [];
+}
+export type BroadcastPayload = { title: string; body: string; icon?: string; severity: string; target: Record<string, unknown>; scheduled_for?: string };
+export async function sendAdminBroadcast(payload: BroadcastPayload) { return request<{ id: string; status: "queued"; recipients: number }>("admin", "/broadcast", { method: "POST", body: JSON.stringify(payload) }); }
 export async function sendAdminOrgNotification(orgId: string, payload: { title: string; body: string; icon?: string; severity: string }) {
   const token = getAdminToken();
   if (!token) throw new Error("You need to sign in to continue.");

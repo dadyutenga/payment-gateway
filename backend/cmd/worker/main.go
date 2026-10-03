@@ -98,6 +98,13 @@ func main() {
 			logger.Info("notification deliveries processed", "count", processed)
 		}
 	}
+	processNotificationBroadcasts := func() {
+		if processed, err := notificationService.ProcessDueBroadcasts(ctx, 10); err != nil {
+			logger.Error("notification broadcast processing failed", "error", err)
+		} else if processed > 0 {
+			logger.Info("notification broadcasts processed", "count", processed)
+		}
+	}
 	reconcilePayments := func() {
 		result, err := paymentService.ReconcilePayments(ctx, positiveInt(cfg.Payments.ReconciliationBatchSize, 50))
 		if err != nil {
@@ -152,6 +159,7 @@ func main() {
 
 	processDeliveries()
 	processNotifications()
+	processNotificationBroadcasts()
 	reconcilePayments()
 	reconcilePayouts()
 	expireOrders()
@@ -165,6 +173,7 @@ func main() {
 		case <-deliveryTicker.C:
 			processDeliveries()
 			processNotifications()
+			processNotificationBroadcasts()
 		case <-reconciliationTicker.C:
 			reconcilePayments()
 			refreshAnalytics()

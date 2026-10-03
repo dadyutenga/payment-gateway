@@ -77,6 +77,7 @@ func (h *Handler) MarkAllRead(w http.ResponseWriter, r *http.Request) {
 
 type preferenceInput struct {
 	ScopeKind string `json:"scope_kind"`
+	ScopeID   string `json:"scope_id"`
 	EventType string `json:"event_type"`
 	Channel   string `json:"channel"`
 	Enabled   *bool  `json:"enabled"`
@@ -89,9 +90,6 @@ func (h *Handler) Preferences(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	scopeKind, scopeID := "user", userID
-	if adminID != "" {
-		scopeKind, scopeID = "admin", adminID
-	}
 	if r.Method == http.MethodPatch {
 		var in preferenceInput
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Enabled == nil {
@@ -101,12 +99,41 @@ func (h *Handler) Preferences(w http.ResponseWriter, r *http.Request) {
 		if in.ScopeKind != "" {
 			scopeKind = in.ScopeKind
 		}
+		if in.ScopeID != "" {
+			scopeID = in.ScopeID
+		}
+		if adminID != "" {
+			scopeKind, scopeID = "admin", adminID
+		}
+		if err := h.service.ValidatePreferenceScope(r.Context(), userID, adminID, scopeKind, scopeID, true); err != nil {
+			status := http.StatusForbidden
+			if strings.Contains(err.Error(), "invalid") {
+				status = http.StatusBadRequest
+			}
+			httputil.Error(w, status, "invalid_preference_scope", err.Error(), nil)
+			return
+		}
 		if err := h.service.SavePreference(r.Context(), scopeKind, scopeID, in.EventType, in.Channel, *in.Enabled); err != nil {
 			status := http.StatusBadRequest
 			if strings.Contains(err.Error(), "internal") {
 				status = http.StatusInternalServerError
 			}
 			httputil.Error(w, status, "invalid_preference", err.Error(), nil)
+			return
+		}
+	} else {
+		if adminID != "" {
+			scopeKind, scopeID = "admin", adminID
+		} else if requestedKind := strings.TrimSpace(r.URL.Query().Get("scope_kind")); requestedKind != "" {
+			scopeKind = requestedKind
+			scopeID = strings.TrimSpace(r.URL.Query().Get("scope_id"))
+		}
+		if err := h.service.ValidatePreferenceScope(r.Context(), userID, adminID, scopeKind, scopeID, false); err != nil {
+			status := http.StatusForbidden
+			if strings.Contains(err.Error(), "invalid") {
+				status = http.StatusBadRequest
+			}
+			httputil.Error(w, status, "invalid_preference_scope", err.Error(), nil)
 			return
 		}
 	}
@@ -119,11 +146,12 @@ func (h *Handler) Preferences(w http.ResponseWriter, r *http.Request) {
 }
 
 type BroadcastRequest struct {
-	Title    string         `json:"title"`
-	Body     string         `json:"body"`
-	Icon     string         `json:"icon"`
-	Severity string         `json:"severity"`
-	Target   map[string]any `json:"target"`
+	Title        string         `json:"title"`
+	Body         string         `json:"body"`
+	Icon         string         `json:"icon"`
+	Severity     string         `json:"severity"`
+	Target       map[string]any `json:"target"`
+	ScheduledFor string         `json:"scheduled_for,omitempty"`
 }
 
 func (h *Handler) Broadcast(w http.ResponseWriter, r *http.Request) {
@@ -142,7 +170,7 @@ func (h *Handler) Broadcast(w http.ResponseWriter, r *http.Request) {
 		httputil.Error(w, http.StatusBadRequest, "broadcast_failed", err.Error(), nil)
 		return
 	}
-	httputil.JSON(w, http.StatusAccepted, map[string]any{"data": map[string]any{"id": id, "recipients": count}})
+	httputil.JSON(w, http.StatusAccepted, map[string]any{"data": map[string]any{"id": id, "status": "queued", "recipients": count}})
 }
 
 type TargetedRequest struct {

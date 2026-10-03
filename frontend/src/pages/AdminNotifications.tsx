@@ -9,11 +9,12 @@ const AdminNotifications = () => {
   const [body, setBody] = useState("");
   const [severity, setSeverity] = useState("info");
   const [target, setTarget] = useState("all");
+  const [orgId, setOrgId] = useState("");
   const [kycStatus, setKycStatus] = useState("submitted");
   const [status, setStatus] = useState("");
   const send = useMutation({
-    mutationFn: () => sendAdminBroadcast({ title, body, severity, target: target === "all" ? { kind: "all" } : target === "kyc_status" ? { kind: "kyc_status", status: kycStatus } : { kind: target } }),
-    onSuccess: (result) => { setStatus(`Sent to ${result?.data?.recipients ?? 0} recipients.`); setTitle(""); setBody(""); },
+    mutationFn: () => sendAdminBroadcast({ title, body, severity, target: target === "all" ? { kind: "all" } : target === "kyc_status" ? { kind: "kyc_status", status: kycStatus } : target === "org" ? { kind: "org", org_id: orgId.trim() } : { kind: target } }),
+    onSuccess: () => { setStatus("Notification queued for delivery."); setTitle(""); setBody(""); },
     onError: (error) => setStatus(error instanceof Error ? error.message : "Unable to send notification."),
   });
   const submit = (event: FormEvent) => { event.preventDefault(); setStatus(""); send.mutate(); };
@@ -22,8 +23,11 @@ const AdminNotifications = () => {
       <div><p className="text-sm font-medium text-primary">Admin communications</p><h1 className="mt-1 text-2xl font-semibold text-foreground">Send notification</h1><p className="mt-1 text-sm text-muted-foreground">Create a platform announcement or targeted operational message. Account alerts remain in-app even when general channels are muted.</p></div>
       <form onSubmit={submit} className="space-y-4 rounded-xl border border-border bg-card p-5">
         <label className="block text-sm font-medium text-foreground">Audience
-          <select value={target} onChange={(event) => setTarget(event.target.value)} className="mt-1 w-full rounded-md border border-input bg-background px-3 py-2"><option value="all">Everyone</option><option value="merchant">All merchants</option><option value="creator">All creators</option><option value="kyc_status">Organizations by KYC status</option></select>
+          <select value={target} onChange={(event) => setTarget(event.target.value)} className="mt-1 w-full rounded-md border border-input bg-background px-3 py-2"><option value="all">Everyone</option><option value="merchant">All merchants</option><option value="creator">All individuals</option><option value="org">Specific account</option><option value="kyc_status">Accounts by KYC status</option></select>
         </label>
+        {target === "org" && <label className="block text-sm font-medium text-foreground">Account ID
+          <input required value={orgId} onChange={(event) => setOrgId(event.target.value)} placeholder="Organization/account UUID" className="mt-1 w-full rounded-md border border-input bg-background px-3 py-2" />
+        </label>}
         {target === "kyc_status" && <label className="block text-sm font-medium text-foreground">KYC status
           <select value={kycStatus} onChange={(event) => setKycStatus(event.target.value)} className="mt-1 w-full rounded-md border border-input bg-background px-3 py-2"><option value="submitted">Submitted</option><option value="verified">Verified</option><option value="rejected">Rejected</option><option value="pending">Pending</option></select>
         </label>}

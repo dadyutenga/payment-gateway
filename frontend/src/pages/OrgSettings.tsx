@@ -526,21 +526,41 @@ const NOTIF_FIELDS = [
   { key: "payment.failed", label: "Failed payments", helper: "Payment failures that need attention." },
   { key: "payment.refunded", label: "Refunds", helper: "Refund confirmations." },
   { key: "payment.expired", label: "Expiries", helper: "Orders that passed their TTL." },
-  { key: "withdrawal.completed", label: "Withdrawals", helper: "Approval and payout state changes." },
-  { key: "kyc.verified", label: "Verification decisions", helper: "Admin approve / reject outcomes." },
-  { key: "security.payout_destination_changed", label: "Security changes", helper: "Payout destination and API key changes." },
+  { key: "withdrawal.requested", label: "Withdrawal requests", helper: "New payout requests and four-eyes review." },
+  { key: "withdrawal.requires_approval", label: "Withdrawal approvals", helper: "Payouts waiting for a second approver." },
+  { key: "withdrawal.approved", label: "Approved withdrawals", helper: "Payout approval events." },
+  { key: "withdrawal.rejected", label: "Rejected withdrawals", helper: "Payouts rejected with a reason." },
+  { key: "withdrawal.dispatched", label: "Dispatched withdrawals", helper: "Payouts sent to the provider." },
+  { key: "withdrawal.completed", label: "Completed withdrawals", helper: "Successful payout confirmations." },
+  { key: "withdrawal.failed", label: "Failed withdrawals", helper: "Payout failures that need attention." },
+  { key: "kyc.submitted", label: "Verification submitted", helper: "Documents received for review." },
+  { key: "kyc.verified", label: "Verification approved", helper: "Admin approval outcomes." },
+  { key: "kyc.rejected", label: "Verification rejected", helper: "Rejected verification with a reason." },
+  { key: "webhook.delivery_failed", label: "Webhook delivery", helper: "Repeated endpoint delivery failures." },
+  { key: "org.suspended", label: "Account suspension", helper: "Account access status changes." },
+  { key: "org.unsuspended", label: "Account restored", helper: "Account access restored after suspension." },
+  { key: "org.limits_changed", label: "Account limits", helper: "Transaction and volume limit changes." },
+  { key: "org.fee_override_changed", label: "Fee changes", helper: "Account fee override changes." },
+  { key: "org.member_invited", label: "Team invitations", helper: "New member invitations for merchant workspaces." },
+  { key: "org.role_changed", label: "Team role changes", helper: "Your workspace role changed." },
+  { key: "creator.contribution_received", label: "New contributions", helper: "A payment page contribution was received." },
+  { key: "security.payout_destination_changed", label: "Payout destination", helper: "Changes to where payouts are sent." },
+  { key: "security.api_key_rotated", label: "API key rotation", helper: "A new API key was created." },
+  { key: "security.api_key_grace_ending", label: "API key grace period", helper: "An old API key is nearing expiry." },
 ];
 const NOTIF_CHANNELS = [{ key: "in_app", label: "In-app" }, { key: "email", label: "Email" }, { key: "sms", label: "SMS" }] as const;
-const CRITICAL_EVENTS = new Set(["payment.failed", "withdrawal.completed", "kyc.verified", "security.payout_destination_changed"]);
+const CRITICAL_EVENTS = new Set(["payment.failed", "withdrawal.requested", "withdrawal.requires_approval", "withdrawal.approved", "withdrawal.rejected", "withdrawal.dispatched", "withdrawal.completed", "withdrawal.failed", "kyc.verified", "kyc.rejected", "org.suspended", "security.payout_destination_changed", "security.api_key_rotated", "security.api_key_grace_ending"]);
 
 export const NotificationsTab = ({ org, isOwner }: { org: Organization; isOwner: boolean }) => {
   const queryClient = useQueryClient();
+  const isIndividual = isIndividualAccount(org);
+  const preferenceScope = isIndividual ? { scope_kind: "user" as const } : { scope_kind: "org" as const, scope_id: org.id };
   const prefsQuery = useQuery({
-    queryKey: ["notifications", "preferences"],
-    queryFn: () => listNotificationPreferences("customer"),
+    queryKey: ["notifications", "preferences", preferenceScope.scope_kind, preferenceScope.scope_id],
+    queryFn: () => listNotificationPreferences("customer", preferenceScope),
     staleTime: 30_000,
   });
-  const update = useMutation({ mutationFn: (preference: { event_type: string; channel: string; enabled: boolean }) => updateNotificationPreference("customer", preference), onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["notifications", "preferences"] }); toast.success("Notification preference saved."); }, onError: (err) => toast.error(errorMessage(err, "Unable to save preference.")) });
+  const update = useMutation({ mutationFn: (preference: { event_type: string; channel: string; enabled: boolean }) => updateNotificationPreference("customer", { ...preference, ...preferenceScope }), onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["notifications", "preferences"] }); toast.success("Notification preference saved."); }, onError: (err) => toast.error(errorMessage(err, "Unable to save preference.")) });
   const enabled = (eventType: string, channel: string) => prefsQuery.data?.find((item) => item.event_type === eventType && item.channel === channel)?.enabled ?? true;
 
   return (

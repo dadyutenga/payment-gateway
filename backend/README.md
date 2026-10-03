@@ -227,6 +227,35 @@ object back and deliberately leaves local files in place for manual cleanup.
   viewer, approve/reject, and a limits editor. Owners see their org's
   effective limits in org settings.
 
+## Notifications
+
+Notifications are stored in `app.notifications` and are delivered through
+the shared dispatch service. Payment, withdrawal, KYC, webhook, account,
+security, creator-contribution, reconciliation, and admin-queue events use
+deduplicated event keys so provider retries do not create duplicate rows.
+In-app delivery is always retained for critical account events; email and
+SMS are preference-controlled and processed asynchronously by the API or
+`cmd/worker` background loop. The included mailer and SMS implementations
+are log adapters, so production deployments must replace them with real
+providers through the existing interfaces.
+
+Customer endpoints:
+
+- `GET /api/v1/notifications` with `unread`, `event_type`, `limit`, and
+  `offset` filters.
+- `POST /api/v1/notifications/{id}/read` and
+  `POST /api/v1/notifications/read-all`.
+- `GET|PATCH /api/v1/notifications/preferences` for personal preferences;
+  merchant owners may pass `scope_kind=org&scope_id={orgID}` to manage
+  workspace defaults. Individual accounts use the user scope.
+
+Admin endpoints include the equivalent list/read routes plus
+`POST /api/v1/admin/notifications/broadcast` and
+`POST /api/v1/admin/orgs/{orgID}/notifications`. Broadcasts are queued and
+fan out in the background to `all`, `merchant`, `creator`, `org`, or
+`kyc_status` targets; `creator` is the unchanged internal account-kind value
+for the externally named individual track.
+
 ## Organizations & roles
 
 Apps belong to organizations (`payment_apps.org_id`, NOT NULL).

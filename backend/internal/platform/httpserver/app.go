@@ -690,6 +690,13 @@ func (a *App) runBackgroundJobs() {
 			a.logger.Info("notification deliveries processed", "count", processed)
 		}
 	}
+	processNotificationBroadcasts := func() {
+		if processed, err := a.notificationService.ProcessDueBroadcasts(a.ctx, 10); err != nil {
+			a.logger.Error("notification broadcast processing failed", "error", err)
+		} else if processed > 0 {
+			a.logger.Info("notification broadcasts processed", "count", processed)
+		}
+	}
 	reconcilePayments := func() {
 		if result, err := a.paymentService.ReconcilePayments(a.ctx, positiveInt(a.cfg.Payments.ReconciliationBatchSize, 50)); err != nil {
 			a.logger.Error("payment reconciliation failed", "error", err)
@@ -733,6 +740,7 @@ func (a *App) runBackgroundJobs() {
 
 	processDeliveries()
 	processNotifications()
+	processNotificationBroadcasts()
 	reconcilePayments()
 	reconcilePayouts()
 	expireOrders()
@@ -745,6 +753,7 @@ func (a *App) runBackgroundJobs() {
 		case <-deliveryTicker.C:
 			processDeliveries()
 			processNotifications()
+			processNotificationBroadcasts()
 		case <-reconciliationTicker.C:
 			reconcilePayments()
 			refreshAnalytics()
