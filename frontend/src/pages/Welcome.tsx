@@ -53,7 +53,7 @@ const Welcome = () => (
               <Link to="/merchant/register" className="inline-flex min-h-12 items-center justify-center bg-[#F4B942] px-5 text-sm font-bold text-[#102A43] transition-colors hover:bg-[#ffd36b] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#F4B942] focus-visible:ring-offset-2 focus-visible:ring-offset-[#102A43]">
                 Create your business account
               </Link>
-              <Link to="/creator/register" className="inline-flex min-h-12 items-center justify-center border border-[#D9EEF0]/55 px-5 text-sm font-bold text-[#F4EFE6] transition-colors hover:border-[#E76F51] hover:bg-[#E76F51] hover:text-[#102A43] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E76F51] focus-visible:ring-offset-2 focus-visible:ring-offset-[#102A43]">
+              <Link to="/individual/register" className="inline-flex min-h-12 items-center justify-center border border-[#D9EEF0]/55 px-5 text-sm font-bold text-[#F4EFE6] transition-colors hover:border-[#E76F51] hover:bg-[#E76F51] hover:text-[#102A43] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E76F51] focus-visible:ring-offset-2 focus-visible:ring-offset-[#102A43]">
                 Create your personal account
               </Link>
             </div>
@@ -150,8 +150,8 @@ const Welcome = () => (
               {individualFeatures.map((feature) => <li key={feature} className="flex gap-2 text-sm leading-5 text-[#102A43]"><Check className="mt-0.5 h-4 w-4 shrink-0 text-[#E76F51]" />{feature}</li>)}
             </ul>
             <div className="mt-8 flex flex-wrap items-center gap-5">
-              <Link to="/creator/register" className="inline-flex min-h-11 items-center justify-center bg-[#E76F51] px-5 text-sm font-bold text-[#102A43] transition-colors hover:bg-[#f28b70] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E76F51] focus-visible:ring-offset-2 focus-visible:ring-offset-[#fffaf2]">Create your personal account</Link>
-              <Link to="/creator/login" className="text-sm font-bold text-[#102A43] underline decoration-[#E76F51] decoration-2 underline-offset-4 hover:text-[#E76F51] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E76F51]">Individual sign in</Link>
+              <Link to="/individual/register" className="inline-flex min-h-11 items-center justify-center bg-[#E76F51] px-5 text-sm font-bold text-[#102A43] transition-colors hover:bg-[#f28b70] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E76F51] focus-visible:ring-offset-2 focus-visible:ring-offset-[#fffaf2]">Create your personal account</Link>
+              <Link to="/individual/login" className="text-sm font-bold text-[#102A43] underline decoration-[#E76F51] decoration-2 underline-offset-4 hover:text-[#E76F51] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E76F51]">Individual sign in</Link>
             </div>
           </div>
         </article>

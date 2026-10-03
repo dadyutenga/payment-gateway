@@ -5,7 +5,7 @@ import { getOrg, listMyOrgs } from "@/lib/orgApi";
 import MerchantSettingsPage from "@/pages/MerchantSettingsPage";
 
 // OrgSettingsRouter resolves the legacy /org/:orgId/settings deep link to
-// the matching track settings page: creators land on /creator/settings,
+// the matching track settings page: individuals land on /individual/settings,
 // merchants render the merchant settings page. Unauthenticated users go to
 // login (the track guard inside each page handles the rest).
 export const OrgSettingsRouter = () => {
@@ -23,7 +23,7 @@ export const OrgSettingsRouter = () => {
   }
   const org = orgQuery.data ?? (orgsQuery.data ?? []).find((o) => o.id === orgId);
   if ((org?.account_kind ?? "merchant") === "creator") {
-    return <Navigate to="/creator/settings" replace state={{ notice: { message: "Creator settings live here — this is your personal workspace." } }} />;
+    return <Navigate to="/individual/settings" replace state={{ notice: { message: "Individual settings live here — this is your personal workspace." } }} />;
   }
   return <MerchantSettingsPage />;
 };
@@ -43,5 +43,5 @@ export const OrgVerifyRouter = () => {
     return <div className="flex min-h-[60vh] items-center justify-center text-sm text-slate-500">Loading.</div>;
   }
   const kind = (orgQuery.data?.account_kind ?? "merchant") as "merchant" | "creator";
-  return <Navigate to={kind === "creator" ? `/creator/verify/${orgId}` : `/merchant/verify/${orgId}`} replace />;
+  return <Navigate to={kind === "creator" ? "/individual/verify" : `/merchant/verify/${orgId}`} replace />;
 };

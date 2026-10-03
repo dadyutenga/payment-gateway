@@ -1,4 +1,4 @@
-import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/sonner";
 import AdminRoute from "@/components/AdminRoute";
@@ -13,13 +13,13 @@ import AdminAnalyticsFailures from "@/pages/AdminAnalyticsFailures";
 import AdminOps from "@/pages/AdminOps";
 import AdminAudit from "@/pages/AdminAudit";
 import MerchantLayout from "@/pages/MerchantLayout";
-import CreatorLayout from "@/pages/CreatorLayout";
+import IndividualLayout from "@/pages/IndividualLayout";
 import SignIn from "@/pages/SignIn";
 import AuthChooser from "@/pages/AuthChooser";
 import MerchantLogin from "@/pages/MerchantLogin";
 import MerchantRegister from "@/pages/MerchantRegister";
-import CreatorLogin from "@/pages/CreatorLogin";
-import CreatorRegister from "@/pages/CreatorRegister";
+import IndividualLogin from "@/pages/IndividualLogin";
+import IndividualRegister from "@/pages/IndividualRegister";
 import AdminPayments from "@/pages/AdminPayments";
 import AdminPaymentApps from "@/pages/AdminPaymentApps";
 import AdminPaymentAppDetail from "@/pages/AdminPaymentAppDetail";
@@ -31,10 +31,10 @@ import MerchantAppDetail from "@/pages/MerchantAppDetail";
 import MerchantDashboard from "@/pages/MerchantDashboard";
 import MerchantPayments from "@/pages/MerchantPayments";
 import MyPage from "@/pages/MyPage";
-import CreatorOverview from "@/pages/CreatorOverview";
-import CreatorPayments from "@/pages/CreatorPayments";
-import CreatorPayouts from "@/pages/CreatorPayouts";
-import CreatorSettingsPage from "@/pages/CreatorSettingsPage";
+import IndividualOverview from "@/pages/IndividualOverview";
+import IndividualPayments from "@/pages/IndividualPayments";
+import IndividualPayouts from "@/pages/IndividualPayouts";
+import IndividualSettingsPage from "@/pages/IndividualSettingsPage";
 import MerchantSettingsPage from "@/pages/MerchantSettingsPage";
 import MerchantWithdrawals from "@/pages/MerchantWithdrawals";
 import MerchantWebhooks from "@/pages/MerchantWebhooks";
@@ -57,8 +57,8 @@ import {
   MerchantTeamIndex,
 } from "@/pages/MerchantAnalyticsIndex";
 import CreateOrg from "@/pages/CreateOrg";
-import CreatorOnboarding from "@/pages/CreatorOnboarding";
-import CreatorSupport from "@/pages/CreatorSupport";
+import IndividualOnboarding from "@/pages/IndividualOnboarding";
+import IndividualSupport from "@/pages/IndividualSupport";
 import OrgMembers from "@/pages/OrgMembers";
 import { OrgSettingsRouter, OrgVerifyRouter } from "@/pages/OrgRouteGate";
 import OnboardingKYC from "@/pages/OnboardingKYC";
@@ -67,6 +67,18 @@ import NotificationsPage from "@/pages/NotificationsPage";
 import AdminNotifications from "@/pages/AdminNotifications";
 
 const queryClient = new QueryClient();
+
+const LegacyIndividualRedirect = () => {
+  const location = useLocation();
+  let target = location.pathname.replace(/^\/creator/, "/individual");
+  if (target.startsWith("/individual/verify/")) target = "/individual/verify";
+  return <Navigate to={`${target}${location.search}${location.hash}`} replace />;
+};
+
+const LegacyIndividualOnboardingRedirect = () => {
+  const location = useLocation();
+  return <Navigate to={`/individual/onboarding${location.search}${location.hash}`} replace />;
+};
 
 const App = () => (
   <QueryClientProvider client={queryClient}>
@@ -84,8 +96,8 @@ const App = () => (
           <Route path="/signup" element={<AuthChooser mode="register" />} />
           <Route path="/merchant/login" element={<MerchantLogin />} />
           <Route path="/merchant/register" element={<MerchantRegister />} />
-          <Route path="/creator/login" element={<CreatorLogin />} />
-          <Route path="/creator/register" element={<CreatorRegister />} />
+          <Route path="/individual/login" element={<IndividualLogin />} />
+          <Route path="/individual/register" element={<IndividualRegister />} />
           <Route path="/admin/login" element={<SignIn admin />} />
           <Route
             path="/admin"
@@ -140,23 +152,28 @@ const App = () => (
             <Route path="team" element={<MerchantTeamIndex />} />
             <Route path="settings" element={<MerchantSettings />} />
           </Route>
-          {/* Creator workspace: kind-guarded shell (fuchsia). Merchants
+          {/* Individual workspace: kind-guarded shell (fuchsia). Merchants
               landing here are redirected to /merchant with a notice. */}
           <Route
-            path="/creator"
+            path="/individual"
             element={
               <TrackRoute kind="creator">
-                <CreatorLayout />
+                <IndividualLayout />
               </TrackRoute>
             }
           >
-            <Route index element={<CreatorOverview />} />
+            <Route index element={<IndividualOverview />} />
             <Route path="notifications" element={<NotificationsPage />} />
             <Route path="page" element={<MyPage />} />
-            <Route path="payments" element={<CreatorPayments />} />
-            <Route path="payouts" element={<CreatorPayouts />} />
-            <Route path="settings" element={<CreatorSettingsPage />} />
+            <Route path="payments" element={<IndividualPayments />} />
+            <Route path="payouts" element={<IndividualPayouts />} />
+            <Route path="settings" element={<IndividualSettingsPage />} />
+            <Route path="setup" element={<IndividualOverview />} />
+            <Route path="verify" element={<OnboardingKYC lockedKind="creator" />} />
+            <Route path="onboarding" element={<IndividualOnboarding />} />
           </Route>
+          {/* Legacy individual URLs remain valid and preserve query params. */}
+          <Route path="/creator/*" element={<LegacyIndividualRedirect />} />
           {/* Legacy generic setup (kept one cycle): still offers the
               Business|Creator choice. New flows use the locked track
               setups below. */}
@@ -180,18 +197,6 @@ const App = () => (
           >
             <Route index element={<CreateOrg lockedKind="merchant" />} />
           </Route>
-          <Route
-            path="/creator/setup"
-            element={
-              <TrackRoute kind="creator">
-                <CreatorLayout />
-              </TrackRoute>
-            }
-          >
-            {/* Creator registration provisions its private account container
-                server-side; there is no creator organization setup step. */}
-            <Route index element={<CreatorOverview />} />
-          </Route>
           {/* Track verification entries. */}
           <Route
             path="/merchant/verify/:orgId"
@@ -202,16 +207,6 @@ const App = () => (
             }
           >
             <Route index element={<OnboardingKYC lockedKind="merchant" />} />
-          </Route>
-          <Route
-            path="/creator/verify/:orgId"
-            element={
-              <TrackRoute kind="creator">
-                <CreatorLayout />
-              </TrackRoute>
-            }
-          >
-            <Route index element={<OnboardingKYC lockedKind="creator" />} />
           </Route>
           {/* Legacy org deep links (kept one cycle). Members/analytics/
               settlements are merchant-only; settings/verification resolve
@@ -243,19 +238,10 @@ const App = () => (
             <Route index element={<OrgSettingsRouter />} />
           </Route>
           <Route path="/onboarding/kyc/:orgId" element={<OrgVerifyRouter />} />
-          <Route
-            path="/onboarding/creator/:orgId"
-            element={
-              <TrackRoute kind="creator">
-                <CreatorLayout />
-              </TrackRoute>
-            }
-          >
-            <Route index element={<CreatorOnboarding />} />
-          </Route>
+          <Route path="/onboarding/creator/:orgId" element={<LegacyIndividualOnboardingRedirect />} />
           <Route path="/" element={<Welcome />} />
           {/* Public creator support page (no auth — handle namespace). */}
-          <Route path="/c/:handle" element={<CreatorSupport />} />
+          <Route path="/c/:handle" element={<IndividualSupport />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </BrowserRouter>

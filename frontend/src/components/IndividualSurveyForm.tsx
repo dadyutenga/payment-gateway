@@ -5,14 +5,14 @@ import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
 import { toast } from "@/components/ui/sonner";
 import {
-  getCreatorSurvey,
-  saveCreatorSurvey,
-  type CreatorSurvey,
-  type Organization,
+  getIndividualSurvey,
+  saveIndividualSurvey,
+  type IndividualSurvey,
+  type IndividualAccount,
 } from "@/lib/orgApi";
 
-export const CREATOR_CATEGORIES = [
-  { value: "content_creator", label: "Content creator" },
+export const INDIVIDUAL_CATEGORIES = [
+  { value: "content_creator", label: "Content creation" },
   { value: "musician_artist", label: "Musician / artist" },
   { value: "freelancer_consultant", label: "Freelancer / consultant" },
   { value: "coach_educator", label: "Coach / educator" },
@@ -21,7 +21,7 @@ export const CREATOR_CATEGORIES = [
   { value: "other", label: "Other" },
 ] as const;
 
-export const CREATOR_REFERRALS = [
+export const INDIVIDUAL_REFERRALS = [
   { value: "social_media", label: "Social media" },
   { value: "friend_colleague", label: "Friend or colleague" },
   { value: "search_engine", label: "Search engine" },
@@ -30,14 +30,14 @@ export const CREATOR_REFERRALS = [
   { value: "other", label: "Other" },
 ] as const;
 
-export const CREATOR_USE_CASES = [
+export const INDIVIDUAL_USE_CASES = [
   { value: "support_tips", label: "Receive support / tips from fans" },
   { value: "digital_products", label: "Sell digital products / services" },
   { value: "freelance_work", label: "Get paid for freelance work" },
   { value: "api_integration", label: "API integration for my own app" },
 ] as const;
 
-export const CREATOR_VOLUME_BANDS = [
+export const INDIVIDUAL_VOLUME_BANDS = [
   { value: "under_100k", label: "Under TZS 100,000" },
   { value: "100k_1m", label: "TZS 100,000 – 1,000,000" },
   { value: "1m_10m", label: "TZS 1,000,000 – 10,000,000" },
@@ -45,7 +45,7 @@ export const CREATOR_VOLUME_BANDS = [
   { value: "over_100m", label: "Over TZS 100,000,000" },
 ] as const;
 
-export const CREATOR_TXN_BANDS = [
+export const INDIVIDUAL_TXN_BANDS = [
   { value: "under_50", label: "Under 50" },
   { value: "50_200", label: "50 – 200" },
   { value: "200_1000", label: "200 – 1,000" },
@@ -59,19 +59,19 @@ function errorMessage(err: unknown, fallback: string) {
 
 // Shared individual onboarding survey form (Part 2). Used by the onboarding
 // page (first run) and the Settings survey tab (editing). Display name
-// (Q1) saves onto the org row with the same submit.
-const CreatorSurveyForm = ({
-  org,
+// (Q1) saves onto the account row with the same submit.
+const IndividualSurveyForm = ({
+  account,
   initial,
   submitLabel,
   onSaved,
 }: {
-  org: Organization;
-  initial?: CreatorSurvey | null;
+  account: IndividualAccount;
+  initial?: IndividualSurvey | null;
   submitLabel: string;
-  onSaved: (survey: CreatorSurvey) => void;
+  onSaved: (survey: IndividualSurvey) => void;
 }) => {
-  const [displayName, setDisplayName] = useState(org.display_name ?? "");
+  const [displayName, setDisplayName] = useState(account.display_name ?? "");
   const [category, setCategory] = useState(initial?.category ?? "");
   const [categoryOther, setCategoryOther] = useState(initial?.category_other ?? "");
   const [referral, setReferral] = useState(initial?.referral_source ?? "");
@@ -81,7 +81,7 @@ const CreatorSurveyForm = ({
   const [saving, setSaving] = useState(false);
 
   const showDisplayName = !initial;
-  const effectiveDisplayName = showDisplayName ? displayName : (org.display_name ?? "");
+  const effectiveDisplayName = showDisplayName ? displayName : (account.display_name ?? "");
   const wantsAPI = useCases.includes("api_integration");
 
   const toggleUseCase = (value: string) => {
@@ -92,7 +92,7 @@ const CreatorSurveyForm = ({
     event.preventDefault();
     setSaving(true);
     try {
-      const survey = await saveCreatorSurvey(org.id, {
+      const survey = await saveIndividualSurvey({
         display_name: showDisplayName ? displayName.trim() || undefined : undefined,
         category,
         category_other: category === "other" ? categoryOther.trim() : "",
@@ -122,7 +122,7 @@ const CreatorSurveyForm = ({
             value={displayName}
             onChange={(e) => setDisplayName(e.target.value)}
             maxLength={100}
-            placeholder={org.display_name || "Amina Creates"}
+            placeholder={account.display_name || "Amina"}
             className="mt-1"
           />
         </div>
@@ -131,7 +131,7 @@ const CreatorSurveyForm = ({
       <div>
         <label className="text-sm font-medium text-slate-700">{showDisplayName ? "2." : "1."} What best describes you?</label>
         <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
-          {CREATOR_CATEGORIES.map((c) => (
+          {INDIVIDUAL_CATEGORIES.map((c) => (
             <label
               key={c.value}
               className={`cursor-pointer rounded-lg border px-3 py-2.5 text-sm transition-colors ${
@@ -158,7 +158,7 @@ const CreatorSurveyForm = ({
         <label className="text-sm font-medium text-slate-700">{showDisplayName ? "3." : "2."} How did you hear about LipaGO?</label>
         <select value={referral} onChange={(e) => setReferral(e.target.value)} className={selectClass} required>
           <option value="" disabled>Select one…</option>
-          {CREATOR_REFERRALS.map((r) => (
+          {INDIVIDUAL_REFERRALS.map((r) => (
             <option key={r.value} value={r.value}>{r.label}</option>
           ))}
         </select>
@@ -167,7 +167,7 @@ const CreatorSurveyForm = ({
       <div>
         <label className="text-sm font-medium text-slate-700">{showDisplayName ? "4." : "3."} What do you plan to use LipaGO for? <span className="font-normal text-slate-400">(pick all that apply)</span></label>
         <div className="mt-2 space-y-2">
-          {CREATOR_USE_CASES.map((u) => (
+          {INDIVIDUAL_USE_CASES.map((u) => (
             <label key={u.value} className="flex cursor-pointer items-start gap-3 rounded-lg border border-slate-200 px-3 py-2.5">
               <input
                 type="checkbox"
@@ -182,7 +182,7 @@ const CreatorSurveyForm = ({
         {wantsAPI && (
           <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-900">
             Building your own app with our API? The <strong>business / developer track</strong> fits better (API keys,
-            webhooks, team roles). Business and creator accounts are fully separate —{" "}
+            webhooks, team roles). Business and individual accounts are fully separate —{" "}
             <Link to="/merchant/register" className="font-medium underline">
               create a separate business account
             </Link>
@@ -195,7 +195,7 @@ const CreatorSurveyForm = ({
         <label className="text-sm font-medium text-slate-700">{showDisplayName ? "5." : "4."} Expected monthly amount received</label>
         <select value={volume} onChange={(e) => setVolume(e.target.value)} className={selectClass} required>
           <option value="" disabled>Select a range…</option>
-          {CREATOR_VOLUME_BANDS.map((b) => (
+          {INDIVIDUAL_VOLUME_BANDS.map((b) => (
             <option key={b.value} value={b.value}>{b.label}</option>
           ))}
         </select>
@@ -205,7 +205,7 @@ const CreatorSurveyForm = ({
         <label className="text-sm font-medium text-slate-700">{showDisplayName ? "6." : "5."} Expected monthly number of payments</label>
         <select value={txn} onChange={(e) => setTxn(e.target.value)} className={selectClass} required>
           <option value="" disabled>Select a range…</option>
-          {CREATOR_TXN_BANDS.map((b) => (
+          {INDIVIDUAL_TXN_BANDS.map((b) => (
             <option key={b.value} value={b.value}>{b.label}</option>
           ))}
         </select>
@@ -225,12 +225,12 @@ const CreatorSurveyForm = ({
   );
 };
 
-export async function loadCreatorSurvey(orgId: string): Promise<CreatorSurvey | null> {
+export async function loadIndividualSurvey(): Promise<IndividualSurvey | null> {
   try {
-    return await getCreatorSurvey(orgId);
+    return await getIndividualSurvey();
   } catch {
     return null;
   }
 }
 
-export default CreatorSurveyForm;
+export default IndividualSurveyForm;

@@ -21,7 +21,9 @@ export async function authenticateTrack(
   password: string,
   profile?: { display_name?: string; handle?: string; bio?: string },
 ) {
-  const prefix = kind ? `/api/v1/${kind}/auth` : "/api/v1/auth";
+  const prefix = kind
+    ? `/api/v1/${kind === "creator" ? "individual" : kind}/auth`
+    : "/api/v1/auth";
   const response = await fetch(`${API_BASE}${prefix}/${mode}`, {
     method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" },
     body: JSON.stringify({ email, password, ...(profile || {}) }),

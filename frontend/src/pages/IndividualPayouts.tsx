@@ -8,39 +8,39 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "@/components/ui/sonner";
 import {
-  approveCreatorWithdrawal,
-  getCreatorBalance,
-  listCreatorApps,
-  listCreatorWithdrawals,
-  rejectCreatorWithdrawal,
-} from "@/lib/creatorApi";
+  approveIndividualWithdrawal,
+  getIndividualBalance,
+  listIndividualApps,
+  listIndividualWithdrawals,
+  rejectIndividualWithdrawal,
+} from "@/lib/individualApi";
 
 function errorMessage(err: unknown, fallback: string) {
   return err instanceof Error ? err.message : fallback;
 }
 
-// Creator-space Payouts: balances across the receiving app plus payout
+// Individual-space Payouts: balances across the receiving app plus payout
 // requests with approve/reject inline (sole owner). The payout destination
 // itself (OTP-verified mobile money) is managed under Settings → Payout
 // destination — withdrawals always pay there.
-const CreatorPayouts = () => {
+const IndividualPayouts = () => {
   const queryClient = useQueryClient();
   const [actingId, setActingId] = useState<string | null>(null);
 
-  const appsQuery = useQuery({ queryKey: ["creator", "my-apps"], queryFn: () => listCreatorApps(), staleTime: 30_000 });
+  const appsQuery = useQuery({ queryKey: ["individual", "my-apps"], queryFn: () => listIndividualApps(), staleTime: 30_000 });
   const apps = appsQuery.data ?? [];
 
   const balanceQueries = useQueries({
     queries: apps.map((app) => ({
-      queryKey: ["creator", app.id, "balance"],
-      queryFn: () => getCreatorBalance(app.id),
+      queryKey: ["individual", app.id, "balance"],
+      queryFn: () => getIndividualBalance(app.id),
       staleTime: 15_000,
     })),
   });
   const withdrawalQueries = useQueries({
     queries: apps.map((app) => ({
-      queryKey: ["creator", app.id, "withdrawals"],
-      queryFn: () => listCreatorWithdrawals(app.id),
+      queryKey: ["individual", app.id, "withdrawals"],
+      queryFn: () => listIndividualWithdrawals(app.id),
       staleTime: 15_000,
     })),
   });
@@ -50,7 +50,7 @@ const CreatorPayouts = () => {
     (q.data ?? []).map((w) => ({ ...w, app_id: apps[i]?.id ?? w.app_id })),
   );
 
-  const reload = () => queryClient.invalidateQueries({ queryKey: ["creator"] });
+  const reload = () => queryClient.invalidateQueries({ queryKey: ["individual"] });
 
   const runAction = async (appId: string, id: string, action: () => Promise<unknown>, successMessage: string) => {
     setActingId(id);
@@ -71,7 +71,7 @@ const CreatorPayouts = () => {
         <h2 className="text-2xl font-bold text-slate-900">Payouts</h2>
         <p className="mt-1 text-sm text-slate-500">
           Balances and payout requests for your support earnings. Payouts always go to your verified destination —{" "}
-          <Link to="/creator/settings" className="font-medium text-fuchsia-700 hover:underline">manage it under Settings → Payout destination</Link>.
+          <Link to="/individual/settings" className="font-medium text-fuchsia-700 hover:underline">manage it under Settings → Payout destination</Link>.
         </p>
       </div>
 
@@ -99,7 +99,7 @@ const CreatorPayouts = () => {
             ))}
             {apps.length === 0 && (
               <Card><CardContent className="p-4 text-sm text-slate-500">
-                No receiving app yet — enable your support page under <Link to="/creator/page" className="font-medium text-fuchsia-700 hover:underline">My Page</Link>.
+                No receiving app yet — enable your support page under <Link to="/individual/page" className="font-medium text-fuchsia-700 hover:underline">My Page</Link>.
               </CardContent></Card>
             )}
           </div>
@@ -126,10 +126,10 @@ const CreatorPayouts = () => {
                     </div>
                     {w.status === "requested" && (
                       <div className="flex shrink-0 flex-wrap items-center gap-1.5 self-end sm:self-start">
-                        <Button size="sm" disabled={busy} onClick={() => runAction(w.app_id, w.id, () => approveCreatorWithdrawal(w.app_id, w.id), "Payout approved — balance debited.")}>
+                        <Button size="sm" disabled={busy} onClick={() => runAction(w.app_id, w.id, () => approveIndividualWithdrawal(w.app_id, w.id), "Payout approved — balance debited.")}>
                           <Check className="h-3.5 w-3.5 mr-1" /> Approve
                         </Button>
-                        <Button size="sm" variant="outline" disabled={busy} onClick={() => runAction(w.app_id, w.id, () => rejectCreatorWithdrawal(w.app_id, w.id), "Payout rejected.")}>
+                        <Button size="sm" variant="outline" disabled={busy} onClick={() => runAction(w.app_id, w.id, () => rejectIndividualWithdrawal(w.app_id, w.id), "Payout rejected.")}>
                           <X className="h-3.5 w-3.5 mr-1" /> Reject
                         </Button>
                       </div>
@@ -145,4 +145,4 @@ const CreatorPayouts = () => {
   );
 };
 
-export default CreatorPayouts;
+export default IndividualPayouts;

@@ -66,7 +66,7 @@ export type MeResult = {
   user?: UserProfile;
 };
 
-async function request<T>(path: string, options?: { method?: "GET" | "POST" | "PATCH" | "DELETE"; body?: unknown; auth?: boolean; formData?: FormData }): Promise<T> {
+async function request<T>(path: string, options?: { method?: "GET" | "POST" | "PATCH" | "PUT" | "DELETE"; body?: unknown; auth?: boolean; formData?: FormData }): Promise<T> {
   const headers: Record<string, string> = { Accept: "application/json" };
   if (options?.auth !== false) {
     const token = getCustomerToken();
@@ -110,8 +110,16 @@ export async function submitCreatorKYC(orgId: string, input: { full_name: string
   return request<KYCSubmission>(`/api/v1/orgs/${orgId}/kyc/creator`, { method: "POST", body: input });
 }
 
+export async function submitIndividualKYC(input: { full_name: string; id_type: string; id_number: string; dob: string; id_document_url: string; id_document_back_url?: string; selfie_url: string }) {
+  return request<KYCSubmission>("/api/v1/individual/account/kyc", { method: "POST", body: input });
+}
+
 export async function getKYC(orgId: string) {
   return request<KYCStatusResult>(`/api/v1/orgs/${orgId}/kyc`);
+}
+
+export async function getIndividualKYC() {
+  return request<KYCStatusResult>("/api/v1/individual/account/kyc");
 }
 
 export async function uploadKYCDocument(orgId: string, file: File) {
@@ -120,10 +128,22 @@ export async function uploadKYCDocument(orgId: string, file: File) {
   return request<{ id_document_url: string }>(`/api/v1/orgs/${orgId}/kyc/document`, { method: "POST", formData });
 }
 
+export async function uploadIndividualKYCDocument(file: File) {
+  const formData = new FormData();
+  formData.append("document", file);
+  return request<{ id_document_url: string }>("/api/v1/individual/account/kyc/document", { method: "POST", formData });
+}
+
 export async function uploadKYCSelfie(orgId: string, file: File) {
   const formData = new FormData();
   formData.append("selfie", file);
   return request<{ selfie_url: string }>(`/api/v1/orgs/${orgId}/kyc/selfie`, { method: "POST", formData });
+}
+
+export async function uploadIndividualKYCSelfie(file: File) {
+  const formData = new FormData();
+  formData.append("selfie", file);
+  return request<{ selfie_url: string }>("/api/v1/individual/account/kyc/selfie", { method: "POST", formData });
 }
 
 export async function changePassword(input: { current_password: string; new_password: string }) {

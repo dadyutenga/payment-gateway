@@ -34,7 +34,7 @@ const apiBaseUrl = (configuredApiBaseUrl || defaultApiBaseUrl).replace(/\/$/, ""
 async function request<T>(
   path: string,
   options?: {
-    method?: "GET" | "POST" | "PATCH" | "DELETE";
+    method?: "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
     body?: unknown;
     formData?: FormData;
   },
@@ -116,6 +116,8 @@ export type OrganizationWithRole = Organization & {
   status: "invited" | "active";
 };
 
+export type IndividualAccount = OrganizationWithRole;
+
 export type OrgMember = {
   org_id: string;
   user_id: string;
@@ -156,6 +158,18 @@ export async function createCreatorOrg(input: { name: string; display_name: stri
   return (await request<OrganizationWithRole>("/api/v1/orgs/creator", { method: "POST", body: input })).data;
 }
 
+// Canonical individual-track account API. The response remains compatible
+// with the shared Organization shape because the database model is shared.
+export type IndividualAccountInput = { name: string; display_name: string; handle: string; bio?: string };
+
+export async function getIndividualAccount() {
+  return (await request<OrganizationWithRole>("/api/v1/individual/account")).data;
+}
+
+export async function createIndividualAccount(input: IndividualAccountInput) {
+  return (await request<OrganizationWithRole>("/api/v1/individual/account", { method: "POST", body: input })).data;
+}
+
 export async function getOrg(orgId: string) {
   return (await request<OrganizationWithRole>(`/api/v1/orgs/${orgId}`)).data;
 }
@@ -178,6 +192,26 @@ export async function updateOrg(orgId: string, input: {
 
 export async function deleteOrg(orgId: string) {
   await request<unknown>(`/api/v1/orgs/${orgId}`, { method: "DELETE" });
+}
+
+export async function updateIndividualAccount(input: {
+  name: string;
+  business_name?: string;
+  tin?: string;
+  address?: string;
+  phone?: string;
+  contact_email?: string;
+  logo_url?: string;
+  primary_color?: string;
+  display_name?: string;
+  handle?: string;
+  bio?: string;
+}) {
+  return (await request<Organization>("/api/v1/individual/account", { method: "PATCH", body: input })).data;
+}
+
+export async function deleteIndividualAccount() {
+  await request<unknown>("/api/v1/individual/account", { method: "DELETE" });
 }
 
 // ---------- Members ----------
@@ -233,6 +267,10 @@ export async function listKYCAttempts(orgId: string) {
   return (await request<KYCAttempt[]>(`/api/v1/orgs/${orgId}/kyc/attempts`)).data;
 }
 
+export async function listIndividualKYCAttempts() {
+  return (await request<KYCAttempt[]>("/api/v1/individual/account/kyc/attempts")).data;
+}
+
 // ---------- Limits usage (effective caps + today's live volume + fees) ----------
 
 export type LimitSource = "org_override" | "platform" | "platform_creator";
@@ -266,6 +304,10 @@ export async function getCreatorLimitsUsage(orgId: string) {
   return (await request<OrgLimitsUsage>(`/api/v1/creator/orgs/${orgId}/limits-usage`)).data;
 }
 
+export async function getIndividualLimitsUsage() {
+  return (await request<OrgLimitsUsage>("/api/v1/individual/account/limits-usage")).data;
+}
+
 // ---------- Creator payout destinations (OTP-gated, 24h cooling) ----------
 
 export type PayoutDestination = {
@@ -295,6 +337,18 @@ export async function savePayoutDestination(
   ).data;
 }
 
+export async function getIndividualPayoutDestination(): Promise<PayoutDestination | null> {
+  return (await request<PayoutDestination | null>("/api/v1/individual/account/payout-destination")).data;
+}
+
+export async function saveIndividualPayoutDestination(
+  input: { provider: string; phone: string; account_name: string; otp_channel: string; otp_code: string },
+) {
+  return (
+    await request<PayoutDestination>("/api/v1/individual/account/payout-destination", { method: "POST", body: input })
+  ).data;
+}
+
 // ---------- Notification preferences ----------
 
 export type NotificationPrefs = {
@@ -316,7 +370,15 @@ export async function updateNotificationPrefs(orgId: string, input: Omit<Notific
   ).data;
 }
 
-// ---------- Creator support page (public) ----------
+export async function getIndividualNotificationPrefs() {
+  return (await request<NotificationPrefs>("/api/v1/individual/account/notification-prefs")).data;
+}
+
+export async function updateIndividualNotificationPrefs(input: Omit<NotificationPrefs, "org_id">) {
+  return (await request<NotificationPrefs>("/api/v1/individual/account/notification-prefs", { method: "PATCH", body: input })).data;
+}
+
+// ---------- Individual support page (public) ----------
 
 export type SupportPageLink = {
   id: string;
@@ -356,7 +418,7 @@ export async function getSupportPage(handle: string): Promise<SupportPage> {
     headers: { Accept: "application/json" },
   });
   if (!response.ok) {
-    throw new OrgApiError(response.status, "Creator not found.", "not_found");
+    throw new OrgApiError(response.status, "Individual not found.", "not_found");
   }
   const payload = (await response.json()) as { data: SupportPage };
   return payload.data;
@@ -395,9 +457,9 @@ export async function createSupportOrder(
   return payload.data;
 }
 
-// ---------- Creator public profile (legacy alias — use SupportPage) ----------
+// ---------- Individual public profile (legacy alias — use SupportPage) ----------
 
-export type CreatorPublicProfile = {
+export type IndividualPublicProfile = {
   display_name: string;
   handle: string;
   bio?: string;
@@ -405,9 +467,14 @@ export type CreatorPublicProfile = {
   primary_color?: string;
 };
 
-export async function getCreatorPublic(handle: string): Promise<CreatorPublicProfile> {
+export async function getIndividualPublic(handle: string): Promise<IndividualPublicProfile> {
   return getSupportPage(handle);
 }
+
+/** @deprecated Use IndividualPublicProfile/getIndividualPublic. */
+export type CreatorPublicProfile = IndividualPublicProfile;
+/** @deprecated Use getIndividualPublic. */
+export const getCreatorPublic = getIndividualPublic;
 
 // ---------- Creator support settings (merchant management) ----------
 
@@ -444,16 +511,28 @@ export async function getSupportSettings(orgId: string) {
   return (await request<SupportSettings>(`/api/v1/creator/orgs/${orgId}/support-settings`)).data;
 }
 
+export async function getIndividualSupportSettings() {
+  return (await request<SupportSettings>("/api/v1/individual/account/support-settings")).data;
+}
+
 export async function updateSupportSettings(orgId: string, input: SupportSettingsInput) {
   return (
     await request<SupportSettings>(`/api/v1/creator/orgs/${orgId}/support-settings`, { method: "PUT", body: input })
   ).data;
 }
 
+export async function updateIndividualSupportSettings(input: SupportSettingsInput) {
+  return (await request<SupportSettings>("/api/v1/individual/account/support-settings", { method: "PUT", body: input })).data;
+}
+
 export async function enableSupportPage(orgId: string) {
   return (
     await request<SupportSettings>(`/api/v1/creator/orgs/${orgId}/support-page/enable`, { method: "POST" })
   ).data;
+}
+
+export async function enableIndividualSupportPage() {
+  return (await request<SupportSettings>("/api/v1/individual/account/support-page/enable", { method: "POST" })).data;
 }
 
 // ---------- Creator survey (onboarding answers, editable) ----------
@@ -470,6 +549,9 @@ export type CreatorSurvey = {
   created_at: string;
   updated_at: string;
 };
+
+export type IndividualSurvey = CreatorSurvey;
+export type IndividualSurveyInput = CreatorSurveyInput;
 
 export type CreatorSurveyInput = {
   display_name?: string;
@@ -489,10 +571,22 @@ export async function saveCreatorSurvey(orgId: string, input: CreatorSurveyInput
   return (await request<CreatorSurvey>(`/api/v1/orgs/${orgId}/creator-survey`, { method: "PUT", body: input })).data;
 }
 
+export async function getIndividualSurvey() {
+  return (await request<IndividualSurvey>("/api/v1/individual/account/survey")).data;
+}
+
+export async function saveIndividualSurvey(input: IndividualSurveyInput) {
+  return (await request<IndividualSurvey>("/api/v1/individual/account/survey", { method: "PUT", body: input })).data;
+}
+
 // Deprecated: kind switching is disabled server-side (410). Kept one
 // deploy cycle so stale callers get the server's message, not a crash.
 export async function switchCreatorToMerchant(orgId: string) {
   return (await request<Organization>(`/api/v1/orgs/${orgId}/switch-kind`, { method: "POST" })).data;
+}
+
+export async function switchIndividualToMerchant() {
+  return (await request<Organization>("/api/v1/individual/account/switch-kind", { method: "POST" })).data;
 }
 
 // ---------- Logo upload (multipart) + authenticated serving ----------
@@ -501,6 +595,24 @@ export async function uploadOrgLogo(orgId: string, file: File) {
   const formData = new FormData();
   formData.append("logo", file);
   return request<Organization>(`/api/v1/orgs/${orgId}/logo`, { method: "POST", formData });
+}
+
+export async function uploadIndividualLogo(file: File) {
+  const formData = new FormData();
+  formData.append("logo", file);
+  return request<Organization>("/api/v1/individual/account/logo", { method: "POST", formData });
+}
+
+export async function resolveIndividualLogoSrc(logoUrl?: string): Promise<string> {
+  if (!logoUrl) return "";
+  if (/^https?:\/\//i.test(logoUrl)) return logoUrl;
+  const token = getCustomerToken();
+  if (!token) return "";
+  const response = await fetch(`${apiBaseUrl}/api/v1/individual/account/logo`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!response.ok) return "";
+  return URL.createObjectURL(await response.blob());
 }
 
 // resolveLogoSrc maps the stored logo location to something an <img> can

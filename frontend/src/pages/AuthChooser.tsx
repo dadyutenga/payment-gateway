@@ -21,7 +21,7 @@ export default function AuthChooser({ mode }: { mode: "login" | "register" }) {
               <p className="mt-1 text-xs text-slate-500">Merchant workspace: org, team, apps, API keys, business verification (TIN).</p>
               <p className="mt-2 text-xs font-medium text-blue-600">Go to Merchant {mode === "login" ? "sign in" : "signup"} →</p>
             </Link>
-            <Link to={`/creator/${mode}${suffix}`} className="rounded-md border border-slate-200 bg-white p-4 transition-colors hover:border-slate-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fuchsia-700">
+            <Link to={`/individual/${mode}${suffix}`} className="rounded-md border border-slate-200 bg-white p-4 transition-colors hover:border-slate-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fuchsia-700">
               <HeartHandshake className="h-5 w-5 text-slate-700" />
               <p className="mt-2 font-semibold text-slate-900">I&apos;m an individual</p>
               <p className="mt-1 text-xs text-slate-500">Personal workspace: receive payments, share a support page, and manage payouts. Individual verification (ID + selfie).</p>

@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -366,6 +367,102 @@ func New(ctx context.Context) (*App, error) {
 	// first (merchants get 403 wrong_kind). No API keys, webhook
 	// endpoints, or delivery logs — creators have no Developers surface.
 	creatorAuth := middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)
+	// New individual routes resolve the caller's single individual account
+	// from the session. ID-bearing aliases are also registered for deep links;
+	// both paths still pass through the creator-kind membership gate so an
+	// account cannot be substituted across tenants.
+	resolveIndividualAccount := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			claims, ok := middleware.ClaimsFromContext(r.Context())
+			if !ok || strings.TrimSpace(claims.Subject) == "" {
+				httputil.Error(w, http.StatusUnauthorized, "unauthorized", "Missing authenticated user.", nil)
+				return
+			}
+			account, err := orgService.IndividualAccountForUser(r.Context(), claims.Subject)
+			if err != nil {
+				if errors.Is(err, orgs.ErrOrgNotFound) {
+					httputil.Error(w, http.StatusNotFound, "not_found", "Individual account not found.", nil)
+					return
+				}
+				httputil.Error(w, http.StatusInternalServerError, "internal_error", "Unable to resolve individual account.", nil)
+				return
+			}
+			r.SetPathValue("orgID", account.ID)
+			r.SetPathValue("accountID", account.ID)
+			next.ServeHTTP(w, r)
+		})
+	}
+	resolveIndividualAccountID := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			claims, ok := middleware.ClaimsFromContext(r.Context())
+			if !ok || strings.TrimSpace(claims.Subject) == "" {
+				httputil.Error(w, http.StatusUnauthorized, "unauthorized", "Missing authenticated user.", nil)
+				return
+			}
+			accountID := strings.TrimSpace(r.PathValue("accountID"))
+			if accountID == "" {
+				httputil.Error(w, http.StatusNotFound, "not_found", "Individual account not found.", nil)
+				return
+			}
+			if _, err := orgService.RequireIndividualAccount(r.Context(), claims.Subject, accountID, orgs.PermRead); err != nil {
+				if errors.Is(err, orgs.ErrNotOrgMember) || errors.Is(err, orgs.ErrOrgNotFound) || errors.Is(err, orgs.ErrNotCreatorOrg) {
+					httputil.Error(w, http.StatusForbidden, "forbidden", "You don't have access to this individual account.", nil)
+					return
+				}
+				httputil.Error(w, http.StatusInternalServerError, "internal_error", "Unable to verify individual account access.", nil)
+				return
+			}
+			r.SetPathValue("orgID", accountID)
+			next.ServeHTTP(w, r)
+		})
+	}
+	individualAccountRoute := func(method, suffix string, handler http.HandlerFunc) {
+		mux.Handle(method+" /api/v1/individual/account"+suffix, middleware.Chain(http.HandlerFunc(handler), creatorAuth, resolveIndividualAccount))
+		mux.Handle(method+" /api/v1/individual/account/{accountID}"+suffix, middleware.Chain(http.HandlerFunc(handler), creatorAuth, resolveIndividualAccountID))
+	}
+
+	// Individual auth and app routes are aliases of the existing handlers;
+	// the old creator namespace remains available for existing clients.
+	mux.HandleFunc("POST /api/v1/individual/auth/register", authService.HandleIndividualRegister)
+	mux.HandleFunc("POST /api/v1/individual/auth/login", authService.HandleIndividualLogin)
+	individualAuth := middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)
+	mux.Handle("GET /api/v1/individual/apps", middleware.Chain(http.HandlerFunc(paymentHandler.IndividualListMyApps), individualAuth))
+	mux.Handle("GET /api/v1/individual/apps/{id}/balance", middleware.Chain(http.HandlerFunc(paymentHandler.IndividualGetAppBalance), individualAuth))
+	mux.Handle("GET /api/v1/individual/apps/{id}/ledger", middleware.Chain(http.HandlerFunc(paymentHandler.IndividualListLedgerEntries), individualAuth))
+	mux.Handle("GET /api/v1/individual/apps/{id}/orders", middleware.Chain(http.HandlerFunc(paymentHandler.IndividualSearchOrders), individualAuth))
+	mux.Handle("GET /api/v1/individual/apps/{id}/withdrawals", middleware.Chain(http.HandlerFunc(paymentHandler.IndividualListWithdrawals), individualAuth))
+	mux.Handle("POST /api/v1/individual/apps/{id}/withdrawals", middleware.Chain(http.HandlerFunc(paymentHandler.IndividualCreateWithdrawal), individualAuth))
+	mux.Handle("POST /api/v1/individual/apps/{id}/withdrawals/{withdrawalID}/approve", middleware.Chain(http.HandlerFunc(paymentHandler.IndividualApproveWithdrawal), individualAuth))
+	mux.Handle("POST /api/v1/individual/apps/{id}/withdrawals/{withdrawalID}/reject", middleware.Chain(http.HandlerFunc(paymentHandler.IndividualRejectWithdrawal), individualAuth))
+
+	// Session-owned individual account surface.
+	mux.Handle("GET /api/v1/individual/account", middleware.Chain(http.HandlerFunc(orgHandler.GetIndividualAccount), creatorAuth))
+	mux.Handle("POST /api/v1/individual/account", middleware.Chain(http.HandlerFunc(orgHandler.CreateIndividualAccount), creatorAuth))
+	individualAccountRoute("PATCH", "", orgHandler.UpdateOrganization)
+	individualAccountRoute("DELETE", "", orgHandler.DeleteOrganization)
+	individualAccountRoute("POST", "/kyc", orgHandler.SubmitIndividualKYC)
+	individualAccountRoute("GET", "/kyc", orgHandler.GetKYCSubmission)
+	individualAccountRoute("GET", "/kyc/attempts", orgHandler.ListKYCAttempts)
+	individualAccountRoute("GET", "/notification-prefs", orgHandler.GetNotificationPrefs)
+	individualAccountRoute("PATCH", "/notification-prefs", orgHandler.UpdateNotificationPrefs)
+	individualAccountRoute("POST", "/logo", orgHandler.UploadOrgLogo)
+	individualAccountRoute("GET", "/logo", orgHandler.ServeOrgLogo)
+	individualAccountRoute("POST", "/kyc/document", orgHandler.UploadKYCDocument)
+	individualAccountRoute("GET", "/kyc/document", orgHandler.ServeKYCDocument)
+	individualAccountRoute("POST", "/kyc/selfie", orgHandler.UploadKYCSelfie)
+	individualAccountRoute("GET", "/kyc/selfie", orgHandler.ServeKYCSelfie)
+	individualAccountRoute("GET", "/survey", orgHandler.GetIndividualSurvey)
+	individualAccountRoute("PUT", "/survey", orgHandler.SaveIndividualSurvey)
+	individualAccountRoute("POST", "/switch-kind", orgHandler.SwitchIndividualToMerchant)
+	individualAccountRoute("GET", "/limits-usage", paymentHandler.IndividualAccountLimitsUsage)
+	individualAccountRoute("POST", "/support-page/enable", paymentHandler.EnableSupportPage)
+	individualAccountRoute("GET", "/support-settings", paymentHandler.GetSupportSettings)
+	individualAccountRoute("PUT", "/support-settings", paymentHandler.UpdateSupportSettings)
+	individualAccountRoute("GET", "/payout-destination", paymentHandler.GetPayoutDestination)
+	individualAccountRoute("POST", "/payout-destination", paymentHandler.SavePayoutDestination)
+	individualAccountRoute("GET", "/analytics/overview", analyticsHandler.IndividualOverview)
+	individualAccountRoute("GET", "/analytics/supporters", analyticsHandler.IndividualSupporters)
+
 	mux.Handle("GET /api/v1/creator/apps", middleware.Chain(http.HandlerFunc(paymentHandler.CreatorListMyApps), creatorAuth))
 	mux.Handle("GET /api/v1/creator/apps/{id}/balance", middleware.Chain(http.HandlerFunc(paymentHandler.CreatorGetAppBalance), creatorAuth))
 	mux.Handle("GET /api/v1/creator/apps/{id}/ledger", middleware.Chain(http.HandlerFunc(paymentHandler.CreatorListLedgerEntries), creatorAuth))

@@ -5,7 +5,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { toast } from "@/components/ui/sonner";
-import { listCreatorApps, listCreatorOrders } from "@/lib/creatorApi";
+import { listIndividualApps, listIndividualOrders } from "@/lib/individualApi";
 
 function maskPhone(phone?: string) {
   const digits = (phone ?? "").replace(/\D/g, "");
@@ -18,14 +18,14 @@ function maskedSupporter(name?: string, phone?: string) {
   return `${firstName} · ${maskPhone(phone)}`;
 }
 
-const CreatorPayments = () => {
+const IndividualPayments = () => {
   const [status, setStatus] = useState("");
-  const appsQuery = useQuery({ queryKey: ["creator", "my-apps"], queryFn: () => listCreatorApps(), staleTime: 30_000 });
+  const appsQuery = useQuery({ queryKey: ["individual", "my-apps"], queryFn: () => listIndividualApps(), staleTime: 30_000 });
   const apps = appsQuery.data ?? [];
   const orderQueries = useQueries({
     queries: apps.map((app) => ({
-      queryKey: ["creator", app.id, "payments", status],
-      queryFn: () => listCreatorOrders(app.id, status || undefined),
+      queryKey: ["individual", app.id, "payments", status],
+      queryFn: () => listIndividualOrders(app.id, status || undefined),
       staleTime: 15_000,
     })),
   });
@@ -89,4 +89,4 @@ const CreatorPayments = () => {
   );
 };
 
-export default CreatorPayments;
+export default IndividualPayments;

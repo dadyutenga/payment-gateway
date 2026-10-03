@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
 import { toast } from "@/components/ui/sonner";
-import { createCreatorOrg, createMerchantOrg, type AccountKind } from "@/lib/orgApi";
+import { createIndividualAccount, createMerchantOrg, type AccountKind } from "@/lib/orgApi";
 import { getPendingBusinessName, getPendingDisplayName } from "@/lib/trackIntent";
 
 const CreateOrg = ({ lockedKind }: { lockedKind?: AccountKind }) => {
@@ -15,7 +15,7 @@ const CreateOrg = ({ lockedKind }: { lockedKind?: AccountKind }) => {
   const [searchParams] = useSearchParams();
   const trackParam = searchParams.get("track");
   const locked: AccountKind | null =
-    lockedKind ?? (trackParam === "merchant" || trackParam === "creator" ? trackParam : null);
+    lockedKind ?? (trackParam === "merchant" ? "merchant" : trackParam === "creator" || trackParam === "individual" ? "creator" : null);
   const [kind, setKind] = useState<AccountKind>(locked ?? "merchant");
   const [name, setName] = useState("");
   const [businessName, setBusinessName] = useState(() => getPendingBusinessName());
@@ -24,10 +24,10 @@ const CreateOrg = ({ lockedKind }: { lockedKind?: AccountKind }) => {
   const [bio, setBio] = useState("");
   const [creating, setCreating] = useState(false);
 
-  // Creator accounts are provisioned automatically during registration.
+  // Individual accounts are provisioned automatically during registration.
   // This legacy business setup page must never render for the individual track.
   if (locked === "creator") {
-    return <Navigate to="/creator" replace />;
+    return <Navigate to="/individual" replace />;
   }
 
   // One org per account — anyone who already holds one is sent back to
@@ -45,7 +45,7 @@ const CreateOrg = ({ lockedKind }: { lockedKind?: AccountKind }) => {
     try {
       const org =
         effectiveKind === "creator"
-          ? await createCreatorOrg({
+          ? await createIndividualAccount({
               name: name.trim(),
               display_name: displayName.trim(),
               handle: handle.trim().toLowerCase(),
@@ -53,10 +53,10 @@ const CreateOrg = ({ lockedKind }: { lockedKind?: AccountKind }) => {
             })
           : await createMerchantOrg({ name: name.trim(), business_name: businessName.trim() || undefined });
       toast.success(
-        effectiveKind === "creator" ? "Creator page created — its sole owner is you. No team." : "Organization created — you are its owner.",
+        effectiveKind === "creator" ? "Individual account created — it belongs only to you." : "Organization created — you are its owner.",
       );
       queryClient.invalidateQueries({ queryKey: ["orgs", "mine"] });
-      navigate(effectiveKind === "creator" ? `/onboarding/creator/${org.id}` : `/org/${org.id}/members`, { replace: true });
+      navigate(effectiveKind === "creator" ? "/individual/onboarding" : `/org/${org.id}/members`, { replace: true });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Unable to create organization.");
     } finally {
@@ -73,7 +73,7 @@ const CreateOrg = ({ lockedKind }: { lockedKind?: AccountKind }) => {
           <div className="flex items-center gap-2">
             {isCreator ? <HeartHandshake className="h-5 w-5 text-slate-700" /> : <Building2 className="h-5 w-5 text-slate-700" />}
             <h1 className="text-lg font-bold text-slate-900">
-              {isCreator ? "Create your creator page" : "Create your organization"}
+              {isCreator ? "Create your individual account" : "Create your organization"}
             </h1>
           </div>
           <p className="mt-1 text-sm text-slate-500">
@@ -85,13 +85,13 @@ const CreateOrg = ({ lockedKind }: { lockedKind?: AccountKind }) => {
           {locked ? (
             <p className="mt-4 rounded-lg bg-slate-100 px-3 py-2 text-xs text-slate-500">
               {isCreator
-                ? "Creator setup — personal account, no team. Need a business workspace instead? "
-                : "Business setup — organization with team. Need a personal creator account instead? "}
+                ? "Individual setup — personal account, no team. Need a business workspace instead? "
+                : "Business setup — organization with team. Need a personal account instead? "}
               <Link
-                to={isCreator ? "/onboarding/create-org?track=merchant" : "/onboarding/create-org?track=creator"}
+                to={isCreator ? "/onboarding/create-org?track=merchant" : "/individual/register"}
                 className="font-medium text-blue-600 hover:underline"
               >
-                {isCreator ? "Go to Merchant setup →" : "Go to Creator setup →"}
+                {isCreator ? "Go to Merchant setup →" : "Go to Individual setup →"}
               </Link>
             </p>
           ) : (
@@ -107,7 +107,7 @@ const CreateOrg = ({ lockedKind }: { lockedKind?: AccountKind }) => {
                   kind === k ? "bg-white text-slate-900 shadow" : "text-slate-500 hover:text-slate-700"
                 }`}
               >
-                {k === "merchant" ? "Business" : "Creator"}
+                {k === "merchant" ? "Business" : "Individual"}
               </button>
             ))}
           </div>
@@ -167,7 +167,7 @@ const CreateOrg = ({ lockedKind }: { lockedKind?: AccountKind }) => {
               </div>
             )}
             <Button type="submit" className="w-full" disabled={creating}>
-              {creating ? "Creating..." : isCreator ? "Create creator page" : "Create organization"}
+              {creating ? "Creating..." : isCreator ? "Create individual account" : "Create organization"}
             </Button>
           </form>
         </CardContent>

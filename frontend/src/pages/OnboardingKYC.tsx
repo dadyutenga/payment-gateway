@@ -8,8 +8,8 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "@/components/ui/sonner";
-import { getOrg } from "@/lib/orgApi";
-import { getKYC, submitCreatorKYC, submitKYC, uploadKYCDocument, uploadKYCSelfie } from "@/lib/signupApi";
+import { getIndividualAccount, getOrg } from "@/lib/orgApi";
+import { getIndividualKYC, getKYC, submitIndividualKYC, submitKYC, uploadIndividualKYCDocument, uploadIndividualKYCSelfie, uploadKYCDocument, uploadKYCSelfie } from "@/lib/signupApi";
 
 const ID_TYPES = [
   { value: "national_id", label: "National ID (NIDA — Tanzanian citizens)" },
@@ -37,27 +37,35 @@ const STATUS_BADGE: Record<string, string> = {
 };
 
 const OnboardingKYC = ({ lockedKind }: { lockedKind?: "merchant" | "creator" }) => {
-  const { orgId = "" } = useParams();
+  const { accountId: routeAccountId = "" } = useParams();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const fileInput = useRef<HTMLInputElement>(null);
   const backFileInput = useRef<HTMLInputElement>(null);
   const selfieInput = useRef<HTMLInputElement>(null);
 
-  const orgQuery = useQuery({ queryKey: ["orgs", orgId], queryFn: () => getOrg(orgId), staleTime: 30_000 });
+  const isIndividualTrack = lockedKind === "creator";
+  const accountQuery = useQuery({
+    queryKey: isIndividualTrack ? ["individual", "account"] : ["orgs", routeAccountId],
+    queryFn: () => isIndividualTrack ? getIndividualAccount() : getOrg(routeAccountId),
+    staleTime: 30_000,
+    enabled: isIndividualTrack || !!routeAccountId,
+  });
+  const accountId = accountQuery.data?.id ?? routeAccountId;
   const kycQuery = useQuery({
-    queryKey: ["kyc", orgId],
-    queryFn: () => getKYC(orgId),
+    queryKey: ["kyc", isIndividualTrack ? "individual" : accountId],
+    queryFn: () => isIndividualTrack ? getIndividualKYC() : getKYC(accountId),
     staleTime: 15_000,
     retry: false,
+    enabled: !!accountId,
   });
 
-  const isOwner = orgQuery.data?.role === "owner";
-  const status = orgQuery.data?.kyc_status ?? "pending";
-  const orgKind = (orgQuery.data?.account_kind ?? "merchant") as "merchant" | "creator";
+  const isOwner = accountQuery.data?.role === "owner";
+  const status = accountQuery.data?.kyc_status ?? "pending";
+  const orgKind = (accountQuery.data?.account_kind ?? "merchant") as "merchant" | "creator";
   const isCreator = (lockedKind ?? orgKind) === "creator";
-  const kindMismatch = lockedKind !== undefined && orgQuery.data !== undefined && lockedKind !== orgKind;
-  const settingsPath = isCreator ? "/creator/settings" : `/org/${orgId}/settings`;
+  const kindMismatch = lockedKind !== undefined && accountQuery.data !== undefined && lockedKind !== orgKind;
+  const settingsPath = isCreator ? "/individual/settings" : `/org/${accountId}/settings`;
 
   const [businessName, setBusinessName] = useState("");
   const [tin, setTin] = useState("");
@@ -77,14 +85,14 @@ const OnboardingKYC = ({ lockedKind }: { lockedKind?: "merchant" | "creator" }) 
   const [submitting, setSubmitting] = useState(false);
 
   const handleUpload = async (file: File | undefined) => {
-    if (!file || !orgId) return;
+    if (!file || !accountId) return;
     if (file.size > 5 * 1024 * 1024) {
       toast.error("Document must be under 5MB.");
       return;
     }
     setUploading(true);
     try {
-      const result = await uploadKYCDocument(orgId, file);
+      const result = await (isCreator ? uploadIndividualKYCDocument(file) : uploadKYCDocument(accountId, file));
       setDocURL(result.id_document_url);
       setFileName(file.name);
       toast.success("Document uploaded.");
@@ -96,14 +104,14 @@ const OnboardingKYC = ({ lockedKind }: { lockedKind?: "merchant" | "creator" }) 
   };
 
   const handleUploadBack = async (file: File | undefined) => {
-    if (!file || !orgId) return;
+    if (!file || !accountId) return;
     if (file.size > 5 * 1024 * 1024) {
       toast.error("Document must be under 5MB.");
       return;
     }
     setUploadingBack(true);
     try {
-      const result = await uploadKYCDocument(orgId, file);
+      const result = await (isCreator ? uploadIndividualKYCDocument(file) : uploadKYCDocument(accountId, file));
       setDocBackURL(result.id_document_url);
       setBackFileName(file.name);
       toast.success("Back side uploaded.");
@@ -115,7 +123,7 @@ const OnboardingKYC = ({ lockedKind }: { lockedKind?: "merchant" | "creator" }) 
   };
 
   const handleUploadSelfie = async (file: File | undefined) => {
-    if (!file || !orgId) return;
+    if (!file || !accountId) return;
     if (file.size > 5 * 1024 * 1024) {
       toast.error("Selfie must be under 5MB.");
       return;
@@ -126,7 +134,7 @@ const OnboardingKYC = ({ lockedKind }: { lockedKind?: "merchant" | "creator" }) 
     }
     setUploadingSelfie(true);
     try {
-      const result = await uploadKYCSelfie(orgId, file);
+      const result = await (isCreator ? uploadIndividualKYCSelfie(file) : uploadKYCSelfie(accountId, file));
       setSelfieURL(result.selfie_url);
       setSelfieFileName(file.name);
       toast.success("Selfie uploaded.");
@@ -139,7 +147,7 @@ const OnboardingKYC = ({ lockedKind }: { lockedKind?: "merchant" | "creator" }) 
 
   const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();
-    if (!orgId) return;
+    if (!accountId) return;
     if (isCreator && !isAdultDob(dob)) {
       toast.error("You must be 18 or older to use LipaGO.");
       return;
@@ -147,7 +155,7 @@ const OnboardingKYC = ({ lockedKind }: { lockedKind?: "merchant" | "creator" }) 
     setSubmitting(true);
     try {
       if (isCreator) {
-        await submitCreatorKYC(orgId, {
+        await submitIndividualKYC({
           full_name: fullName.trim(),
           id_type: idType,
           id_number: idNumber.trim(),
@@ -157,12 +165,12 @@ const OnboardingKYC = ({ lockedKind }: { lockedKind?: "merchant" | "creator" }) 
           selfie_url: selfieURL,
         });
       } else {
-        await submitKYC(orgId, { business_name: businessName.trim(), tin: tin.trim(), id_document_url: docURL });
+        await submitKYC(accountId, { business_name: businessName.trim(), tin: tin.trim(), id_document_url: docURL });
       }
       toast.success("Verification submitted — an admin will review it.");
-      queryClient.invalidateQueries({ queryKey: ["orgs", orgId] });
-      queryClient.invalidateQueries({ queryKey: ["kyc", orgId] });
-      queryClient.invalidateQueries({ queryKey: ["orgs", "mine"] });
+      queryClient.invalidateQueries({ queryKey: isCreator ? ["individual", "account"] : ["orgs", accountId] });
+      queryClient.invalidateQueries({ queryKey: ["kyc", isCreator ? "individual" : accountId] });
+      queryClient.invalidateQueries({ queryKey: isCreator ? ["individual", "account"] : ["orgs", "mine"] });
       navigate(settingsPath, { replace: true });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Unable to submit verification.");
@@ -195,17 +203,17 @@ const OnboardingKYC = ({ lockedKind }: { lockedKind?: "merchant" | "creator" }) 
             <p className="mt-1">
               {lockedKind === "creator"
                 ? "This is a business account — it needs business verification instead."
-                : "This is a creator account — it needs individual verification instead."}
+                : "This is an individual account — it needs individual verification instead."}
             </p>
             <Link
-              to={lockedKind === "creator" ? `/merchant/verify/${orgId}` : `/creator/verify/${orgId}`}
+              to={lockedKind === "creator" ? `/merchant/verify/${accountId}` : "/individual/verify"}
               className="mt-2 inline-block font-medium text-blue-600 hover:underline"
             >
               Go to the correct verification →
             </Link>
           </CardContent>
         </Card>
-      ) : orgQuery.isLoading ? (
+      ) : accountQuery.isLoading ? (
         <Skeleton className="mt-4 h-64 w-full" />
       ) : !isOwner ? (
         <Card className="mt-4">

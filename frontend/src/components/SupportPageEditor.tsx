@@ -5,11 +5,15 @@ import { Input } from "@/components/ui/input";
 import { toast } from "@/components/ui/sonner";
 import {
   enableSupportPage,
+  enableIndividualSupportPage,
   getSupportSettings,
+  getIndividualSupportSettings,
   updateSupportSettings,
+  updateIndividualSupportSettings,
   type Organization,
 } from "@/lib/orgApi";
 import { listMyApps } from "@/lib/merchantApi";
+import { listIndividualApps } from "@/lib/individualApi";
 
 function errorMessage(err: unknown, fallback: string) {
   return err instanceof Error ? err.message : fallback;
@@ -19,14 +23,15 @@ export type SupportLinkDraft = { label: string; amount_mode: "fixed" | "open"; a
 
 // Support-page editor shared by Settings (Support page tab) and My Page:
 // enable flow, receiving app, amount bounds, and buttons (max 6).
-const SupportPageEditor = ({ org, isOwner }: { org: Organization; isOwner: boolean }) => {
+const SupportPageEditor = ({ org, isOwner, track = "merchant" }: { org: Organization; isOwner: boolean; track?: "merchant" | "individual" }) => {
   const queryClient = useQueryClient();
+  const isIndividual = track === "individual";
   const settingsQuery = useQuery({
-    queryKey: ["orgs", org.id, "support-settings"],
-    queryFn: () => getSupportSettings(org.id).catch(() => null),
+    queryKey: isIndividual ? ["individual", "account", "support-settings"] : ["orgs", org.id, "support-settings"],
+    queryFn: () => (isIndividual ? getIndividualSupportSettings() : getSupportSettings(org.id)).catch(() => null),
     staleTime: 15_000,
   });
-  const appsQuery = useQuery({ queryKey: ["merchant", "my-apps"], queryFn: () => listMyApps(), staleTime: 30_000 });
+  const appsQuery = useQuery({ queryKey: isIndividual ? ["individual", "my-apps"] : ["merchant", "my-apps"], queryFn: () => isIndividual ? listIndividualApps() : listMyApps(), staleTime: 30_000 });
   const settings = settingsQuery.data;
   const enabled = !!settings?.support_app_id;
 
@@ -45,9 +50,9 @@ const SupportPageEditor = ({ org, isOwner }: { org: Organization; isOwner: boole
   const handleEnable = async () => {
     setEnabling(true);
     try {
-      await enableSupportPage(org.id);
+      await (isIndividual ? enableIndividualSupportPage() : enableSupportPage(org.id));
       toast.success("Support page enabled — share your link.");
-      queryClient.invalidateQueries({ queryKey: ["orgs", org.id, "support-settings"] });
+      queryClient.invalidateQueries({ queryKey: isIndividual ? ["individual", "account", "support-settings"] : ["orgs", org.id, "support-settings"] });
     } catch (err) {
       toast.error(errorMessage(err, "Unable to enable the support page."));
     } finally {
@@ -59,14 +64,15 @@ const SupportPageEditor = ({ org, isOwner }: { org: Organization; isOwner: boole
     event.preventDefault();
     setSaving(true);
     try {
-      await updateSupportSettings(org.id, {
+      const input = {
         support_app_id: effAppId || undefined,
         min_amount: effMin.trim() || undefined,
         max_amount: effMax.trim() || undefined,
         links: effLinks.map((l) => ({ label: l.label.trim(), amount_mode: l.amount_mode, amount: l.amount?.trim() || undefined })),
-      });
+      };
+      await (isIndividual ? updateIndividualSupportSettings(input) : updateSupportSettings(org.id, input));
       toast.success("Support page saved.");
-      queryClient.invalidateQueries({ queryKey: ["orgs", org.id, "support-settings"] });
+      queryClient.invalidateQueries({ queryKey: isIndividual ? ["individual", "account", "support-settings"] : ["orgs", org.id, "support-settings"] });
     } catch (err) {
       toast.error(errorMessage(err, "Unable to save the support page."));
     } finally {

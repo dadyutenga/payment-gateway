@@ -10,20 +10,25 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { toast } from "@/components/ui/sonner";
 import {
   deleteOrg,
-  getCreatorLimitsUsage,
+  deleteIndividualAccount,
+  getIndividualLimitsUsage,
   getLimitsUsage,
-  getPayoutDestination,
+  getIndividualPayoutDestination,
   listKYCAttempts,
+  listIndividualKYCAttempts,
   listOrgMembers,
   resolveLogoSrc,
-  savePayoutDestination,
+  resolveIndividualLogoSrc,
+  saveIndividualPayoutDestination,
   updateOrg,
+  updateIndividualAccount,
   uploadOrgLogo,
+  uploadIndividualLogo,
   type Organization,
 } from "@/lib/orgApi";
-import CreatorSurveyForm, { loadCreatorSurvey } from "@/components/CreatorSurveyForm";
+import IndividualSurveyForm, { loadIndividualSurvey } from "@/components/IndividualSurveyForm";
 import SupportPageEditor from "@/components/SupportPageEditor";
-import { changePassword, getKYC, getOwnProfile, requestOTP, updateOwnProfile } from "@/lib/signupApi";
+import { changePassword, getKYC, getIndividualKYC, getOwnProfile, requestOTP, updateOwnProfile } from "@/lib/signupApi";
 import { listMerchantWithdrawals, listMyApps } from "@/lib/merchantApi";
 import { listNotificationPreferences, updateNotificationPreference } from "@/lib/notificationsApi";
 
@@ -76,19 +81,19 @@ function formFromOrg(org: Organization): ProfileForm {
   };
 }
 
-export const isCreatorOrg = (org: Organization) => (org.account_kind ?? "merchant") === "creator";
+export const isIndividualAccount = (org: Organization) => (org.account_kind ?? "merchant") === "creator";
 
-// Track-specific verification entry: business and creator verification
+// Track-specific verification entry: business and individual verification
 // are separate flows, so every link must point at the matching one.
 export const verifyPathFor = (org: Organization) =>
-  isCreatorOrg(org) ? `/creator/verify/${org.id}` : `/merchant/verify/${org.id}`;
+  isIndividualAccount(org) ? "/individual/verify" : `/merchant/verify/${org.id}`;
 
 export const GeneralTab = ({ org, isOwner }: { org: Organization; isOwner: boolean }) => {
   const queryClient = useQueryClient();
   const [form, setForm] = useState<ProfileForm>(() => formFromOrg(org));
   const [saving, setSaving] = useState(false);
   const locked = org.kyc_status === "verified";
-  const isCreator = isCreatorOrg(org);
+  const isIndividual = isIndividualAccount(org);
   const dirty = JSON.stringify(form) !== JSON.stringify(formFromOrg(org));
   const set = (key: keyof ProfileForm) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setForm((f) => ({ ...f, [key]: e.target.value }));
@@ -106,31 +111,32 @@ export const GeneralTab = ({ org, isOwner }: { org: Organization; isOwner: boole
     event.preventDefault();
     setSaving(true);
     try {
-      await updateOrg(org.id, {
+      const input = {
         name: form.name.trim(),
-        business_name: isCreator ? undefined : form.business_name.trim() || undefined,
-        tin: isCreator ? undefined : form.tin.trim() || undefined,
+        business_name: isIndividual ? undefined : form.business_name.trim() || undefined,
+        tin: isIndividual ? undefined : form.tin.trim() || undefined,
         address: form.address.trim() || undefined,
         phone: form.phone.trim() || undefined,
         contact_email: form.contact_email.trim() || undefined,
         logo_url: form.logo_url.trim() || undefined,
         primary_color: form.primary_color.trim() || undefined,
-        display_name: isCreator ? form.display_name.trim() || undefined : undefined,
-        handle: isCreator ? form.handle.trim().toLowerCase() || undefined : undefined,
-        bio: isCreator ? form.bio.trim() || undefined : undefined,
-      });
-      toast.success(isCreator ? "Personal profile updated." : "Organization updated.");
-      queryClient.invalidateQueries({ queryKey: ["orgs", org.id] });
-      queryClient.invalidateQueries({ queryKey: ["orgs", "mine"] });
+        display_name: isIndividual ? form.display_name.trim() || undefined : undefined,
+        handle: isIndividual ? form.handle.trim().toLowerCase() || undefined : undefined,
+        bio: isIndividual ? form.bio.trim() || undefined : undefined,
+      };
+      await (isIndividual ? updateIndividualAccount(input) : updateOrg(org.id, input));
+      toast.success(isIndividual ? "Personal profile updated." : "Organization updated.");
+      queryClient.invalidateQueries({ queryKey: isIndividual ? ["individual", "account"] : ["orgs", org.id] });
+      queryClient.invalidateQueries({ queryKey: isIndividual ? ["individual", "account"] : ["orgs", "mine"] });
     } catch (err) {
-      toast.error(errorMessage(err, isCreator ? "Unable to update personal profile." : "Unable to update organization."));
+      toast.error(errorMessage(err, isIndividual ? "Unable to update personal profile." : "Unable to update organization."));
     } finally {
       setSaving(false);
     }
   };
 
   const copyId = () => {
-    navigator.clipboard.writeText(org.id).then(() => toast.success("Org ID copied."));
+    navigator.clipboard.writeText(org.id).then(() => toast.success(isIndividual ? "Account ID copied." : "Org ID copied."));
   };
 
   const field = (
@@ -158,7 +164,7 @@ export const GeneralTab = ({ org, isOwner }: { org: Organization; isOwner: boole
       <CardContent className="p-4 sm:p-6">
         <form onSubmit={handleSave} className="space-y-4">
           <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5">
-            <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">{isCreator ? "Personal account" : "Organization owner"}</p>
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">{isIndividual ? "Personal account" : "Organization owner"}</p>
             {membersQuery.isLoading ? (
               <p className="mt-1 text-sm text-slate-500">Loading owner…</p>
             ) : owner ? (
@@ -176,7 +182,7 @@ export const GeneralTab = ({ org, isOwner }: { org: Organization; isOwner: boole
             )}
           </div>
           <div>
-            <label className="text-sm font-medium text-slate-700">{isCreator ? "Account ID" : "Org ID"}</label>
+            <label className="text-sm font-medium text-slate-700">{isIndividual ? "Account ID" : "Org ID"}</label>
             <div className="mt-1 flex items-center gap-2">
               <code className="flex-1 truncate rounded-md bg-slate-100 px-3 py-2 font-mono text-xs text-slate-600">{org.id}</code>
               <Button type="button" size="sm" variant="outline" onClick={copyId}>
@@ -185,8 +191,8 @@ export const GeneralTab = ({ org, isOwner }: { org: Organization; isOwner: boole
             </div>
             <p className="mt-1 text-xs text-slate-400">Read-only identifier used in API paths and support requests.</p>
           </div>
-          {!isCreator && field("Organization name", "Workspace label shown in navigation — internal only.", "name")}
-          {isCreator ? (
+          {!isIndividual && field("Organization name", "Workspace label shown in navigation — internal only.", "name")}
+          {isIndividual ? (
             <>
               {field("Display name", "Public name on your support page.", "display_name", { placeholder: "Amina Creates" })}
               {field("Handle", "Your public link: /c/<handle>. Contact support to change it later.", "handle", { placeholder: "amina.creates" })}
@@ -212,13 +218,13 @@ export const GeneralTab = ({ org, isOwner }: { org: Organization; isOwner: boole
               {field("Business phone", "Business contact number.", "phone", { placeholder: "+255712345678" })}
             </>
           )}
-          {!isCreator && locked && (
+          {!isIndividual && locked && (
             <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-900">
               Business name and TIN are locked after verification. Changing them requires re-verification —{" "}
               <Link to={verifyPathFor(org)} className="font-medium underline">request a change via resubmission</Link>.
             </div>
           )}
-          {isCreator && org.handle && (
+          {isIndividual && org.handle && (
             <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2.5 text-xs text-emerald-900">
               Your public support page: <Link to={`/c/${org.handle}`} className="font-medium underline">/c/{org.handle}</Link>
               {" "}— share it anywhere. {org.kyc_status === "verified" ? "Live support payments enabled." : "Sandbox only until ID verification passes."}
@@ -240,16 +246,16 @@ export const GeneralTab = ({ org, isOwner }: { org: Organization; isOwner: boole
 export const VerificationTab = ({ org, isOwner }: { org: Organization; isOwner: boolean }) => {
   const status = KYC_STATUS[org.kyc_status] ?? KYC_STATUS.pending;
   const Icon = status.icon;
-  const creator = isCreatorOrg(org);
+  const individual = isIndividualAccount(org);
 
   const kycQuery = useQuery({
     queryKey: ["orgs", org.id, "kyc"],
-    queryFn: () => getKYC(org.id).catch(() => null),
+    queryFn: () => (individual ? getIndividualKYC() : getKYC(org.id)).catch(() => null),
     staleTime: 30_000,
   });
   const attemptsQuery = useQuery({
     queryKey: ["orgs", org.id, "kyc-attempts"],
-    queryFn: () => listKYCAttempts(org.id),
+    queryFn: () => individual ? listIndividualKYCAttempts() : listKYCAttempts(org.id),
     staleTime: 30_000,
   });
   const attempts = attemptsQuery.data ?? [];
@@ -291,7 +297,7 @@ export const VerificationTab = ({ org, isOwner }: { org: Organization; isOwner: 
               <TableHeader>
                 <TableRow>
                   <TableHead>Date</TableHead>
-                  <TableHead>{creator ? "Identity" : "Business"}</TableHead>
+                  <TableHead>{individual ? "Identity" : "Business"}</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead>Decision</TableHead>
                 </TableRow>
@@ -324,21 +330,21 @@ function feeText(app: { fee_type: string; fee_percent: string; fee_fixed: string
   return `${app.fee_percent}% per transaction`;
 }
 
-export const LimitsTab = ({ org, track = "merchant" }: { org: Organization; track?: "merchant" | "creator" }) => {
+export const LimitsTab = ({ org, track = "merchant" }: { org: Organization; track?: "merchant" | "individual" | "creator" }) => {
+  const isIndividualTrack = track === "individual" || track === "creator";
   const usageQuery = useQuery({
     queryKey: ["orgs", org.id, "limits-usage", track],
-    queryFn: () => (track === "creator" ? getCreatorLimitsUsage(org.id) : getLimitsUsage(org.id)),
+    queryFn: () => (isIndividualTrack ? getIndividualLimitsUsage() : getLimitsUsage(org.id)),
     staleTime: 15_000,
   });
   const usage = usageQuery.data;
-  const isCreatorTrack = track === "creator";
 
   return (
     <div className="mt-4 space-y-3">
       <p className="text-xs text-slate-500">
         Read-only — caps are set by platform defaults or an admin override. Ask an admin to adjust them.
         Volume is computed live from the ledger, live environment only.
-        {isCreatorTrack && (
+        {isIndividualTrack && (
           <> Personal accounts start on a stricter tier than businesses — an admin can raise your account individually.</>
         )}
       </p>
@@ -348,7 +354,7 @@ export const LimitsTab = ({ org, track = "merchant" }: { org: Organization; trac
         <Card key={app.app_id}>
           <CardContent className="p-4">
             <div className="flex flex-wrap items-center gap-2">
-              {isCreatorTrack ? (
+              {isIndividualTrack ? (
                 <span className="text-sm font-semibold text-slate-800">{app.name}</span>
               ) : (
                 <Link to={`/merchant/apps/${app.app_id}`} className="text-sm font-semibold text-blue-600 hover:underline">{app.name}</Link>
@@ -400,7 +406,7 @@ export const LimitsTab = ({ org, track = "merchant" }: { org: Organization; trac
 
 function sourceLabel(source: string) {
   if (source === "org_override") return "org override";
-  if (source === "platform_creator") return "creator tier default";
+  if (source === "platform_creator") return "individual tier default";
   return "platform default";
 }
 
@@ -554,6 +560,7 @@ export const NotificationsTab = ({ org, isOwner }: { org: Organization; isOwner:
 
 export const BrandingTab = ({ org, isOwner }: { org: Organization; isOwner: boolean }) => {
   const queryClient = useQueryClient();
+  const isIndividual = isIndividualAccount(org);
   const [logoUrl, setLogoUrl] = useState(org.logo_url ?? "");
   const [primaryColor, setPrimaryColor] = useState(org.primary_color || "#0f172a");
   const [saving, setSaving] = useState(false);
@@ -568,7 +575,7 @@ export const BrandingTab = ({ org, isOwner }: { org: Organization; isOwner: bool
     let objectUrl = "";
     (async () => {
       try {
-        const src = await resolveLogoSrc(org.id, logoUrl);
+        const src = await (isIndividual ? resolveIndividualLogoSrc(logoUrl) : resolveLogoSrc(org.id, logoUrl));
         if (!cancelled) {
           if (objectUrl) URL.revokeObjectURL(objectUrl);
           if (src.startsWith("blob:")) objectUrl = src;
@@ -584,13 +591,13 @@ export const BrandingTab = ({ org, isOwner }: { org: Organization; isOwner: bool
       cancelled = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [org.id, logoUrl]);
+  }, [isIndividual, org.id, logoUrl]);
 
   const handleSave = async (event: FormEvent) => {
     event.preventDefault();
     setSaving(true);
     try {
-      await updateOrg(org.id, {
+      const input = {
         name: org.name,
         business_name: org.business_name,
         tin: org.tin,
@@ -599,10 +606,11 @@ export const BrandingTab = ({ org, isOwner }: { org: Organization; isOwner: bool
         bio: org.bio,
         logo_url: logoUrl.trim() || undefined,
         primary_color: primaryColor.trim() || undefined,
-      });
+      };
+      await (isIndividual ? updateIndividualAccount(input) : updateOrg(org.id, input));
       toast.success("Branding saved.");
-      queryClient.invalidateQueries({ queryKey: ["orgs", org.id] });
-      queryClient.invalidateQueries({ queryKey: ["orgs", "mine"] });
+      queryClient.invalidateQueries({ queryKey: isIndividual ? ["individual", "account"] : ["orgs", org.id] });
+      queryClient.invalidateQueries({ queryKey: isIndividual ? ["individual", "account"] : ["orgs", "mine"] });
     } catch (err) {
       toast.error(errorMessage(err, "Unable to save branding."));
     } finally {
@@ -622,11 +630,11 @@ export const BrandingTab = ({ org, isOwner }: { org: Organization; isOwner: bool
     }
     setUploading(true);
     try {
-      const updated = await uploadOrgLogo(org.id, file);
+      const updated = await (isIndividual ? uploadIndividualLogo(file) : uploadOrgLogo(org.id, file));
       setLogoUrl(updated.logo_url ?? "");
       toast.success("Logo uploaded.");
-      queryClient.invalidateQueries({ queryKey: ["orgs", org.id] });
-      queryClient.invalidateQueries({ queryKey: ["orgs", "mine"] });
+      queryClient.invalidateQueries({ queryKey: isIndividual ? ["individual", "account"] : ["orgs", org.id] });
+      queryClient.invalidateQueries({ queryKey: isIndividual ? ["individual", "account"] : ["orgs", "mine"] });
     } catch (err) {
       toast.error(errorMessage(err, "Unable to upload logo."));
     } finally {
@@ -707,8 +715,8 @@ function destinationSummary(w: { destination_type: string; destination_details: 
 }
 
 export const PayoutsTab = ({ org, isOwner }: { org: Organization; isOwner: boolean }) => {
-  if (org && isCreatorOrg(org)) {
-    return <CreatorPayoutDestinationCard org={org} isOwner={isOwner} />;
+  if (org && isIndividualAccount(org)) {
+    return <IndividualPayoutDestinationCard org={org} isOwner={isOwner} />;
   }
   const appsQuery = useQuery({ queryKey: ["merchant", "my-apps"], queryFn: () => listMyApps(), staleTime: 30_000 });
   const apps = appsQuery.data ?? [];
@@ -768,15 +776,15 @@ export const PayoutsTab = ({ org, isOwner }: { org: Organization; isOwner: boole
   );
 };
 
-// ---------- Creator payout destination (OTP-gated, 24h cooling) ----------
+// ---------- Individual payout destination (OTP-gated, 24h cooling) ----------
 
 const MOBILE_PROVIDERS = ["mpesa", "tigo", "airtel", "halotel"] as const;
 
-export const CreatorPayoutDestinationCard = ({ org, isOwner }: { org: Organization; isOwner: boolean }) => {
+export const IndividualPayoutDestinationCard = ({ org, isOwner }: { org: Organization; isOwner: boolean }) => {
   const queryClient = useQueryClient();
   const destQuery = useQuery({
-    queryKey: ["orgs", org.id, "payout-destination"],
-    queryFn: () => getPayoutDestination(org.id),
+    queryKey: ["individual", "account", "payout-destination"],
+    queryFn: () => getIndividualPayoutDestination(),
     staleTime: 15_000,
   });
   const dest = destQuery.data ?? null;
@@ -791,7 +799,7 @@ export const CreatorPayoutDestinationCard = ({ org, isOwner }: { org: Organizati
   const [codeSent, setCodeSent] = useState(false);
   const [working, setWorking] = useState(false);
 
-  const reload = () => queryClient.invalidateQueries({ queryKey: ["orgs", org.id, "payout-destination"] });
+  const reload = () => queryClient.invalidateQueries({ queryKey: ["individual", "account", "payout-destination"] });
 
   const handleRequestCode = async () => {
     setWorking(true);
@@ -810,7 +818,7 @@ export const CreatorPayoutDestinationCard = ({ org, isOwner }: { org: Organizati
     event.preventDefault();
     setWorking(true);
     try {
-      await savePayoutDestination(org.id, {
+      await saveIndividualPayoutDestination({
         provider,
         phone: phone.trim(),
         account_name: accountName.trim(),
@@ -909,13 +917,13 @@ export const CreatorPayoutDestinationCard = ({ org, isOwner }: { org: Organizati
   );
 };
 
-// ---------- Survey tab (creator onboarding answers, editable) ----------
+// ---------- Survey tab (individual onboarding answers, editable) ----------
 
 export const SurveyTab = ({ org, isOwner }: { org: Organization; isOwner: boolean }) => {
   const queryClient = useQueryClient();
   const surveyQuery = useQuery({
-    queryKey: ["orgs", org.id, "creator-survey"],
-    queryFn: () => loadCreatorSurvey(org.id),
+    queryKey: ["individual", "account", "survey"],
+    queryFn: () => loadIndividualSurvey(),
     staleTime: 30_000,
   });
 
@@ -932,11 +940,11 @@ export const SurveyTab = ({ org, isOwner }: { org: Organization; isOwner: boolea
           <p className="mt-3 text-sm text-slate-500">Only owners can change these answers.</p>
         ) : (
           <div className="mt-4">
-            <CreatorSurveyForm
-              org={org}
+            <IndividualSurveyForm
+              account={{ ...org, role: "owner", status: "active" }}
               initial={surveyQuery.data}
               submitLabel="Save answers"
-              onSaved={() => queryClient.invalidateQueries({ queryKey: ["orgs", org.id, "creator-survey"] })}
+              onSaved={() => queryClient.invalidateQueries({ queryKey: ["individual", "account", "survey"] })}
             />
           </div>
         )}
@@ -945,7 +953,7 @@ export const SurveyTab = ({ org, isOwner }: { org: Organization; isOwner: boolea
   );
 };
 
-// ---------- Support page tab (creator receiving config) ----------
+// ---------- Support page tab (individual receiving config) ----------
 
 export const SupportPageTab = ({ org, isOwner }: { org: Organization; isOwner: boolean }) => {
   return (
@@ -953,9 +961,9 @@ export const SupportPageTab = ({ org, isOwner }: { org: Organization; isOwner: b
       <CardContent className="p-4 sm:p-6">
         <h3 className="text-sm font-bold text-slate-800">Support page</h3>
         <p className="mt-1 text-xs text-slate-500">
-          What fans see at <span className="font-mono">/c/{org.handle || "…"}</span>. Payments run through the same order path as merchant checkouts.
+          What supporters see at <span className="font-mono">/c/{org.handle || "…"}</span>. Payments run through the same order path as merchant checkouts.
         </p>
-        <SupportPageEditor org={org} isOwner={isOwner} />
+        <SupportPageEditor org={org} isOwner={isOwner} track={isIndividualAccount(org) ? "individual" : "merchant"} />
       </CardContent>
     </Card>
   );
@@ -967,15 +975,15 @@ export const DangerTab = ({ org, isOwner, homePath = "/merchant/apps" }: { org: 
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [deleting, setDeleting] = useState(false);
-  const isPersonal = isCreatorOrg(org);
+  const isPersonal = isIndividualAccount(org);
 
   const handleDelete = async () => {
     if (!window.confirm(`Delete ${isPersonal ? (org?.display_name || "your personal account") : org?.name}? Only empty accounts (no apps) can be deleted.`)) return;
     setDeleting(true);
     try {
-      await deleteOrg(org.id);
+      await (isPersonal ? deleteIndividualAccount() : deleteOrg(org.id));
       toast.success(isPersonal ? "Personal account deleted." : "Organization deleted.");
-      queryClient.invalidateQueries({ queryKey: ["orgs", "mine"] });
+      queryClient.invalidateQueries({ queryKey: isPersonal ? ["individual", "account"] : ["orgs", "mine"] });
       navigate(homePath, { replace: true });
     } catch (err) {
       toast.error(errorMessage(err, isPersonal ? "Unable to delete personal account." : "Unable to delete organization."));
@@ -1008,6 +1016,6 @@ export const DangerTab = ({ org, isOwner, homePath = "/merchant/apps" }: { org: 
 // ---------- Page split ----------
 //
 // The old shared OrgSettings page was split into two distinct pages —
-// MerchantSettingsPage (business tabs) and CreatorSettingsPage (personal
+// MerchantSettingsPage (business tabs) and IndividualSettingsPage (personal
 // tabs) — composed from the tab building blocks above. There is no shared
 // settings page anymore.

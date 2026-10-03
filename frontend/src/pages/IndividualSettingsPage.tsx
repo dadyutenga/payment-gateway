@@ -3,10 +3,10 @@ import { useQuery } from "@tanstack/react-query";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { listMyOrgs } from "@/lib/orgApi";
+import { getIndividualAccount } from "@/lib/orgApi";
 import {
   BrandingTab,
-  CreatorPayoutDestinationCard,
+  IndividualPayoutDestinationCard,
   DangerTab,
   GeneralTab,
   LimitsTab,
@@ -17,27 +17,27 @@ import {
   VerificationTab,
 } from "@/pages/OrgSettings";
 
-// Creator workspace settings: personal profile, survey, support page,
+// Individual workspace settings: personal profile, survey, support page,
 // individual verification, limits, security, notifications, branding,
 // payout destination, danger zone. No team, no business fields.
-const CreatorSettingsPage = () => {
-  const orgsQuery = useQuery({ queryKey: ["orgs", "mine"], queryFn: () => listMyOrgs(), staleTime: 30_000 });
-  if (orgsQuery.isLoading) {
+const IndividualSettingsPage = () => {
+  const accountQuery = useQuery({ queryKey: ["individual", "account"], queryFn: () => getIndividualAccount(), staleTime: 30_000 });
+  if (accountQuery.isLoading) {
     return <Skeleton className="mt-4 h-40 w-full" />;
   }
-  const org = (orgsQuery.data ?? []).find((o) => o.status === "active") ?? orgsQuery.data?.[0];
-  if (!org) {
-    return <Navigate to="/creator/setup" replace />;
+  const account = accountQuery.data;
+  if (!account) {
+    return <Navigate to="/individual/setup" replace />;
   }
-  const isOwner = org.role === "owner";
+  const isOwner = account.role === "owner";
 
   return (
     <div>
       <div>
-        <h2 className="text-2xl font-bold text-slate-900">Settings — {org.display_name || org.name}</h2>
+        <h2 className="text-2xl font-bold text-slate-900">Settings — {account.display_name || account.name}</h2>
         <p className="mt-1 flex flex-wrap items-center gap-2 text-sm text-slate-500">
           Personal account settings.
-          <Badge variant="secondary">{org.role}</Badge>
+          <Badge variant="secondary">{account.role}</Badge>
           <Badge variant="outline">individual</Badge>
         </p>
       </div>
@@ -56,19 +56,19 @@ const CreatorSettingsPage = () => {
           <TabsTrigger value="danger">Danger zone</TabsTrigger>
         </TabsList>
 
-        <TabsContent value="general"><GeneralTab org={org} isOwner={!!isOwner} /></TabsContent>
-        <TabsContent value="survey"><SurveyTab org={org} isOwner={!!isOwner} /></TabsContent>
-        <TabsContent value="support"><SupportPageTab org={org} isOwner={!!isOwner} /></TabsContent>
-        <TabsContent value="verification"><VerificationTab org={org} isOwner={!!isOwner} /></TabsContent>
-        <TabsContent value="limits"><LimitsTab org={org} track="creator" /></TabsContent>
+        <TabsContent value="general"><GeneralTab org={account} isOwner={!!isOwner} /></TabsContent>
+        <TabsContent value="survey"><SurveyTab org={account} isOwner={!!isOwner} /></TabsContent>
+        <TabsContent value="support"><SupportPageTab org={account} isOwner={!!isOwner} /></TabsContent>
+        <TabsContent value="verification"><VerificationTab org={account} isOwner={!!isOwner} /></TabsContent>
+        <TabsContent value="limits"><LimitsTab org={account} track="individual" /></TabsContent>
         <TabsContent value="security"><SecurityTab /></TabsContent>
-        <TabsContent value="notifications"><NotificationsTab org={org} isOwner={!!isOwner} /></TabsContent>
-        <TabsContent value="branding"><BrandingTab org={org} isOwner={!!isOwner} /></TabsContent>
-        <TabsContent value="payouts"><CreatorPayoutDestinationCard org={org} isOwner={!!isOwner} /></TabsContent>
-        <TabsContent value="danger"><DangerTab org={org} isOwner={!!isOwner} homePath="/creator" /></TabsContent>
+        <TabsContent value="notifications"><NotificationsTab org={account} isOwner={!!isOwner} /></TabsContent>
+        <TabsContent value="branding"><BrandingTab org={account} isOwner={!!isOwner} /></TabsContent>
+        <TabsContent value="payouts"><IndividualPayoutDestinationCard org={account} isOwner={!!isOwner} /></TabsContent>
+        <TabsContent value="danger"><DangerTab org={account} isOwner={!!isOwner} homePath="/individual" /></TabsContent>
       </Tabs>
     </div>
   );
 };
 
-export default CreatorSettingsPage;
+export default IndividualSettingsPage;

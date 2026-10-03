@@ -18,14 +18,14 @@ type ApiErrorEnvelope = {
   };
 };
 
-export class CreatorApiError extends Error {
+export class IndividualApiError extends Error {
   status: number;
   code?: string;
   details?: Record<string, string>;
 
   constructor(status: number, message: string, code?: string, details?: Record<string, string>) {
     super(message);
-    this.name = "CreatorApiError";
+    this.name = "IndividualApiError";
     this.status = status;
     this.code = code;
     this.details = details;
@@ -58,7 +58,7 @@ async function request<T>(
 ): Promise<{ data: T; meta?: { total: number; limit: number; offset: number } }> {
   const token = getCustomerToken();
   if (!token) {
-    throw new CreatorApiError(401, "You need to sign in to continue.", "unauthorized");
+    throw new IndividualApiError(401, "You need to sign in to continue.", "unauthorized");
   }
   const headers: Record<string, string> = {
     Accept: "application/json",
@@ -85,7 +85,7 @@ async function request<T>(
 
   if (!response.ok) {
     const errorPayload = payload as ApiErrorEnvelope | null;
-    throw new CreatorApiError(
+    throw new IndividualApiError(
       response.status,
       errorPayload?.error?.message || "The request could not be completed.",
       errorPayload?.error?.code,
@@ -97,9 +97,9 @@ async function request<T>(
   return { data: envelope.data, meta: envelope.meta };
 }
 
-// ---------- Types (creator-visible shapes; same ledger core) ----------
+// ---------- Types (individual-visible shapes; same ledger core) ----------
 
-export type CreatorApp = {
+export type IndividualApp = {
   id: string;
   name: string;
   description?: string;
@@ -107,7 +107,7 @@ export type CreatorApp = {
   org_id?: string;
 };
 
-export type CreatorOrder = {
+export type IndividualOrder = {
   id: string;
   app_id?: string;
   provider: string;
@@ -124,7 +124,7 @@ export type CreatorOrder = {
   updated_at: string;
 };
 
-export type CreatorBalance = {
+export type IndividualBalance = {
   app_id: string;
   currency: string;
   available_balance: string;
@@ -134,7 +134,7 @@ export type CreatorBalance = {
   pending_order_total: string;
 };
 
-export type CreatorWithdrawal = {
+export type IndividualWithdrawal = {
   id: string;
   app_id: string;
   amount: string;
@@ -154,7 +154,7 @@ export type CreatorWithdrawal = {
   updated_at: string;
 };
 
-export type CreateCreatorWithdrawalInput = {
+export type CreateIndividualWithdrawalInput = {
   amount: string;
   currency: string;
   destination_type: "bank" | "mobile_money";
@@ -164,63 +164,63 @@ export type CreateCreatorWithdrawalInput = {
 
 // ---------- Receiving app ----------
 
-export async function listCreatorApps() {
-  return (await request<CreatorApp[]>("/api/v1/creator/apps")).data;
+export async function listIndividualApps() {
+  return (await request<IndividualApp[]>("/api/v1/individual/apps")).data;
 }
 
 // ---------- Support payments: balance + orders (scoped to the path app) ----------
 
-export async function listCreatorOrders(appId: string, status?: string) {
-  const r = await request<{ items: CreatorOrder[]; total: number }>(
-    `/api/v1/creator/apps/${appId}/orders`,
+export async function listIndividualOrders(appId: string, status?: string) {
+  const r = await request<{ items: IndividualOrder[]; total: number }>(
+    `/api/v1/individual/apps/${appId}/orders`,
     { query: { status } },
   );
-  return Array.isArray((r.data as unknown as { items?: CreatorOrder[] })?.items)
-    ? ((r.data as unknown as { items: CreatorOrder[] }).items ?? [])
+  return Array.isArray((r.data as unknown as { items?: IndividualOrder[] })?.items)
+    ? ((r.data as unknown as { items: IndividualOrder[] }).items ?? [])
     : [];
 }
 
-export async function getCreatorBalance(appId: string) {
-  return (await request<CreatorBalance>(`/api/v1/creator/apps/${appId}/balance`)).data;
+export async function getIndividualBalance(appId: string) {
+  return (await request<IndividualBalance>(`/api/v1/individual/apps/${appId}/balance`)).data;
 }
 
 // ---------- Payouts (scoped to the path app) ----------
 
-function withdrawalItems(r: { data: unknown }): CreatorWithdrawal[] {
-  const items = (r.data as unknown as { items?: CreatorWithdrawal[] })?.items;
+function withdrawalItems(r: { data: unknown }): IndividualWithdrawal[] {
+  const items = (r.data as unknown as { items?: IndividualWithdrawal[] })?.items;
   return Array.isArray(items) ? (items ?? []) : [];
 }
 
-export async function listCreatorWithdrawals(appId: string) {
-  return withdrawalItems(await request(`/api/v1/creator/apps/${appId}/withdrawals`));
+export async function listIndividualWithdrawals(appId: string) {
+  return withdrawalItems(await request(`/api/v1/individual/apps/${appId}/withdrawals`));
 }
 
-export async function createCreatorWithdrawal(appId: string, input: CreateCreatorWithdrawalInput) {
+export async function createIndividualWithdrawal(appId: string, input: CreateIndividualWithdrawalInput) {
   return (
-    await request<CreatorWithdrawal>(`/api/v1/creator/apps/${appId}/withdrawals`, {
+    await request<IndividualWithdrawal>(`/api/v1/individual/apps/${appId}/withdrawals`, {
       method: "POST",
       body: input,
     })
   ).data;
 }
 
-export async function approveCreatorWithdrawal(appId: string, withdrawalId: string) {
+export async function approveIndividualWithdrawal(appId: string, withdrawalId: string) {
   return (
-    await request<CreatorWithdrawal>(`/api/v1/creator/apps/${appId}/withdrawals/${withdrawalId}/approve`, {
+    await request<IndividualWithdrawal>(`/api/v1/individual/apps/${appId}/withdrawals/${withdrawalId}/approve`, {
       method: "POST",
     })
   ).data;
 }
 
-export async function rejectCreatorWithdrawal(appId: string, withdrawalId: string) {
+export async function rejectIndividualWithdrawal(appId: string, withdrawalId: string) {
   return (
-    await request<CreatorWithdrawal>(`/api/v1/creator/apps/${appId}/withdrawals/${withdrawalId}/reject`, {
+    await request<IndividualWithdrawal>(`/api/v1/individual/apps/${appId}/withdrawals/${withdrawalId}/reject`, {
       method: "POST",
     })
   ).data;
 }
 
-// ---------- Creator analytics: overview + supporters (same rollup core) ----------
+// ---------- Individual analytics: overview + supporters (same rollup core) ----------
 
 async function getAnalytics<T>(path: string, q?: MerchantAnalyticsQuery): Promise<T> {
   const query: Record<string, string | undefined> = {};
@@ -232,8 +232,8 @@ async function getAnalytics<T>(path: string, q?: MerchantAnalyticsQuery): Promis
   return (await request<T>(path, { query })).data;
 }
 
-export const fetchCreatorOverview = (orgId: string, q?: MerchantAnalyticsQuery) =>
-  getAnalytics<MerchantOverviewData>(`/api/v1/creator/orgs/${orgId}/analytics/overview`, q);
+export const fetchIndividualOverview = (q?: MerchantAnalyticsQuery) =>
+  getAnalytics<MerchantOverviewData>("/api/v1/individual/account/analytics/overview", q);
 
-export const fetchCreatorSupporters = (orgId: string, q?: MerchantAnalyticsQuery) =>
-  getAnalytics<CustomerStats>(`/api/v1/creator/orgs/${orgId}/analytics/supporters`, q);
+export const fetchIndividualSupporters = (q?: MerchantAnalyticsQuery) =>
+  getAnalytics<CustomerStats>("/api/v1/individual/account/analytics/supporters", q);

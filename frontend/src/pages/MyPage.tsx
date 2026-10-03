@@ -7,11 +7,10 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "@/components/ui/sonner";
 import {
-  getOrg,
-  listMyOrgs,
-  resolveLogoSrc,
-  updateOrg,
-  uploadOrgLogo,
+  getIndividualAccount,
+  resolveIndividualLogoSrc,
+  updateIndividualAccount,
+  uploadIndividualLogo,
   type Organization,
 } from "@/lib/orgApi";
 import SharePanel from "@/components/SharePanel";
@@ -21,15 +20,15 @@ function errorMessage(err: unknown, fallback: string) {
   return err instanceof Error ? err.message : fallback;
 }
 
-// Creator "My Page": edit handle/bio/photo/links in one place plus the
+// Individual "My Page": edit handle/bio/photo/links in one place plus the
 // share panel. Same APIs and validation as the Settings tabs — this
-// screen composes them for the simplified creator nav.
-const MyPageProfile = ({ org, isOwner }: { org: Organization; isOwner: boolean }) => {
+// screen composes them for the simplified individual nav.
+const MyPageProfile = ({ account, isOwner }: { account: Organization; isOwner: boolean }) => {
   const queryClient = useQueryClient();
-  const [displayName, setDisplayName] = useState(org.display_name ?? "");
-  const [handle, setHandle] = useState(org.handle ?? "");
-  const [bio, setBio] = useState(org.bio ?? "");
-  const [primaryColor, setPrimaryColor] = useState(org.primary_color || "#0f172a");
+  const [displayName, setDisplayName] = useState(account.display_name ?? "");
+  const [handle, setHandle] = useState(account.handle ?? "");
+  const [bio, setBio] = useState(account.bio ?? "");
+  const [primaryColor, setPrimaryColor] = useState(account.primary_color || "#0f172a");
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [logoSrc, setLogoSrc] = useState("");
@@ -39,7 +38,7 @@ const MyPageProfile = ({ org, isOwner }: { org: Organization; isOwner: boolean }
     let objectUrl = "";
     (async () => {
       try {
-        const src = await resolveLogoSrc(org.id, org.logo_url);
+        const src = await resolveIndividualLogoSrc(account.logo_url);
         if (!cancelled) {
           if (objectUrl) URL.revokeObjectURL(objectUrl);
           if (src.startsWith("blob:")) objectUrl = src;
@@ -55,28 +54,27 @@ const MyPageProfile = ({ org, isOwner }: { org: Organization; isOwner: boolean }
       cancelled = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [org.id, org.logo_url]);
+  }, [account.logo_url]);
 
   const dirty =
-    displayName !== (org.display_name ?? "") ||
-    handle !== (org.handle ?? "") ||
-    bio !== (org.bio ?? "") ||
-    primaryColor !== (org.primary_color || "#0f172a");
+    displayName !== (account.display_name ?? "") ||
+    handle !== (account.handle ?? "") ||
+    bio !== (account.bio ?? "") ||
+    primaryColor !== (account.primary_color || "#0f172a");
 
   const handleSave = async (event: FormEvent) => {
     event.preventDefault();
     setSaving(true);
     try {
-      await updateOrg(org.id, {
-        name: org.name,
+      await updateIndividualAccount({
+        name: account.name,
         display_name: displayName.trim() || undefined,
         handle: handle.trim().toLowerCase() || undefined,
         bio: bio.trim() || undefined,
         primary_color: primaryColor.trim() || undefined,
       });
       toast.success("Page updated.");
-      queryClient.invalidateQueries({ queryKey: ["orgs", org.id] });
-      queryClient.invalidateQueries({ queryKey: ["orgs", "mine"] });
+      queryClient.invalidateQueries({ queryKey: ["individual", "account"] });
     } catch (err) {
       toast.error(errorMessage(err, "Unable to update your page."));
     } finally {
@@ -96,10 +94,9 @@ const MyPageProfile = ({ org, isOwner }: { org: Organization; isOwner: boolean }
     }
     setUploading(true);
     try {
-      await uploadOrgLogo(org.id, file);
+      await uploadIndividualLogo(file);
       toast.success("Photo uploaded.");
-      queryClient.invalidateQueries({ queryKey: ["orgs", org.id] });
-      queryClient.invalidateQueries({ queryKey: ["orgs", "mine"] });
+      queryClient.invalidateQueries({ queryKey: ["individual", "account"] });
     } catch (err) {
       toast.error(errorMessage(err, "Unable to upload photo."));
     } finally {
@@ -120,7 +117,7 @@ const MyPageProfile = ({ org, isOwner }: { org: Organization; isOwner: boolean }
           )}
           <div>
             <h3 className="text-sm font-bold text-slate-800">Profile</h3>
-            <p className="text-xs text-slate-500">What fans see at <span className="font-mono">/c/{org.handle || "…"}</span></p>
+            <p className="text-xs text-slate-500">What supporters see at <span className="font-mono">/c/{account.handle || "…"}</span></p>
             <label className="mt-1 inline-block cursor-pointer text-xs text-blue-600 hover:underline">
               {uploading ? "Uploading…" : "Change photo (JPEG/PNG/WEBP, ≤2MB)"}
               <Input
@@ -136,7 +133,7 @@ const MyPageProfile = ({ org, isOwner }: { org: Organization; isOwner: boolean }
         <form onSubmit={handleSave} className="mt-4 space-y-4">
           <div>
             <label className="text-sm font-medium text-slate-700">Display name</label>
-            <Input value={displayName} onChange={(e) => setDisplayName(e.target.value)} disabled={!isOwner} maxLength={100} placeholder="Amina Creates" className="mt-1" />
+            <Input value={displayName} onChange={(e) => setDisplayName(e.target.value)} disabled={!isOwner} maxLength={100} placeholder="Amina" className="mt-1" />
           </div>
           <div>
             <label className="text-sm font-medium text-slate-700">Handle</label>
@@ -166,27 +163,19 @@ const MyPageProfile = ({ org, isOwner }: { org: Organization; isOwner: boolean }
 };
 
 const MyPage = () => {
-  const orgsQuery = useQuery({ queryKey: ["orgs", "mine"], queryFn: () => listMyOrgs(), staleTime: 30_000 });
-  const org = (orgsQuery.data ?? []).find((o) => o.status === "active") ?? orgsQuery.data?.[0];
-  const isOwner = org?.role === "owner";
+  const accountQuery = useQuery({ queryKey: ["individual", "account"], queryFn: () => getIndividualAccount(), staleTime: 30_000 });
+  const account = accountQuery.data;
+  const isOwner = account?.role === "owner";
 
-  const fullOrgQuery = useQuery({
-    queryKey: ["orgs", org?.id ?? "none"],
-    queryFn: () => getOrg(org!.id),
-    enabled: !!org?.id,
-    staleTime: 30_000,
-  });
-  const full = fullOrgQuery.data ?? org;
-
-  if (orgsQuery.isLoading) {
+  if (accountQuery.isLoading) {
     return <Skeleton className="mt-4 h-64 w-full" />;
   }
-  if (!org || !full || (full.account_kind ?? "merchant") !== "creator") {
+  if (!account || (account.account_kind ?? "merchant") !== "creator") {
     return (
       <div>
         <h2 className="text-2xl font-bold text-slate-900">My Page</h2>
         <p className="mt-1 text-sm text-slate-500">
-          Creator pages live here. This account is on the business track —{" "}
+          Individual pages live here. This account is on the business track —{" "}
           <Link to="/merchant/apps" className="text-blue-600 hover:underline">go to your apps</Link>.
         </p>
       </div>
@@ -200,24 +189,24 @@ const MyPage = () => {
           <h2 className="text-2xl font-bold text-slate-900">My Page</h2>
           <p className="mt-1 text-sm text-slate-500">Edit how fans see you, manage support buttons, and share.</p>
         </div>
-        {full.handle && (
-          <a href={`/c/${full.handle}`} target="_blank" rel="noopener noreferrer" className="text-sm text-blue-600 hover:underline">
+        {account.handle && (
+          <a href={`/c/${account.handle}`} target="_blank" rel="noopener noreferrer" className="text-sm text-blue-600 hover:underline">
             Preview public page →
           </a>
         )}
       </div>
 
-      <MyPageProfile org={full} isOwner={!!isOwner} />
+      <MyPageProfile account={account} isOwner={!!isOwner} />
 
       <Card className="mt-4">
         <CardContent className="p-4 sm:p-6">
           <h3 className="text-sm font-bold text-slate-800">Support buttons</h3>
           <p className="mt-1 text-xs text-slate-500">Fixed presets and the custom-amount button fans tap first.</p>
-          <SupportPageEditor org={full} isOwner={!!isOwner} />
+          <SupportPageEditor org={account} isOwner={!!isOwner} track="individual" />
         </CardContent>
       </Card>
 
-      {full.handle && <SharePanel handle={full.handle} displayName={full.display_name || full.name} />}
+      {account.handle && <SharePanel handle={account.handle} displayName={account.display_name || account.name} />}
     </div>
   );
 };

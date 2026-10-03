@@ -1049,6 +1049,17 @@ func (s *Service) HandleCreatorLogin(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// HandleIndividualRegister and HandleIndividualLogin are the canonical
+// internal names for the individual-track API. The creator-named methods
+// remain as compatibility entry points for the deprecated routes.
+func (s *Service) HandleIndividualRegister(w http.ResponseWriter, r *http.Request) {
+	s.HandleCreatorRegister(w, r)
+}
+
+func (s *Service) HandleIndividualLogin(w http.ResponseWriter, r *http.Request) {
+	s.HandleCreatorLogin(w, r)
+}
+
 // HandleAdminLogin authenticates operators (separate path, separate
 // audience, shorter TTL, stricter rate limit, audited). TOTP hook: when
 // wired, pass {"totp_code"} alongside email/password.

@@ -41,6 +41,26 @@ on different schedules/instances.
 go run ./cmd/worker
 ```
 
+## Individual API naming
+
+The current external name for the personal account track is **individual**.
+New clients should use `/api/v1/individual/auth/*`,
+`/api/v1/individual/apps/*`, and `/api/v1/individual/account/*`. The
+session-owned account routes resolve the caller's one individual account;
+the `{accountID}` form is retained for authorized deep links and still
+enforces membership and account-kind checks.
+
+The older `/api/v1/creator/*`, `/api/v1/creator/orgs/*`, and
+`/api/v1/orgs/creator` routes are deprecated compatibility aliases. They
+remain available for existing clients and use the same handlers, validation,
+authorization, and response shapes. The public `/api/v1/c/{handle}` support
+page URL is unchanged.
+
+This is an external terminology change only. The shared internal
+`organizations` table, its `account_kind` column, and stored values such as
+`creator` are intentionally unchanged so merchant and individual records
+continue to use the same data model.
+
 ## Commands
 
 ```

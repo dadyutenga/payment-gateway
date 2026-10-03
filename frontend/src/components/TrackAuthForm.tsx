@@ -40,23 +40,23 @@ export default function TrackAuthForm({ kind, mode }: { kind: AccountKind; mode:
   const [busy, setBusy] = useState(false);
 
   const copy = COPY[kind];
-  const isCreator = kind === "creator";
-  const oppositeLogin = isCreator ? "/merchant/login" : "/creator/login";
-  const oppositeRegister = isCreator ? "/merchant/register" : "/creator/register";
-  const ownOtherMode = mode === "login" ? (isCreator ? "/creator/register" : "/merchant/register") : isCreator ? "/creator/login" : "/merchant/login";
+  const isIndividual = kind === "creator";
+  const oppositeLogin = isIndividual ? "/merchant/login" : "/individual/login";
+  const oppositeRegister = isIndividual ? "/merchant/register" : "/individual/register";
+  const ownOtherMode = mode === "login" ? (isIndividual ? "/individual/register" : "/merchant/register") : isIndividual ? "/individual/login" : "/merchant/login";
 
-  const setupPath = kind === "creator" ? "/creator/setup" : "/merchant/setup";
+  const setupPath = kind === "creator" ? "/individual/setup" : "/merchant/setup";
 
   const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();
     setBusy(true);
     try {
-      await authenticateTrack(kind, mode, email, password, mode === "register" && isCreator
+      await authenticateTrack(kind, mode, email, password, mode === "register" && isIndividual
         ? { display_name: extra.trim(), handle: handle.trim().toLowerCase() }
         : undefined);
       setTrackIntent(kind);
       if (mode === "register") {
-        if (isCreator) setPendingDisplayName(extra.trim());
+        if (isIndividual) setPendingDisplayName(extra.trim());
         else setPendingBusinessName(extra.trim());
         try {
           await requestOTP({ channel: "email", purpose: "email_verify" });
@@ -67,7 +67,7 @@ export default function TrackAuthForm({ kind, mode }: { kind: AccountKind; mode:
         navigate(next || setupPath, { replace: true });
         return;
       }
-      navigate(next || (isCreator ? "/creator" : "/merchant"), { replace: true });
+      navigate(next || (isIndividual ? "/individual" : "/merchant"), { replace: true });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Unable to continue.");
     } finally {
@@ -80,14 +80,14 @@ export default function TrackAuthForm({ kind, mode }: { kind: AccountKind; mode:
       <Card className="w-full max-w-sm">
         <CardContent className="p-6">
           <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">
-            {isCreator ? "Individual / Personal" : "Merchant / Business"}
+            {isIndividual ? "Individual / Personal" : "Merchant / Business"}
           </p>
           <h1 className="mt-1 text-lg font-bold text-slate-900">{mode === "login" ? copy.loginTitle : copy.registerTitle}</h1>
           <p className="mt-1 text-sm text-slate-500">{mode === "login" ? copy.loginSub : copy.registerSub}</p>
 
           <form onSubmit={handleSubmit} className="mt-5 space-y-4">
             {mode === "register" &&
-              (isCreator ? (
+              (isIndividual ? (
                 <>
                   <div>
                     <label className="text-sm font-medium text-slate-700">Display name</label>
@@ -125,7 +125,7 @@ export default function TrackAuthForm({ kind, mode }: { kind: AccountKind; mode:
               <>
                 New here?{" "}
                 <Link to={ownOtherMode + (next ? `?next=${encodeURIComponent(next)}` : "")} className="text-blue-600 hover:underline">
-                  Create a {isCreator ? "personal" : "business"} account
+                  Create a {isIndividual ? "personal" : "business"} account
                 </Link>
               </>
             ) : (
@@ -138,7 +138,7 @@ export default function TrackAuthForm({ kind, mode }: { kind: AccountKind; mode:
             )}
           </p>
           <p className="mt-2 text-center text-xs text-slate-500">
-            {isCreator ? (
+            {isIndividual ? (
               <>
                 Signing up as a business instead?{" "}
                 <Link to={mode === "login" ? oppositeLogin : oppositeRegister} className="text-blue-600 hover:underline">

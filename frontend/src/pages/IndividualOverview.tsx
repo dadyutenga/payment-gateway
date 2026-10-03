@@ -8,8 +8,8 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { listMyOrgs } from "@/lib/orgApi";
-import { fetchCreatorOverview, fetchCreatorSupporters, listCreatorApps, listCreatorOrders } from "@/lib/creatorApi";
+import { getIndividualAccount } from "@/lib/orgApi";
+import { fetchIndividualOverview, fetchIndividualSupporters, listIndividualApps, listIndividualOrders } from "@/lib/individualApi";
 import { EnvToggle } from "@/pages/merchantAnalyticsCommon";
 import { DateRangePicker, moneyText, useFilterParams } from "@/pages/analyticsCommon";
 import DashboardGreeting from "@/components/DashboardGreeting";
@@ -28,33 +28,33 @@ function maskBuyer(name?: string, phone?: string) {
   return `${first} · ${maskPhone(phone)}`;
 }
 
-// Creator home dashboard (trimmed vs merchant): total received,
+// Individual home dashboard (trimmed vs merchant): total received,
 // transaction count, trend chart, and recent supporters with their
 // (private, masked) messages. No methods/peak-hours analytics in v1.
-const CreatorOverview = () => {
+const IndividualOverview = () => {
   const { from, to, env, setRange, setEnv } = useFilterParams();
-  const orgsQuery = useQuery({ queryKey: ["orgs", "mine"], queryFn: () => listMyOrgs(), staleTime: 30_000 });
-  const org = (orgsQuery.data ?? []).find((o) => o.status === "active") ?? orgsQuery.data?.[0];
-  const orgId = org?.id ?? "";
+  const accountQuery = useQuery({ queryKey: ["individual", "account"], queryFn: () => getIndividualAccount(), staleTime: 30_000 });
+  const account = accountQuery.data;
+  const accountId = account?.id ?? "";
 
   const overviewQuery = useQuery({
-    queryKey: ["creator", "analytics", "overview", orgId, from, to, env],
-    queryFn: () => fetchCreatorOverview(orgId, { from, to, granularity: "day", environment: env }),
-    enabled: !!orgId,
+    queryKey: ["individual", "analytics", "overview", accountId, from, to, env],
+    queryFn: () => fetchIndividualOverview({ from, to, granularity: "day", environment: env }),
+    enabled: !!accountId,
     staleTime: 30_000,
   });
   const customersQuery = useQuery({
-    queryKey: ["creator", "analytics", "supporters", orgId, from, to, env],
-    queryFn: () => fetchCreatorSupporters(orgId, { from, to, granularity: "day", environment: env }),
-    enabled: !!orgId,
+    queryKey: ["individual", "analytics", "supporters", accountId, from, to, env],
+    queryFn: () => fetchIndividualSupporters({ from, to, granularity: "day", environment: env }),
+    enabled: !!accountId,
     staleTime: 30_000,
   });
-  const appsQuery = useQuery({ queryKey: ["creator", "my-apps"], queryFn: () => listCreatorApps(), staleTime: 30_000 });
+  const appsQuery = useQuery({ queryKey: ["individual", "my-apps"], queryFn: () => listIndividualApps(), staleTime: 30_000 });
   const apps = appsQuery.data ?? [];
   const orderQueries = useQueries({
     queries: apps.map((app) => ({
-      queryKey: ["creator", app.id, "orders", ""],
-      queryFn: () => listCreatorOrders(app.id),
+      queryKey: ["individual", app.id, "orders", ""],
+      queryFn: () => listIndividualOrders(app.id),
       staleTime: 15_000,
     })),
   });
@@ -84,29 +84,29 @@ const CreatorOverview = () => {
   }, [orderQueries]);
 
   const topPayers = customersQuery.data?.top_payers ?? [];
-  const loading = orgsQuery.isLoading || overviewQuery.isLoading;
+  const loading = accountQuery.isLoading || overviewQuery.isLoading;
 
   return (
     <div>
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <DashboardGreeting description={org && org.kyc_status !== "verified" ? "A quick identity check helps keep your page secure and unlocks live support payments." : "See how your page is performing and stay close to the people supporting your work."} />
+        <DashboardGreeting description={account && account.kyc_status !== "verified" ? "A quick identity check helps keep your page secure and unlocks live support payments." : "See how your page is performing and stay close to the people supporting your work."} />
         <div className="flex flex-wrap items-center gap-2">
           <EnvToggle env={env} onChange={setEnv} />
           <DateRangePicker from={from} to={to} onChange={setRange} />
-          {org && org.kyc_status !== "verified" && (
+          {account && account.kyc_status !== "verified" && (
             <Button size="sm" variant="outline" asChild>
-              <Link to={`/creator/verify/${org.id}`}>Verify identity <ArrowRight className="h-3.5 w-3.5 ml-1" /></Link>
+              <Link to="/individual/verify">Verify identity <ArrowRight className="h-3.5 w-3.5 ml-1" /></Link>
             </Button>
           )}
-          {org?.handle && (
+          {account?.handle && (
             <Button size="sm" asChild>
-              <Link to={`/c/${org.handle}`}>View my page</Link>
+              <Link to={`/c/${account.handle}`}>View my page</Link>
             </Button>
           )}
         </div>
       </div>
 
-      {org && org.kyc_status !== "verified" && <OutstandingTasks items={[{ icon: ShieldCheck, label: "Verify your identity", status: "Required for live support payments", action: { label: "Start verification", to: `/creator/verify/${org.id}` } }]} />}
+      {account && account.kyc_status !== "verified" && <OutstandingTasks items={[{ icon: ShieldCheck, label: "Verify your identity", status: "Required for live support payments", action: { label: "Start verification", to: "/individual/verify" } }]} />}
 
       {loading ? (
         <div className="mt-6 grid gap-3 sm:grid-cols-3">
@@ -122,7 +122,7 @@ const CreatorOverview = () => {
             <Card><CardContent className="p-4">
               <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Total received</p>
               <p className="mt-1 text-xl font-extrabold text-slate-900">{moneyText(data.tpv)}</p>
-              <Link to="/creator/payments" className="mt-2 inline-block text-xs text-fuchsia-700 hover:underline">View payments →</Link>
+              <Link to="/individual/payments" className="mt-2 inline-block text-xs text-fuchsia-700 hover:underline">View payments →</Link>
             </CardContent></Card>
             <Card><CardContent className="p-4">
               <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Transactions</p>
@@ -164,7 +164,7 @@ const CreatorOverview = () => {
           <Card className="mt-4"><CardContent className="p-4">
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-bold text-slate-800">Recent supporters</h3>
-              <Link to="/creator/payments" className="text-xs text-fuchsia-700 hover:underline">View all →</Link>
+              <Link to="/individual/payments" className="text-xs text-fuchsia-700 hover:underline">View all →</Link>
             </div>
             <p className="mt-1 text-xs text-slate-400">Identities masked — messages are private to you.</p>
             {recentSupporters.length === 0 ? (
@@ -192,4 +192,4 @@ const CreatorOverview = () => {
   );
 };
 
-export default CreatorOverview;
+export default IndividualOverview;

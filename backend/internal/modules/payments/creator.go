@@ -6,9 +6,9 @@ import (
 	"strings"
 
 	"lipago/internal/modules/orgs"
+	"lipago/internal/modules/payments/provider"
 	"lipago/internal/platform/middleware"
 	"lipago/internal/shared/httputil"
-	"lipago/internal/modules/payments/provider"
 )
 
 // ---------- Creator money plane (Part 3 track split) ----------
@@ -270,4 +270,42 @@ func (h *Handler) CreatorOrgLimitsUsage(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	httputil.JSON(w, http.StatusOK, map[string]any{"data": usage})
+}
+
+// Individual* are the canonical internal names used by the new individual
+// API aliases. The Creator* methods remain for deprecated route support.
+func (h *Handler) IndividualListMyApps(w http.ResponseWriter, r *http.Request) {
+	h.CreatorListMyApps(w, r)
+}
+
+func (h *Handler) IndividualGetAppBalance(w http.ResponseWriter, r *http.Request) {
+	h.CreatorGetAppBalance(w, r)
+}
+
+func (h *Handler) IndividualListLedgerEntries(w http.ResponseWriter, r *http.Request) {
+	h.CreatorListLedgerEntries(w, r)
+}
+
+func (h *Handler) IndividualSearchOrders(w http.ResponseWriter, r *http.Request) {
+	h.CreatorSearchOrders(w, r)
+}
+
+func (h *Handler) IndividualListWithdrawals(w http.ResponseWriter, r *http.Request) {
+	h.CreatorListWithdrawals(w, r)
+}
+
+func (h *Handler) IndividualCreateWithdrawal(w http.ResponseWriter, r *http.Request) {
+	h.CreatorCreateWithdrawal(w, r)
+}
+
+func (h *Handler) IndividualApproveWithdrawal(w http.ResponseWriter, r *http.Request) {
+	h.CreatorApproveWithdrawal(w, r)
+}
+
+func (h *Handler) IndividualRejectWithdrawal(w http.ResponseWriter, r *http.Request) {
+	h.CreatorRejectWithdrawal(w, r)
+}
+
+func (h *Handler) IndividualAccountLimitsUsage(w http.ResponseWriter, r *http.Request) {
+	h.CreatorOrgLimitsUsage(w, r)
 }

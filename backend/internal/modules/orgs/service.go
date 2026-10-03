@@ -225,11 +225,11 @@ func SuggestedCreatorRiskTier(volumeBand, txnBand string) string {
 	return CreatorRiskStandard
 }
 
-// CreateCreatorOrganization creates a creator-kind account: display name +
-// unique handle instead of a business name. The creator becomes the single
+// CreateIndividualAccount creates a creator-kind account: display name +
+// unique handle instead of a business name. The individual becomes the single
 // owner member; the invite UI stays hidden in v1 (schema still supports a
 // later manager add).
-func (s *Service) CreateCreatorOrganization(ctx context.Context, userID, name string, in CreatorOrgInput) (Organization, validation.Errors, error) {
+func (s *Service) CreateIndividualAccount(ctx context.Context, userID, name string, in CreatorOrgInput) (Organization, validation.Errors, error) {
 	name = strings.TrimSpace(name)
 	in.DisplayName = strings.TrimSpace(in.DisplayName)
 	in.Handle = NormalizeHandle(in.Handle)
@@ -263,6 +263,13 @@ func (s *Service) CreateCreatorOrganization(ctx context.Context, userID, name st
 	return org, nil, nil
 }
 
+// CreateCreatorOrganization is retained for legacy callers and the old
+// /api/v1/orgs/creator route. New individual code should use
+// CreateIndividualAccount.
+func (s *Service) CreateCreatorOrganization(ctx context.Context, userID, name string, in CreatorOrgInput) (Organization, validation.Errors, error) {
+	return s.CreateIndividualAccount(ctx, userID, name, in)
+}
+
 // GetCreatorByHandle resolves a public support-page handle. No actor check
 // — the handler exposes only the safe public profile subset.
 func (s *Service) GetCreatorByHandle(ctx context.Context, handle string) (Organization, error) {
@@ -275,6 +282,22 @@ func (s *Service) GetCreatorByHandle(ctx context.Context, handle string) (Organi
 
 func (s *Service) ListMyOrganizations(ctx context.Context, userID string) ([]OrganizationWithRole, error) {
 	return s.repo.ListOrganizationsForUser(ctx, userID)
+}
+
+// IndividualAccountForUser resolves the single active individual account
+// associated with a session. The storage model remains organizations; this
+// helper keeps that internal detail out of the individual-facing URL shape.
+func (s *Service) IndividualAccountForUser(ctx context.Context, userID string) (OrganizationWithRole, error) {
+	accounts, err := s.repo.ListOrganizationsForUser(ctx, userID)
+	if err != nil {
+		return OrganizationWithRole{}, err
+	}
+	for _, account := range accounts {
+		if account.Status == MemberStatusActive && account.AccountKind == AccountKindCreator {
+			return account, nil
+		}
+	}
+	return OrganizationWithRole{}, ErrOrgNotFound
 }
 
 func (s *Service) GetOrganization(ctx context.Context, userID, orgID string) (OrganizationWithRole, error) {
@@ -728,7 +751,7 @@ func (s *Service) SubmitKYC(ctx context.Context, userID, orgID, businessName, ti
 // creator accounts: full legal name + date of birth (18+) + national ID +
 // front document (+ optional back side) + v1 selfie photo. Merchant
 // accounts must use SubmitKYC instead.
-func (s *Service) SubmitCreatorKYC(ctx context.Context, userID, orgID string, in CreatorKYCInput) (KYCSubmission, validation.Errors, error) {
+func (s *Service) SubmitIndividualKYC(ctx context.Context, userID, orgID string, in CreatorKYCInput) (KYCSubmission, validation.Errors, error) {
 	if _, err := s.CheckOrgPermission(ctx, userID, orgID, PermManageOrg); err != nil {
 		return KYCSubmission{}, nil, err
 	}
@@ -777,6 +800,12 @@ func (s *Service) SubmitCreatorKYC(ctx context.Context, userID, orgID string, in
 	return sub, nil, err
 }
 
+// SubmitCreatorKYC is the compatibility name used by the legacy creator
+// routes and tests.
+func (s *Service) SubmitCreatorKYC(ctx context.Context, userID, orgID string, in CreatorKYCInput) (KYCSubmission, validation.Errors, error) {
+	return s.SubmitIndividualKYC(ctx, userID, orgID, in)
+}
+
 // ValidCreatorDOB reports whether value is a YYYY-MM-DD date proving the
 // holder is at least 18 years old (and not implausibly old). Pure
 // function so the gate is unit-testable without a database.
@@ -798,7 +827,7 @@ func ValidCreatorDOB(value string) bool {
 // answers. Creator accounts only; any active member may read, but only
 // manage_org may write. Display name (Q1) is applied to the org row in
 // the same call so the survey form submits once.
-func (s *Service) SaveCreatorSurvey(ctx context.Context, userID, orgID string, in CreatorSurveyInput) (CreatorSurvey, validation.Errors, error) {
+func (s *Service) SaveIndividualSurvey(ctx context.Context, userID, orgID string, in CreatorSurveyInput) (CreatorSurvey, validation.Errors, error) {
 	if _, err := s.CheckOrgPermission(ctx, userID, orgID, PermManageOrg); err != nil {
 		return CreatorSurvey{}, nil, err
 	}
@@ -865,9 +894,14 @@ func (s *Service) SaveCreatorSurvey(ctx context.Context, userID, orgID string, i
 	return survey, nil, err
 }
 
+// SaveCreatorSurvey is retained for legacy callers.
+func (s *Service) SaveCreatorSurvey(ctx context.Context, userID, orgID string, in CreatorSurveyInput) (CreatorSurvey, validation.Errors, error) {
+	return s.SaveIndividualSurvey(ctx, userID, orgID, in)
+}
+
 // GetCreatorSurvey returns a creator org's onboarding answers plus the
 // derived starting risk tier (any active member may read).
-func (s *Service) GetCreatorSurvey(ctx context.Context, userID, orgID string) (CreatorSurvey, error) {
+func (s *Service) GetIndividualSurvey(ctx context.Context, userID, orgID string) (CreatorSurvey, error) {
 	if _, err := s.CheckOrgPermission(ctx, userID, orgID, PermRead); err != nil {
 		return CreatorSurvey{}, err
 	}
@@ -881,13 +915,23 @@ func (s *Service) GetCreatorSurvey(ctx context.Context, userID, orgID string) (C
 	return survey, nil
 }
 
+// GetCreatorSurvey is retained for legacy callers.
+func (s *Service) GetCreatorSurvey(ctx context.Context, userID, orgID string) (CreatorSurvey, error) {
+	return s.GetIndividualSurvey(ctx, userID, orgID)
+}
+
 // SwitchCreatorToMerchant moves a pre-KYC creator org to the merchant
 // track (the Q4 "API integration" escape hatch). Refused once any KYC
 // submission exists — after that, kind changes are support-assisted.
-func (s *Service) SwitchCreatorToMerchant(ctx context.Context, userID, orgID string) (Organization, error) {
+func (s *Service) SwitchIndividualToMerchant(ctx context.Context, userID, orgID string) (Organization, error) {
 	// Account kind is immutable. Keep this method only as a compatibility
 	// surface for old callers; never reach the repository conversion path.
 	return Organization{}, ErrKindSwitchDisabled
+}
+
+// SwitchCreatorToMerchant is retained for the deprecated route.
+func (s *Service) SwitchCreatorToMerchant(ctx context.Context, userID, orgID string) (Organization, error) {
+	return s.SwitchIndividualToMerchant(ctx, userID, orgID)
 }
 
 // SupportPageData is everything the public support page needs that is
@@ -1096,10 +1140,16 @@ func (s *Service) RequireAccountKind(ctx context.Context, userID, orgID string, 
 	return Organization{}, ErrNotCreatorOrg
 }
 
-// RequireCreatorOrg enforces a membership permission and the creator
+// RequireIndividualAccount enforces a membership permission and the
+// individual track
 // track in one call for support-page management routes.
-func (s *Service) RequireCreatorOrg(ctx context.Context, userID, orgID string, perm Permission) (Organization, error) {
+func (s *Service) RequireIndividualAccount(ctx context.Context, userID, orgID string, perm Permission) (Organization, error) {
 	return s.RequireAccountKind(ctx, userID, orgID, perm, AccountKindCreator)
+}
+
+// RequireCreatorOrg is retained for legacy internal callers and routes.
+func (s *Service) RequireCreatorOrg(ctx context.Context, userID, orgID string, perm Permission) (Organization, error) {
+	return s.RequireIndividualAccount(ctx, userID, orgID, perm)
 }
 
 // RequireMerchantOrg enforces a membership permission and the merchant
@@ -1148,10 +1198,15 @@ func (s *Service) RequireMerchantApp(ctx context.Context, userID, appID string, 
 	return s.requireKindApp(ctx, userID, appID, perm, AccountKindMerchant)
 }
 
-// RequireCreatorApp enforces a membership permission and the creator
+// RequireIndividualApp enforces a membership permission and the individual
 // track for one app — the gate for every /api/v1/creator/apps/* handler.
-func (s *Service) RequireCreatorApp(ctx context.Context, userID, appID string, perm Permission) (string, error) {
+func (s *Service) RequireIndividualApp(ctx context.Context, userID, appID string, perm Permission) (string, error) {
 	return s.requireKindApp(ctx, userID, appID, perm, AccountKindCreator)
+}
+
+// RequireCreatorApp is retained for legacy internal callers and routes.
+func (s *Service) RequireCreatorApp(ctx context.Context, userID, appID string, perm Permission) (string, error) {
+	return s.RequireIndividualApp(ctx, userID, appID, perm)
 }
 
 // GetKYCSubmission returns the evidence row plus live org status for the

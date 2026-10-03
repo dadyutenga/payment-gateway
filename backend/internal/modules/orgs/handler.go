@@ -153,6 +153,11 @@ func (h *Handler) CreateOrganization(w http.ResponseWriter, r *http.Request) {
 	httputil.JSON(w, http.StatusCreated, map[string]any{"data": OrganizationWithRole{Organization: created, Role: member.Role, Status: member.Status}})
 }
 
+// CreateCreatorOrganization is retained for the deprecated creator route.
+func (h *Handler) CreateCreatorOrganization(w http.ResponseWriter, r *http.Request) {
+	h.CreateIndividualAccount(w, r)
+}
+
 type createMerchantOrgHTTPInput struct {
 	Name         string `json:"name"`
 	BusinessName string `json:"business_name"`
@@ -199,9 +204,9 @@ type createCreatorOrgHTTPInput struct {
 	Bio         string `json:"bio"`
 }
 
-// CreateCreatorOrganization creates a personal creator-track account. The
+// CreateIndividualAccount creates a personal individual-track account. The
 // kind comes from the endpoint called, never from a client-supplied field.
-func (h *Handler) CreateCreatorOrganization(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) CreateIndividualAccount(w http.ResponseWriter, r *http.Request) {
 	userID, ok := claimsUserID(w, r)
 	if !ok {
 		return
@@ -211,11 +216,11 @@ func (h *Handler) CreateCreatorOrganization(w http.ResponseWriter, r *http.Reque
 		httputil.Error(w, http.StatusBadRequest, "invalid_request", "Unable to decode request body.", nil)
 		return
 	}
-	created, vErrs, err := h.service.CreateCreatorOrganization(r.Context(), userID, in.Name, CreatorOrgInput{
+	created, vErrs, err := h.service.CreateIndividualAccount(r.Context(), userID, in.Name, CreatorOrgInput{
 		DisplayName: in.DisplayName, Handle: in.Handle, Bio: in.Bio,
 	})
 	if vErrs.Any() {
-		httputil.Error(w, http.StatusUnprocessableEntity, "validation_failed", "Please check your organization input.", vErrs)
+		httputil.Error(w, http.StatusUnprocessableEntity, "validation_failed", "Please check your individual account details.", vErrs)
 		return
 	}
 	if err != nil {
@@ -249,6 +254,26 @@ func (h *Handler) ListMyOrganizations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httputil.JSON(w, http.StatusOK, map[string]any{"data": orgs})
+}
+
+// GetIndividualAccount returns the authenticated user's individual account.
+// The response keeps the existing storage-backed shape for compatibility,
+// while the route itself does not expose an organization identifier.
+func (h *Handler) GetIndividualAccount(w http.ResponseWriter, r *http.Request) {
+	userID, ok := claimsUserID(w, r)
+	if !ok {
+		return
+	}
+	account, err := h.service.IndividualAccountForUser(r.Context(), userID)
+	if err != nil {
+		if errors.Is(err, ErrOrgNotFound) {
+			httputil.Error(w, http.StatusNotFound, "not_found", "Individual account not found.", nil)
+			return
+		}
+		h.fail(w, http.StatusInternalServerError, "list_failed", "Unable to load your individual account.", err)
+		return
+	}
+	httputil.JSON(w, http.StatusOK, map[string]any{"data": account})
 }
 
 func (h *Handler) GetOrganization(w http.ResponseWriter, r *http.Request) {
@@ -487,10 +512,10 @@ type submitCreatorKYCHTTPInput struct {
 	SelfieURL         string `json:"selfie_url"`
 }
 
-// SubmitCreatorKYC files individual verification for creator accounts
+// SubmitIndividualKYC files individual verification for individual accounts
 // (full name + DOB + national ID + front document + optional back side +
 // v1 selfie). Merchant accounts keep using the business endpoint above.
-func (h *Handler) SubmitCreatorKYC(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) SubmitIndividualKYC(w http.ResponseWriter, r *http.Request) {
 	userID, ok := claimsUserID(w, r)
 	if !ok {
 		return
@@ -500,7 +525,7 @@ func (h *Handler) SubmitCreatorKYC(w http.ResponseWriter, r *http.Request) {
 		httputil.Error(w, http.StatusBadRequest, "invalid_request", "Unable to decode request body.", nil)
 		return
 	}
-	sub, vErrs, err := h.service.SubmitCreatorKYC(r.Context(), userID, r.PathValue("orgID"), CreatorKYCInput{
+	sub, vErrs, err := h.service.SubmitIndividualKYC(r.Context(), userID, r.PathValue("orgID"), CreatorKYCInput{
 		FullName: in.FullName, IDType: in.IDType, IDNumber: in.IDNumber, Dob: in.Dob,
 		DocURL: in.IDDocumentURL, DocBackURL: in.IDDocumentBackURL, SelfieURL: in.SelfieURL,
 	})
@@ -515,6 +540,11 @@ func (h *Handler) SubmitCreatorKYC(w http.ResponseWriter, r *http.Request) {
 	httputil.JSON(w, http.StatusOK, map[string]any{"data": sub})
 }
 
+// SubmitCreatorKYC is retained for the deprecated creator route.
+func (h *Handler) SubmitCreatorKYC(w http.ResponseWriter, r *http.Request) {
+	h.SubmitIndividualKYC(w, r)
+}
+
 type creatorSurveyHTTPInput struct {
 	DisplayName        string   `json:"display_name"`
 	Category           string   `json:"category"`
@@ -525,9 +555,9 @@ type creatorSurveyHTTPInput struct {
 	ExpectedTxnBand    string   `json:"expected_txn_band"`
 }
 
-// SaveCreatorSurvey stores (or replaces) a creator org's onboarding
-// answers (owner/manage_org). Creator accounts only.
-func (h *Handler) SaveCreatorSurvey(w http.ResponseWriter, r *http.Request) {
+// SaveIndividualSurvey stores (or replaces) an individual account's
+// onboarding answers (owner/manage_org).
+func (h *Handler) SaveIndividualSurvey(w http.ResponseWriter, r *http.Request) {
 	userID, ok := claimsUserID(w, r)
 	if !ok {
 		return
@@ -537,7 +567,7 @@ func (h *Handler) SaveCreatorSurvey(w http.ResponseWriter, r *http.Request) {
 		httputil.Error(w, http.StatusBadRequest, "invalid_request", "Unable to decode request body.", nil)
 		return
 	}
-	survey, vErrs, err := h.service.SaveCreatorSurvey(r.Context(), userID, r.PathValue("orgID"), CreatorSurveyInput{
+	survey, vErrs, err := h.service.SaveIndividualSurvey(r.Context(), userID, r.PathValue("orgID"), CreatorSurveyInput{
 		DisplayName: in.DisplayName, Category: in.Category, CategoryOther: in.CategoryOther,
 		ReferralSource: in.ReferralSource, UseCases: in.UseCases,
 		ExpectedVolumeBand: in.ExpectedVolumeBand, ExpectedTxnBand: in.ExpectedTxnBand,
@@ -553,9 +583,14 @@ func (h *Handler) SaveCreatorSurvey(w http.ResponseWriter, r *http.Request) {
 	httputil.JSON(w, http.StatusOK, map[string]any{"data": survey})
 }
 
-// GetCreatorSurvey returns a creator org's onboarding answers plus the
+// SaveCreatorSurvey is retained for the deprecated creator route.
+func (h *Handler) SaveCreatorSurvey(w http.ResponseWriter, r *http.Request) {
+	h.SaveIndividualSurvey(w, r)
+}
+
+// GetIndividualSurvey returns an individual account's onboarding answers plus the
 // derived starting risk tier (any active member may read).
-func (h *Handler) GetCreatorSurvey(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) GetIndividualSurvey(w http.ResponseWriter, r *http.Request) {
 	userID, ok := claimsUserID(w, r)
 	if !ok {
 		return
@@ -564,7 +599,7 @@ func (h *Handler) GetCreatorSurvey(w http.ResponseWriter, r *http.Request) {
 		h.orgError(w, err, "view the individual onboarding survey")
 		return
 	}
-	survey, err := h.service.GetCreatorSurvey(r.Context(), userID, r.PathValue("orgID"))
+	survey, err := h.service.GetIndividualSurvey(r.Context(), userID, r.PathValue("orgID"))
 	if err != nil {
 		h.orgError(w, err, "view the onboarding survey")
 		return
@@ -572,16 +607,26 @@ func (h *Handler) GetCreatorSurvey(w http.ResponseWriter, r *http.Request) {
 	httputil.JSON(w, http.StatusOK, map[string]any{"data": survey})
 }
 
-// SwitchCreatorToMerchant is disabled: business and creator accounts are
+// GetCreatorSurvey is retained for the deprecated creator route.
+func (h *Handler) GetCreatorSurvey(w http.ResponseWriter, r *http.Request) {
+	h.GetIndividualSurvey(w, r)
+}
+
+// SwitchIndividualToMerchant is disabled: business and individual accounts are
 // fully separate tracks with no self-service conversion (each has its own
 // KYC). The route stays registered for one deploy cycle so stale clients
 // get a clear 410 instead of a bare 404; kind changes, if ever needed,
 // are support-assisted directly in the database.
-func (h *Handler) SwitchCreatorToMerchant(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) SwitchIndividualToMerchant(w http.ResponseWriter, r *http.Request) {
 	if _, ok := claimsUserID(w, r); !ok {
 		return
 	}
 	h.orgError(w, ErrKindSwitchDisabled, "switch account kind")
+}
+
+// SwitchCreatorToMerchant is retained for the deprecated creator route.
+func (h *Handler) SwitchCreatorToMerchant(w http.ResponseWriter, r *http.Request) {
+	h.SwitchIndividualToMerchant(w, r)
 }
 
 // ListKYCAttempts returns the submit/decide history for the Settings

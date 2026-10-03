@@ -6,7 +6,7 @@ import {
   LayoutDashboard, Receipt, Settings,
 } from "lucide-react";
 import { signOut } from "@/lib/auth";
-import { listMyOrgs } from "@/lib/orgApi";
+import { getIndividualAccount } from "@/lib/orgApi";
 import SandboxModeBanner from "@/components/SandboxModeBanner";
 import Sidebar, { type SidebarNavGroup } from "@/components/Sidebar";
 import BrandMark from "@/components/BrandMark";
@@ -16,36 +16,36 @@ import { TrackNoticeToast } from "@/components/TrackRoute";
 const COLLAPSED_KEY = "lipago_sidebar_creator_collapsed";
 const EXPAND_KEY = "lipago_nav_creator";
 
-// Creator workspace nav: Overview, My Page, Payments, Payouts, Settings.
+// Individual workspace nav: Overview, My Page, Payments, Payouts, Settings.
 // Personal single-member surface — no Team, no Developers, no full
 // analytics suite.
 const NAV_GROUPS: SidebarNavGroup[] = [
   {
     id: "overview", label: "Overview", icon: LayoutDashboard,
-    items: [{ to: "/creator", label: "Home", icon: LayoutDashboard, end: true }],
+    items: [{ to: "/individual", label: "Home", icon: LayoutDashboard, end: true }],
   },
   {
     id: "page", label: "My Page", icon: HeartHandshake,
-    items: [{ to: "/creator/page", label: "My Page", icon: HeartHandshake }],
+    items: [{ to: "/individual/page", label: "My Page", icon: HeartHandshake }],
   },
   {
     id: "payments", label: "Payments", icon: Receipt,
-    items: [{ to: "/creator/payments", label: "Payments", icon: Receipt }],
+    items: [{ to: "/individual/payments", label: "Payments", icon: Receipt }],
   },
   {
     id: "money", label: "Money", icon: Banknote,
-    items: [{ to: "/creator/payouts", label: "Payouts", icon: Banknote }],
+    items: [{ to: "/individual/payouts", label: "Payouts", icon: Banknote }],
   },
   {
     id: "settings", label: "Settings", icon: Settings,
-    items: [{ to: "/creator/settings", label: "Settings", icon: Settings }],
+    items: [{ to: "/individual/settings", label: "Settings", icon: Settings }],
   },
 ];
 
-// Creator workspace shell: fuchsia personal identity, unmistakable next to
+// Individual workspace shell: fuchsia personal identity, unmistakable next to
 // the emerald merchant shell and the red admin shell. Never renders
 // merchant team/developer or admin links.
-const CreatorLayout = () => {
+const IndividualLayout = () => {
   const location = useLocation();
   const [collapsed, setCollapsed] = useState(() => {
     try {
@@ -82,9 +82,9 @@ const CreatorLayout = () => {
 
   // Sandbox/live status reuses the orgs query (shared react-query cache
   // with SandboxModeBanner — one network call).
-  const orgsQuery = useQuery({ queryKey: ["orgs", "mine"], queryFn: () => listMyOrgs(), staleTime: 60_000, retry: false });
-  const activeOrg = (orgsQuery.data ?? []).find((o) => o.status === "active") ?? orgsQuery.data?.[0];
-  const statusBadge = !activeOrg ? undefined : activeOrg.kyc_status === "verified" ? (
+  const accountQuery = useQuery({ queryKey: ["individual", "account"], queryFn: () => getIndividualAccount(), staleTime: 60_000, retry: false });
+  const account = accountQuery.data;
+  const statusBadge = !account ? undefined : account.kyc_status === "verified" ? (
     <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-emerald-700">
       Live
     </span>
@@ -151,7 +151,7 @@ const CreatorLayout = () => {
           }}
         />
         <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-8 sm:px-6">
-          <SandboxModeBanner track="creator" />
+          <SandboxModeBanner track="individual" />
           <Outlet />
         </main>
       </div>
@@ -159,4 +159,4 @@ const CreatorLayout = () => {
   );
 };
 
-export default CreatorLayout;
+export default IndividualLayout;

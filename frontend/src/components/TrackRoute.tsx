@@ -14,7 +14,7 @@ export type TrackNotice = { message: string };
 // - unauthenticated → /login?next=…
 // - authenticated but on the wrong track → correct dashboard root with a
 //   brief notice (not a 404 — a legitimate user on the wrong track)
-// - authenticated with no org yet → onboarding for the requested track
+// - authenticated with no account yet → onboarding for the requested track
 const TrackRoute = ({ kind, children }: { kind: AccountKind; children: JSX.Element }) => {
   const [state, setState] = useState<TrackState>("loading");
   const [actual, setActual] = useState<AccountKind | null>(null);
@@ -55,16 +55,16 @@ const TrackRoute = ({ kind, children }: { kind: AccountKind; children: JSX.Eleme
     return <Navigate to={`/login?next=${encodeURIComponent(location.pathname + location.search)}`} replace />;
   }
   if (state === "wrong-kind-no-org" && actual && actual !== kind) {
-    const target = actual === "creator" ? "/creator" : "/merchant";
+    const target = actual === "creator" ? "/individual" : "/merchant";
     const message =
       kind === "creator"
         ? "This is a business account — taking you to the merchant workspace."
-        : "This is a creator account — taking you to your creator workspace.";
+        : "This is an individual account — taking you to your individual workspace.";
     return <Navigate to={target} replace state={{ notice: { message } satisfies TrackNotice }} />;
   }
   if (state === "wrong-kind-no-org") {
-    // Signed in but no workspace yet — start the right onboarding.
-    const target = kind === "creator" ? "/creator/setup" : "/merchant/setup";
+    // Signed in but no account yet — start the right onboarding.
+    const target = kind === "creator" ? "/individual/setup" : "/merchant/setup";
     if (location.pathname !== target) {
       return <Navigate to={target} replace />;
     }

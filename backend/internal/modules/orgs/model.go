@@ -2,6 +2,7 @@ package orgs
 
 import (
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -128,6 +129,33 @@ const (
 	AccountKindMerchant = "merchant"
 	AccountKindCreator  = "creator"
 )
+
+// ExternalAccountKind maps storage terminology to the terminology exposed to
+// individual-track clients. The database value remains "creator" for
+// compatibility; only the external display term is renamed.
+func ExternalAccountKind(kind string) string {
+	switch strings.TrimSpace(kind) {
+	case AccountKindCreator:
+		return "individual"
+	case AccountKindMerchant:
+		return "merchant"
+	default:
+		return strings.TrimSpace(kind)
+	}
+}
+
+// ExternalAccountKindLabel is the human-readable counterpart used in
+// individual-facing messages and labels.
+func ExternalAccountKindLabel(kind string) string {
+	switch ExternalAccountKind(kind) {
+	case "individual":
+		return "Individual"
+	case "merchant":
+		return "Merchant"
+	default:
+		return "Account"
+	}
+}
 
 // ParseAccountKind validates a client-supplied kind string. Empty means
 // merchant (back-compat for existing signup callers).

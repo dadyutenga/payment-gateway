@@ -22,8 +22,8 @@ const STR: Record<string, { en: string; sw: string }> = {
   phone: { en: "Mobile-money phone", sw: "Namba ya simu (pesa mfukoni)" },
   email: { en: "Email", sw: "Barua pepe" },
   provider: { en: "Pay with", sw: "Lipa kwa" },
-  message: { en: "Message for the creator (optional)", sw: "Ujumbe kwa muundaji (hiari)" },
-  messageHint: { en: "Shown privately to the creator in their dashboard — never public.", sw: "Huonekana na muundaji tu kwenye dashibodi yake — si hadharani." },
+  message: { en: "Message for the individual (optional)", sw: "Ujumbe kwa mtu binafsi (hiari)" },
+  messageHint: { en: "Shown privately to the individual in their dashboard — never public.", sw: "Huonekana na mtu huyo tu kwenye dashibodi yake — si hadharani." },
   pay: { en: "Send support", sw: "Tuma mchango" },
   sending: { en: "Sending…", sw: "Inatuma…" },
   minMax: { en: "Between", sw: "Kati ya" },
@@ -36,7 +36,7 @@ const STR: Record<string, { en: string; sw: string }> = {
   copyLink: { en: "Copy support link", sw: "Nakili kiungo" },
   copied: { en: "Support link copied.", sw: "Kiungo kimenakiliwa." },
   copyFailed: { en: "Unable to copy the link.", sw: "Imeshindwa kunakili kiungo." },
-  notFound: { en: "Creator not found", sw: "Muundaji hajapatikana" },
+  notFound: { en: "Individual not found", sw: "Mtu huyo hajapatikana" },
   checkHandle: { en: "Check the handle and try again.", sw: "Angalia jina na ujaribu tena." },
   back: { en: "Back to LipaGO", sw: "Rudi LipaGO" },
   failed: { en: "Unable to send support.", sw: "Imeshindwa kutuma mchango." },
@@ -44,12 +44,12 @@ const STR: Record<string, { en: string; sw: string }> = {
 };
 
 const CATEGORY_LABEL: Record<string, { en: string; sw: string }> = {
-  content_creator: { en: "Content creator", sw: "Muundaji wa maudhui" },
+  content_creator: { en: "Content creation", sw: "Uundaji wa maudhui" },
   musician_artist: { en: "Musician / artist", sw: "Mwanamuziki / msanii" },
   freelancer_consultant: { en: "Freelancer / consultant", sw: "Mfanyakazi huru / mshauri" },
   coach_educator: { en: "Coach / educator", sw: "Kocha / mwalimu" },
   nonprofit_cause: { en: "Nonprofit / cause", sw: "Shirika / sababu" },
-  other: { en: "Creator", sw: "Muundaji" },
+  other: { en: "Individual", sw: "Mtu binafsi" },
 };
 
 function langOf(): Lang {
@@ -60,10 +60,10 @@ function langOf(): Lang {
   }
 }
 
-// Public "support me" page for creator accounts (no auth). Amount buttons
+// Public support page for individual accounts (no auth). Amount buttons
 // and the open-amount box post to the single order path
 // (POST /api/v1/c/:handle/support); no second money-moving code path.
-const CreatorSupport = () => {
+const IndividualSupport = () => {
   const { handle = "" } = useParams();
   const [lang, setLang] = useState<Lang>(langOf);
   const t = (key: string) => STR[key]?.[lang] ?? key;
@@ -321,4 +321,4 @@ const CreatorSupport = () => {
   );
 };
 
-export default CreatorSupport;
+export default IndividualSupport;

@@ -51,3 +51,14 @@ func (h *Handler) CreatorSupporters(w http.ResponseWriter, r *http.Request) {
 	}
 	httputil.JSON(w, http.StatusOK, map[string]any{"data": out})
 }
+
+// IndividualOverview and IndividualSupporters are the canonical internal
+// names used by the new individual API aliases. The creator-named methods
+// remain for the deprecated route namespace.
+func (h *Handler) IndividualOverview(w http.ResponseWriter, r *http.Request) {
+	h.CreatorOverview(w, r)
+}
+
+func (h *Handler) IndividualSupporters(w http.ResponseWriter, r *http.Request) {
+	h.CreatorSupporters(w, r)
+}
