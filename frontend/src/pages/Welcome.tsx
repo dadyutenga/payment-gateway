@@ -1,4 +1,4 @@
-import { Building2, Check, HeartHandshake, ShieldCheck, Smartphone, Wallet } from "lucide-react";
+import { Building2, Check, HeartHandshake, Smartphone, Wallet } from "lucide-react";
 import { Link } from "react-router-dom";
 
 const networkRows = [
@@ -154,19 +154,6 @@ const Welcome = () => (
             </div>
           </div>
         </article>
-      </div>
-    </section>
-
-    <section className="border-y border-[#102A43]/15 bg-[#D9EEF0]">
-      <div className="mx-auto flex max-w-7xl flex-col gap-6 px-5 py-8 sm:flex-row sm:items-center sm:justify-between sm:px-8 lg:px-10">
-        <div className="flex items-start gap-4">
-          <ShieldCheck className="mt-1 h-6 w-6 shrink-0 text-[#0B7285]" />
-          <div>
-            <p className="font-landing-display text-xl font-bold tracking-[-0.04em]">Behind the scenes, the rails stay accountable.</p>
-            <p className="mt-1 max-w-2xl text-sm leading-6 text-[#486581]">LipaGO operators review KYC, oversee payments and withdrawals, manage providers, and keep the system reliable.</p>
-          </div>
-        </div>
-        <Link to="/admin/login" className="shrink-0 self-start border-b-2 border-[#0B7285] pb-1 text-sm font-bold text-[#102A43] transition-colors hover:border-[#E76F51] hover:text-[#E76F51] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0B7285] sm:self-auto">Operator sign in</Link>
       </div>
     </section>
 

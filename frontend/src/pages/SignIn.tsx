@@ -36,7 +36,7 @@ const SignIn = ({ admin = false }: { admin?: boolean }) => {
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-slate-50 px-4">
-      <div className="w-full max-w-sm rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+      <div className="w-full max-w-sm rounded-md border border-slate-200 bg-white p-6">
           <h1 className="text-lg font-bold text-slate-900">{admin ? "LipaGO Admin" : "LipaGO"}</h1>
           {admin && (
             <p className="mt-1 text-xs text-slate-500">Operator sign-in — no self-registration. Ask an existing admin for access.</p>
@@ -56,7 +56,7 @@ const SignIn = ({ admin = false }: { admin?: boolean }) => {
             </Button>
           </form>
         {!admin && (
-          <button type="button" className="mt-4 text-xs text-blue-600 hover:underline" onClick={() => setRegistering(!registering)}>
+          <button type="button" className="mt-4 rounded-sm text-xs text-blue-600 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600" onClick={() => setRegistering(!registering)}>
             {registering ? "Already have an account? Sign in" : "Create an account"}
           </button>
         )}

@@ -129,7 +129,7 @@ const AdminPaymentApps = () => {
             apps.map((app) => {
               const balance = balanceByAppId.get(app.id);
               return (
-                <Card key={app.id} className="transition-shadow hover:shadow-md">
+                <Card key={app.id} className="transition-colors hover:border-slate-400">
                   <CardContent className="p-4">
                     <div className="flex items-start gap-3">
                       <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-emerald-50 text-emerald-600">
