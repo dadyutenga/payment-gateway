@@ -63,6 +63,8 @@ import OrgMembers from "@/pages/OrgMembers";
 import { OrgSettingsRouter, OrgVerifyRouter } from "@/pages/OrgRouteGate";
 import OnboardingKYC from "@/pages/OnboardingKYC";
 import Welcome from "@/pages/Welcome";
+import NotificationsPage from "@/pages/NotificationsPage";
+import AdminNotifications from "@/pages/AdminNotifications";
 
 const queryClient = new QueryClient();
 
@@ -94,6 +96,8 @@ const App = () => (
             }
           >
             <Route index element={<AdminDashboard />} />
+            <Route path="notifications" element={<NotificationsPage space="admin" />} />
+            <Route path="notifications/send" element={<AdminNotifications />} />
             <Route path="orgs/:orgId" element={<AdminOrgDetail />} />
             <Route path="analytics" element={<AdminAnalyticsOverview />} />
             <Route path="analytics/providers" element={<AdminAnalyticsProviders />} />
@@ -119,6 +123,7 @@ const App = () => (
             }
           >
             <Route index element={<MerchantDashboard />} />
+            <Route path="notifications" element={<NotificationsPage />} />
             <Route path="apps" element={<MerchantApps />} />
             <Route path="apps/:id" element={<MerchantAppDetail />} />
             <Route path="payments" element={<MerchantPayments />} />
@@ -146,6 +151,7 @@ const App = () => (
             }
           >
             <Route index element={<CreatorOverview />} />
+            <Route path="notifications" element={<NotificationsPage />} />
             <Route path="page" element={<MyPage />} />
             <Route path="payments" element={<CreatorPayments />} />
             <Route path="payouts" element={<CreatorPayouts />} />

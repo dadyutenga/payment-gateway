@@ -14,8 +14,10 @@ import (
 	"syscall"
 	"time"
 
+	"lipago/internal/modules/notifications"
 	"lipago/internal/modules/payments"
 	"lipago/internal/modules/payments/providers"
+	"lipago/internal/platform/auth"
 	"lipago/internal/platform/config"
 	azcrypto "lipago/internal/platform/crypto"
 	"lipago/internal/platform/database"
@@ -66,6 +68,9 @@ func main() {
 		OrderExpiryTTL:                 cfg.Payments.OrderTTL,
 		PayerHashSecret:                cfg.Payments.PayerHashSecret,
 	}, logger)
+	notificationService := notifications.NewService(db, logger)
+	notificationService.SetMailer(auth.NewLogMailer(logger))
+	notificationService.SetSMSSender(auth.NewLogSMSSender(logger))
 
 	deliveryTicker := time.NewTicker(positiveDuration(cfg.Payments.DeliveryPollInterval, 30*time.Second))
 	defer deliveryTicker.Stop()
@@ -84,6 +89,13 @@ func main() {
 		}
 		if result.Claimed > 0 {
 			logger.Info("payment deliveries processed", "claimed", result.Claimed, "delivered", result.Delivered, "retrying", result.Retrying, "failed", result.Failed)
+		}
+	}
+	processNotifications := func() {
+		if processed, err := notificationService.ProcessDueDeliveries(ctx, 50); err != nil {
+			logger.Error("notification delivery processing failed", "error", err)
+		} else if processed > 0 {
+			logger.Info("notification deliveries processed", "count", processed)
 		}
 	}
 	reconcilePayments := func() {
@@ -118,6 +130,9 @@ func main() {
 		if result.Expired > 0 {
 			logger.Info("payment expiry completed", "expired", result.Expired)
 		}
+		if err := paymentService.NotifyExpiringAPIKeys(ctx, 24*time.Hour); err != nil {
+			logger.Error("api key expiry notifications failed", "error", err)
+		}
 		if swept, err := paymentService.CleanupIdempotencyKeys(ctx); err != nil {
 			logger.Error("idempotency cleanup failed", "error", err)
 		} else if swept > 0 {
@@ -136,6 +151,7 @@ func main() {
 	}
 
 	processDeliveries()
+	processNotifications()
 	reconcilePayments()
 	reconcilePayouts()
 	expireOrders()
@@ -148,6 +164,7 @@ func main() {
 			return
 		case <-deliveryTicker.C:
 			processDeliveries()
+			processNotifications()
 		case <-reconciliationTicker.C:
 			reconcilePayments()
 			refreshAnalytics()

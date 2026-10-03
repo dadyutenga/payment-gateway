@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"lipago/internal/modules/analytics"
+	"lipago/internal/modules/notifications"
 	"lipago/internal/modules/orgs"
 	"lipago/internal/modules/payments"
 	"lipago/internal/modules/payments/providers"
@@ -35,7 +36,8 @@ type App struct {
 	db     *pgx.ConnPool
 	ctx    context.Context
 
-	paymentService *payments.Service
+	paymentService      *payments.Service
+	notificationService *notifications.Service
 }
 
 func New(ctx context.Context) (*App, error) {
@@ -113,6 +115,11 @@ func New(ctx context.Context) (*App, error) {
 		CreatorLiveDailyVolumeCap:      cfg.Payments.CreatorLiveDailyVolumeCap,
 		PayerHashSecret:                cfg.Payments.PayerHashSecret,
 	}, logger)
+	notificationService := notifications.NewService(db, logger)
+	notificationService.SetMailer(auth.NewLogMailer(logger))
+	notificationService.SetSMSSender(auth.NewLogSMSSender(logger))
+	paymentService.SetNotifier(notificationService)
+	paymentService.SetNotificationDispatcher(notificationService)
 	// SMS success notifications, admin alerts, and an audit trail are all
 	// optional integrations (SetSMSSender, SetNotifier, SetAuditWriter) —
 	// none are wired here, so those features simply no-op. Wire your own
@@ -124,6 +131,7 @@ func New(ctx context.Context) (*App, error) {
 
 	orgRepo := orgs.NewPostgresRepository(db)
 	orgService := orgs.NewService(orgRepo, logger)
+	orgService.SetNotificationDispatcher(notificationService)
 	authService.SetCreatorAccountProvisioner(func(ctx context.Context, userID, displayName, handle, bio string) error {
 		_, validationErrors, err := orgService.CreateCreatorOrganization(ctx, userID, displayName, orgs.CreatorOrgInput{
 			DisplayName: displayName,
@@ -162,6 +170,7 @@ func New(ctx context.Context) (*App, error) {
 	analyticsService := analytics.NewService(analyticsRepo, logger)
 	analyticsHandler := analytics.NewHandler(analyticsService, logger)
 	analyticsHandler.SetOrgsService(orgService)
+	notificationHandler := notifications.NewHandler(notificationService)
 
 	// Admin identity is read from app.admin_users on every request by
 	// RequireAdminAuth — never trusted from the token claim — so deleting
@@ -188,11 +197,23 @@ func New(ctx context.Context) (*App, error) {
 	mux.Handle("PATCH /api/v1/auth/profile", middleware.Chain(http.HandlerFunc(authService.HandleUpdateOwnProfile), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, false)))
 	mux.Handle("GET /api/v1/auth/notifications", middleware.Chain(http.HandlerFunc(authService.HandleCustomerNotifications), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, false)))
 	mux.Handle("PATCH /api/v1/auth/notifications/read-all", middleware.Chain(http.HandlerFunc(authService.HandleCustomerNotifications), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, false)))
+	mux.Handle("GET /api/v1/notifications", middleware.Chain(http.HandlerFunc(notificationHandler.List), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, false)))
+	mux.Handle("GET /api/v1/notifications/preferences", middleware.Chain(http.HandlerFunc(notificationHandler.Preferences), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, false)))
+	mux.Handle("PATCH /api/v1/notifications/preferences", middleware.Chain(http.HandlerFunc(notificationHandler.Preferences), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, false)))
+	mux.Handle("POST /api/v1/notifications/{id}/read", middleware.Chain(http.HandlerFunc(notificationHandler.MarkRead), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, false)))
+	mux.Handle("POST /api/v1/notifications/read-all", middleware.Chain(http.HandlerFunc(notificationHandler.MarkAllRead), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, false)))
 	// Canonical identity endpoints per space.
 	mux.Handle("GET /api/v1/auth/me", middleware.Chain(http.HandlerFunc(authService.HandleCustomerMe), middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, false)))
 	mux.Handle("GET /api/v1/admin/auth/me", middleware.Chain(http.HandlerFunc(authService.HandleAdminMe), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))
 	mux.Handle("GET /api/v1/admin/auth/notifications", middleware.Chain(http.HandlerFunc(authService.HandleAdminNotifications), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))
 	mux.Handle("PATCH /api/v1/admin/auth/notifications/read-all", middleware.Chain(http.HandlerFunc(authService.HandleAdminNotifications), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))
+	mux.Handle("GET /api/v1/admin/notifications", middleware.Chain(http.HandlerFunc(notificationHandler.List), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))
+	mux.Handle("GET /api/v1/admin/notifications/preferences", middleware.Chain(http.HandlerFunc(notificationHandler.Preferences), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))
+	mux.Handle("PATCH /api/v1/admin/notifications/preferences", middleware.Chain(http.HandlerFunc(notificationHandler.Preferences), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))
+	mux.Handle("POST /api/v1/admin/notifications/{id}/read", middleware.Chain(http.HandlerFunc(notificationHandler.MarkRead), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))
+	mux.Handle("POST /api/v1/admin/notifications/read-all", middleware.Chain(http.HandlerFunc(notificationHandler.MarkAllRead), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))
+	mux.Handle("POST /api/v1/admin/notifications/broadcast", middleware.Chain(http.HandlerFunc(notificationHandler.Broadcast), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))
+	mux.Handle("POST /api/v1/admin/orgs/{orgID}/notifications", middleware.Chain(http.HandlerFunc(notificationHandler.Targeted), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))
 
 	mux.HandleFunc("GET /api/v1/health", func(w http.ResponseWriter, r *http.Request) {
 		dbStatus := "up"
@@ -529,12 +550,13 @@ func New(ctx context.Context) (*App, error) {
 	}
 
 	return &App{
-		cfg:            cfg,
-		logger:         logger,
-		server:         server,
-		db:             db,
-		ctx:            ctx,
-		paymentService: paymentService,
+		cfg:                 cfg,
+		logger:              logger,
+		server:              server,
+		db:                  db,
+		ctx:                 ctx,
+		paymentService:      paymentService,
+		notificationService: notificationService,
 	}, nil
 }
 
@@ -564,6 +586,13 @@ func (a *App) runBackgroundJobs() {
 			a.logger.Info("payment deliveries processed", "claimed", result.Claimed, "delivered", result.Delivered, "retrying", result.Retrying, "failed", result.Failed)
 		}
 	}
+	processNotifications := func() {
+		if processed, err := a.notificationService.ProcessDueDeliveries(a.ctx, 50); err != nil {
+			a.logger.Error("notification delivery processing failed", "error", err)
+		} else if processed > 0 {
+			a.logger.Info("notification deliveries processed", "count", processed)
+		}
+	}
 	reconcilePayments := func() {
 		if result, err := a.paymentService.ReconcilePayments(a.ctx, positiveInt(a.cfg.Payments.ReconciliationBatchSize, 50)); err != nil {
 			a.logger.Error("payment reconciliation failed", "error", err)
@@ -587,6 +616,9 @@ func (a *App) runBackgroundJobs() {
 		} else if result.Expired > 0 {
 			a.logger.Info("payment expiry completed", "expired", result.Expired)
 		}
+		if err := a.paymentService.NotifyExpiringAPIKeys(a.ctx, 24*time.Hour); err != nil {
+			a.logger.Error("api key expiry notifications failed", "error", err)
+		}
 		if swept, err := a.paymentService.CleanupIdempotencyKeys(a.ctx); err != nil {
 			a.logger.Error("idempotency cleanup failed", "error", err)
 		} else if swept > 0 {
@@ -603,6 +635,7 @@ func (a *App) runBackgroundJobs() {
 	}
 
 	processDeliveries()
+	processNotifications()
 	reconcilePayments()
 	reconcilePayouts()
 	expireOrders()
@@ -614,6 +647,7 @@ func (a *App) runBackgroundJobs() {
 			return
 		case <-deliveryTicker.C:
 			processDeliveries()
+			processNotifications()
 		case <-reconciliationTicker.C:
 			reconcilePayments()
 			refreshAnalytics()

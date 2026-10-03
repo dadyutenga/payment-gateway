@@ -1,11 +1,14 @@
+import { FormEvent, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft } from "lucide-react";
+import { useMutation, useQuery } from "@tanstack/react-query";
+import { ArrowLeft, Send } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { fetchAdminOrg } from "@/lib/analyticsApi";
+import { sendAdminOrgNotification } from "@/lib/notificationsApi";
+import { Button } from "@/components/ui/button";
 
 function formatDate(value?: string) {
   return value ? new Date(value).toLocaleString() : "—";
@@ -22,6 +25,11 @@ const AdminOrgDetail = () => {
     staleTime: 30_000,
   });
   const detail = detailQuery.data;
+  const [title, setTitle] = useState("");
+  const [body, setBody] = useState("");
+  const [notice, setNotice] = useState("");
+  const send = useMutation({ mutationFn: () => sendAdminOrgNotification(orgId, { title, body, severity: "info" }), onSuccess: () => { setTitle(""); setBody(""); setNotice("Notification sent."); }, onError: (error) => setNotice(error instanceof Error ? error.message : "Unable to send notification.") });
+  const submitNotification = (event: FormEvent) => { event.preventDefault(); setNotice(""); send.mutate(); };
 
   return (
     <div>
@@ -43,6 +51,12 @@ const AdminOrgDetail = () => {
               <span className="font-mono text-xs">{detail.org.id}</span>
             </p>
           </div>
+
+          <form onSubmit={submitNotification} className="mt-4 rounded-xl border border-border bg-card p-4">
+            <div className="flex items-center gap-2"><Send className="h-4 w-4 text-primary" /><h3 className="text-sm font-semibold text-foreground">Send notification to this organization</h3></div>
+            <div className="mt-3 grid gap-3 sm:grid-cols-2"><input required value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Title" className="rounded-md border border-input bg-background px-3 py-2 text-sm" maxLength={160} /><input required value={body} onChange={(event) => setBody(event.target.value)} placeholder="Short message" className="rounded-md border border-input bg-background px-3 py-2 text-sm" maxLength={1000} /></div>
+            <div className="mt-3 flex items-center gap-3"><Button size="sm" type="submit" disabled={send.isPending}>{send.isPending ? "Sending…" : "Send notification"}</Button>{notice && <span className="text-xs text-muted-foreground" role="status">{notice}</span>}</div>
+          </form>
 
           <div className="mt-4 grid gap-4 lg:grid-cols-2">
             <Card><CardContent className="p-4">

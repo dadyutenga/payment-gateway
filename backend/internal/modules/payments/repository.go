@@ -448,6 +448,23 @@ func (r *PostgresRepository) RotateAppAPIKeys(ctx context.Context, appID string,
 	return tag.RowsAffected(), nil
 }
 
+func (r *PostgresRepository) ListRotatingAPIKeysExpiring(ctx context.Context, until time.Time) ([]APIKeyExpiryNotice, error) {
+	rows, err := r.db.QueryEx(ctx, `SELECT k.id::text, k.app_id::text, a.org_id::text, k.expires_at FROM app.payment_api_keys k JOIN app.payment_apps a ON a.id = k.app_id WHERE k.status = 'rotating' AND k.expires_at > NOW() AND k.expires_at <= $1 ORDER BY k.expires_at`, nil, until)
+	if err != nil {
+		return nil, fmt.Errorf("list expiring api keys: %w", err)
+	}
+	defer rows.Close()
+	items := make([]APIKeyExpiryNotice, 0)
+	for rows.Next() {
+		var item APIKeyExpiryNotice
+		if err := rows.Scan(&item.ID, &item.AppID, &item.OrgID, &item.ExpiresAt); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
 func (r *PostgresRepository) ListPaymentApps(ctx context.Context, limit, offset int) (PaymentAppListResult, error) {
 	limit, offset = boundedLimitOffset(limit, offset, 50, 200)
 

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"lipago/internal/shared/notify"
 	"lipago/internal/shared/validation"
 )
 
@@ -14,8 +15,32 @@ import (
 // app-scoped handlers lives here too via RoleForApp/Can, so there is one
 // decision point no matter which module asks.
 type Service struct {
-	repo Repository
-	log  *slog.Logger
+	repo       Repository
+	log        *slog.Logger
+	dispatcher notify.Dispatcher
+}
+
+func (s *Service) SetNotificationDispatcher(dispatcher notify.Dispatcher) { s.dispatcher = dispatcher }
+
+func (s *Service) dispatch(ctx context.Context, eventType, orgID, userID, referenceID string, data map[string]any) {
+	if s.dispatcher == nil {
+		return
+	}
+	if data == nil {
+		data = map[string]any{}
+	}
+	if err := s.dispatcher.Dispatch(ctx, notify.Event{EventType: eventType, OrgID: orgID, UserID: userID, ReferenceID: referenceID, DedupeKey: eventType + ":" + referenceID, LinkURL: "/settings/verification", Data: data, Source: "system"}); err != nil {
+		s.log.Error("dispatch organization notification failed", "event_type", eventType, "org_id", orgID, "error", err)
+	}
+}
+
+func (s *Service) dispatchAdmins(ctx context.Context, eventType, orgID, referenceID string, data map[string]any) {
+	if s.dispatcher == nil {
+		return
+	}
+	if err := s.dispatcher.Dispatch(ctx, notify.Event{EventType: eventType, AllAdmins: true, OrgID: orgID, ReferenceID: referenceID, DedupeKey: eventType + ":" + referenceID, LinkURL: "/admin/kyc", Data: data, Source: "system"}); err != nil {
+		s.log.Error("dispatch admin notification failed", "event_type", eventType, "org_id", orgID, "error", err)
+	}
 }
 
 func NewService(repo Repository, logger *slog.Logger) *Service {
@@ -409,9 +434,15 @@ func (s *Service) ReviewKYC(ctx context.Context, reviewerEmail, orgID string, ap
 			return Organization{}, errs, nil
 		}
 		org, err := s.repo.ReviewKYC(ctx, orgID, "rejected", reviewerEmail, reason)
+		if err == nil {
+			s.dispatch(ctx, "kyc.rejected", orgID, "", orgID, map[string]any{"reason": reason})
+		}
 		return org, nil, err
 	}
 	org, err := s.repo.ReviewKYC(ctx, orgID, "verified", reviewerEmail, "")
+	if err == nil {
+		s.dispatch(ctx, "kyc.verified", orgID, "", orgID, nil)
+	}
 	return org, nil, err
 }
 
@@ -527,6 +558,9 @@ func (s *Service) UpdateOrgLiveLimits(ctx context.Context, orgID, maxTxn, dailyC
 		return Organization{}, errs, nil
 	}
 	org, err := s.repo.UpdateOrgLiveLimits(ctx, orgID, maxTxn, dailyCap)
+	if err == nil {
+		s.dispatch(ctx, "org.limits_changed", orgID, "", orgID, map[string]any{"max_txn": maxTxn, "daily_cap": dailyCap})
+	}
 	return org, nil, err
 }
 
@@ -584,12 +618,20 @@ func (s *Service) SuspendOrg(ctx context.Context, orgID, reason string) (Organiz
 		return Organization{}, errs, nil
 	}
 	org, err := s.repo.SuspendOrg(ctx, orgID, reason)
+	if err == nil {
+		s.dispatch(ctx, "org.suspended", orgID, "", orgID, map[string]any{"reason": reason})
+	}
 	return org, nil, err
 }
 
 // UnsuspendOrg lifts a suspension (route-gated, audited by the handler).
 func (s *Service) UnsuspendOrg(ctx context.Context, orgID string) (Organization, error) {
-	return s.repo.UnsuspendOrg(ctx, strings.TrimSpace(orgID))
+	orgID = strings.TrimSpace(orgID)
+	org, err := s.repo.UnsuspendOrg(ctx, orgID)
+	if err == nil {
+		s.dispatch(ctx, "org.unsuspended", orgID, "", orgID, nil)
+	}
+	return org, err
 }
 
 // OrgSuspensionStatus resolves an app to its org's suspension state with
@@ -675,6 +717,10 @@ func (s *Service) SubmitKYC(ctx context.Context, userID, orgID, businessName, ti
 		return KYCSubmission{}, errs, nil
 	}
 	sub, err := s.repo.SubmitKYC(ctx, strings.TrimSpace(orgID), businessName, tin, docURL)
+	if err == nil {
+		s.dispatch(ctx, "kyc.submitted", orgID, "", orgID, nil)
+		s.dispatchAdmins(ctx, "admin.kyc_queue", orgID, orgID, map[string]any{"org_id": orgID})
+	}
 	return sub, nil, err
 }
 
@@ -724,6 +770,10 @@ func (s *Service) SubmitCreatorKYC(ctx context.Context, userID, orgID string, in
 		return KYCSubmission{}, errs, nil
 	}
 	sub, err := s.repo.SubmitCreatorKYC(ctx, strings.TrimSpace(orgID), in)
+	if err == nil {
+		s.dispatch(ctx, "kyc.submitted", orgID, "", orgID, nil)
+		s.dispatchAdmins(ctx, "admin.kyc_queue", orgID, orgID, map[string]any{"org_id": orgID})
+	}
 	return sub, nil, err
 }
 
@@ -1154,7 +1204,11 @@ func (s *Service) InviteMember(ctx context.Context, actorUserID, orgID, email st
 	} else if count > 0 {
 		return OrgMember{}, ErrSingleOrg
 	}
-	return s.repo.InviteMember(ctx, strings.TrimSpace(orgID), userID, role, actorUserID)
+	member, err := s.repo.InviteMember(ctx, strings.TrimSpace(orgID), userID, role, actorUserID)
+	if err == nil {
+		s.dispatch(ctx, "org.member_invited", orgID, member.UserID, orgID+":"+member.UserID, map[string]any{"role": role})
+	}
+	return member, err
 }
 
 func (s *Service) AcceptInvite(ctx context.Context, userID, orgID string) (OrgMember, error) {
@@ -1191,7 +1245,11 @@ func (s *Service) ChangeMemberRole(ctx context.Context, actorUserID, orgID, targ
 			return OrgMember{}, ErrLastOwner
 		}
 	}
-	return s.repo.UpdateMemberRole(ctx, strings.TrimSpace(orgID), targetUserID, role)
+	member, err := s.repo.UpdateMemberRole(ctx, strings.TrimSpace(orgID), targetUserID, role)
+	if err == nil {
+		s.dispatch(ctx, "org.role_changed", orgID, targetUserID, orgID+":"+targetUserID+":"+string(role), map[string]any{"role": role})
+	}
+	return member, err
 }
 
 func (s *Service) RemoveMember(ctx context.Context, actorUserID, orgID, targetUserID string) error {

@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, CheckCircle2, Clock, Copy, Trash2, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -12,22 +12,20 @@ import {
   deleteOrg,
   getCreatorLimitsUsage,
   getLimitsUsage,
-  getNotificationPrefs,
   getPayoutDestination,
   listKYCAttempts,
   listOrgMembers,
   resolveLogoSrc,
   savePayoutDestination,
-  updateNotificationPrefs,
   updateOrg,
   uploadOrgLogo,
-  type NotificationPrefs,
   type Organization,
 } from "@/lib/orgApi";
 import CreatorSurveyForm, { loadCreatorSurvey } from "@/components/CreatorSurveyForm";
 import SupportPageEditor from "@/components/SupportPageEditor";
 import { changePassword, getKYC, getOwnProfile, requestOTP, updateOwnProfile } from "@/lib/signupApi";
 import { listMerchantWithdrawals, listMyApps } from "@/lib/merchantApi";
+import { listNotificationPreferences, updateNotificationPreference } from "@/lib/notificationsApi";
 
 function errorMessage(err: unknown, fallback: string) {
   return err instanceof Error ? err.message : fallback;
@@ -517,80 +515,36 @@ export const SecurityTab = () => {
 
 // ---------- Notifications tab ----------
 
-const NOTIF_FIELDS: { key: keyof Omit<NotificationPrefs, "org_id">; label: string; helper: string }[] = [
-  { key: "payment_updated", label: "Payment updates", helper: "Paid / failed order events." },
-  { key: "payment_refunded", label: "Refunds", helper: "Refund confirmations." },
-  { key: "payment_expired", label: "Expiries", helper: "Orders that passed their TTL." },
-  { key: "withdrawal_updates", label: "Withdrawals", helper: "Approval and payout state changes." },
-  { key: "kyc_decisions", label: "Verification decisions", helper: "Admin approve / reject outcomes." },
+const NOTIF_FIELDS = [
+  { key: "payment.succeeded", label: "Payment updates", helper: "Successful payment events." },
+  { key: "payment.failed", label: "Failed payments", helper: "Payment failures that need attention." },
+  { key: "payment.refunded", label: "Refunds", helper: "Refund confirmations." },
+  { key: "payment.expired", label: "Expiries", helper: "Orders that passed their TTL." },
+  { key: "withdrawal.completed", label: "Withdrawals", helper: "Approval and payout state changes." },
+  { key: "kyc.verified", label: "Verification decisions", helper: "Admin approve / reject outcomes." },
+  { key: "security.payout_destination_changed", label: "Security changes", helper: "Payout destination and API key changes." },
 ];
+const NOTIF_CHANNELS = [{ key: "in_app", label: "In-app" }, { key: "email", label: "Email" }, { key: "sms", label: "SMS" }] as const;
+const CRITICAL_EVENTS = new Set(["payment.failed", "withdrawal.completed", "kyc.verified", "security.payout_destination_changed"]);
 
 export const NotificationsTab = ({ org, isOwner }: { org: Organization; isOwner: boolean }) => {
   const queryClient = useQueryClient();
   const prefsQuery = useQuery({
-    queryKey: ["orgs", org.id, "notif-prefs"],
-    queryFn: () => getNotificationPrefs(org.id),
+    queryKey: ["notifications", "preferences"],
+    queryFn: () => listNotificationPreferences("customer"),
     staleTime: 30_000,
   });
-  const [draft, setDraft] = useState<NotificationPrefs | null>(null);
-  const [saving, setSaving] = useState(false);
-  const prefs = draft ?? prefsQuery.data ?? null;
-  const dirty = draft !== null && prefsQuery.data !== undefined &&
-    JSON.stringify(draft) !== JSON.stringify(prefsQuery.data);
-
-  const toggle = (key: keyof Omit<NotificationPrefs, "org_id">) => {
-    if (!prefs || !isOwner) return;
-    setDraft({ ...prefs, [key]: !prefs[key] });
-  };
-
-  const handleSave = async () => {
-    if (!draft) return;
-    setSaving(true);
-    try {
-      const { org_id: _ignored, ...input } = draft;
-      await updateNotificationPrefs(org.id, input);
-      toast.success("Notification preferences saved.");
-      queryClient.invalidateQueries({ queryKey: ["orgs", org.id, "notif-prefs"] });
-      setDraft(null);
-    } catch (err) {
-      toast.error(errorMessage(err, "Unable to save preferences."));
-    } finally {
-      setSaving(false);
-    }
-  };
+  const update = useMutation({ mutationFn: (preference: { event_type: string; channel: string; enabled: boolean }) => updateNotificationPreference("customer", preference), onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["notifications", "preferences"] }); toast.success("Notification preference saved."); }, onError: (err) => toast.error(errorMessage(err, "Unable to save preference.")) });
+  const enabled = (eventType: string, channel: string) => prefsQuery.data?.find((item) => item.event_type === eventType && item.channel === channel)?.enabled ?? true;
 
   return (
     <Card className="mt-4">
       <CardContent className="p-4 sm:p-6">
         <h3 className="text-sm font-bold text-slate-800">Notifications</h3>
-        <p className="mt-1 text-xs text-slate-500">
-          Which events this account wants to hear about. Delivery is log-only until a mail/SMS provider is wired.
-        </p>
+        <p className="mt-1 text-xs text-slate-500">Choose delivery channels for account activity. Critical in-app alerts cannot be disabled.</p>
         {prefsQuery.isLoading && <p className="mt-3 text-sm text-slate-500">Loading preferences…</p>}
-        {prefs && (
-          <div className="mt-4 space-y-3">
-            {NOTIF_FIELDS.map((f) => (
-              <label key={f.key} className={`flex items-start gap-3 rounded-lg border border-slate-200 px-3 py-2.5 ${isOwner ? "cursor-pointer" : ""}`}>
-                <input
-                  type="checkbox"
-                  checked={prefs[f.key]}
-                  disabled={!isOwner}
-                  onChange={() => toggle(f.key)}
-                  className="mt-1 h-4 w-4 accent-slate-900"
-                />
-                <span>
-                  <span className="block text-sm font-medium text-slate-800">{f.label}</span>
-                  <span className="block text-xs text-slate-500">{f.helper}</span>
-                </span>
-              </label>
-            ))}
-            {isOwner ? (
-              <Button disabled={!dirty || saving} onClick={handleSave}>{saving ? "Saving..." : "Save preferences"}</Button>
-            ) : (
-              <p className="text-sm text-slate-500">Only owners can change notification preferences.</p>
-            )}
-          </div>
-        )}
+        <div className="mt-4 space-y-3">{NOTIF_FIELDS.map((field) => <div key={field.key} className="rounded-lg border border-slate-200 px-3 py-3"><div className="flex flex-wrap items-center justify-between gap-3"><span><span className="block text-sm font-medium text-slate-800">{field.label}</span><span className="block text-xs text-slate-500">{field.helper}</span></span><div className="flex items-center gap-3">{NOTIF_CHANNELS.map((channel) => { const locked = channel.key === "in_app" && CRITICAL_EVENTS.has(field.key); return <label key={channel.key} className="flex items-center gap-1 text-xs text-slate-600"><input type="checkbox" checked={enabled(field.key, channel.key)} disabled={!isOwner || locked || update.isPending} onChange={(event) => update.mutate({ event_type: field.key, channel: channel.key, enabled: event.target.checked })} className="h-4 w-4 accent-slate-900" />{channel.label}</label>; })}</div></div></div>)}</div>
+        {!isOwner && <p className="mt-3 text-sm text-slate-500">Only owners can change workspace notification preferences.</p>}
       </CardContent>
     </Card>
   );

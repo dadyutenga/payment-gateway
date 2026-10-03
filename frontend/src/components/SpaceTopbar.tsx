@@ -5,7 +5,7 @@ import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { getAdminMe } from "@/lib/adminApi";
 import { getOwnProfile } from "@/lib/signupApi";
-import { listNotifications, markAllNotificationsRead, type DashboardSpace } from "@/lib/notificationsApi";
+import { listNotifications, markAllNotificationsRead, markNotificationRead, type DashboardSpace } from "@/lib/notificationsApi";
 
 const THEME_KEY = "lipago_theme";
 const PREVIEW_COUNT = 4;
@@ -36,7 +36,6 @@ const SpaceTopbar = ({ onMenu, userLabel, space = "customer", onSignOut }: Space
     try { return localStorage.getItem(THEME_KEY) === "dark"; } catch { return false; }
   });
   const [notificationsOpen, setNotificationsOpen] = useState(false);
-  const [showAllNotifications, setShowAllNotifications] = useState(false);
   const profile = useQuery({
     queryKey: [space === "admin" ? "admin" : "auth", "profile"],
     queryFn: space === "admin" ? getAdminMe : getOwnProfile,
@@ -47,6 +46,7 @@ const SpaceTopbar = ({ onMenu, userLabel, space = "customer", onSignOut }: Space
     queryKey: ["notifications", space],
     queryFn: () => listNotifications(space),
     staleTime: 30_000,
+    refetchInterval: 45_000,
     retry: false,
   });
   const markRead = useMutation({
@@ -107,10 +107,10 @@ const SpaceTopbar = ({ onMenu, userLabel, space = "customer", onSignOut }: Space
     };
   }, [notificationsOpen]);
 
-  const items = notifications.data ?? [];
-  const unread = items.filter((item) => !item.read_at).length;
-  const visibleItems = showAllNotifications ? items : items.slice(0, PREVIEW_COUNT);
-  const hasMoreItems = items.length > PREVIEW_COUNT && !showAllNotifications;
+  const items = notifications.data?.items ?? [];
+  const unread = notifications.data?.unread ?? items.filter((item) => !item.read_at).length;
+  const visibleItems = items.slice(0, PREVIEW_COUNT);
+  const hasMoreItems = (notifications.data?.total ?? items.length) > PREVIEW_COUNT;
   const name = identity?.full_name?.trim().split(/\s+/)[0] || identity?.email || userLabel;
   const notificationsTitleId = `notifications-title-${space}`;
 
@@ -133,7 +133,6 @@ const SpaceTopbar = ({ onMenu, userLabel, space = "customer", onSignOut }: Space
             aria-expanded={notificationsOpen}
             aria-controls={notificationsOpen ? `${notificationsTitleId}-panel` : undefined}
             onClick={() => {
-              setShowAllNotifications(false);
               setNotificationsOpen((value) => !value);
             }}
             className="relative"
@@ -168,16 +167,16 @@ const SpaceTopbar = ({ onMenu, userLabel, space = "customer", onSignOut }: Space
                         <span className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${item.read_at ? "bg-transparent" : "bg-primary"}`} aria-hidden />
                         <div className="min-w-0 flex-1">
                           <p className="text-sm font-semibold text-foreground">{item.emoji ? `${item.emoji} ` : ""}{item.title}</p>
-                          <p className="mt-1 line-clamp-2 text-sm text-muted-foreground">{item.description}</p>
+                          <p className="mt-1 line-clamp-2 text-sm text-muted-foreground">{item.body}</p>
                           <time className="mt-1.5 block text-xs text-muted-foreground" dateTime={item.created_at}>{relativeTime(item.created_at)}</time>
-                          {item.link && <Link to={item.link} onClick={() => setNotificationsOpen(false)} className="mt-2 inline-block text-xs font-medium text-primary">View update</Link>}
+                          {item.link_url && <Link to={item.link_url} onClick={() => { void markNotificationRead(space, item.id).finally(() => queryClient.invalidateQueries({ queryKey: ["notifications", space] })); setNotificationsOpen(false); }} className="mt-2 inline-block text-xs font-medium text-primary">View update</Link>}
                         </div>
                       </div>
                     </li>
                   ))}
                 </ul>
               </div>
-              {hasMoreItems && <button type="button" className="border-t border-border px-4 py-3 text-left text-sm font-medium text-primary hover:bg-muted focus-visible:outline focus-visible:outline-2" onClick={() => setShowAllNotifications(true)}>View all notifications →</button>}
+              {hasMoreItems && <Link to={space === "admin" ? "/admin/notifications" : "/notifications"} onClick={() => setNotificationsOpen(false)} className="border-t border-border px-4 py-3 text-left text-sm font-medium text-primary hover:bg-muted focus-visible:outline focus-visible:outline-2">View all notifications →</Link>}
             </section>
           )}
         </div>

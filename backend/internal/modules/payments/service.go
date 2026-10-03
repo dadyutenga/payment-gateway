@@ -39,6 +39,7 @@ var (
 	ErrWebhookParseFailed            = errors.New("payment webhook parse failed")
 	ErrPaymentEventPersistenceFailed = errors.New("payment event persistence failed")
 	ErrAutomatedPayoutsDisabled      = errors.New("automated payouts are disabled until the payout provider contract is verified")
+	ErrWithdrawalFourEyes            = errors.New("withdrawal approval must be performed by a different operator")
 )
 
 type Service struct {
@@ -71,12 +72,13 @@ type Service struct {
 	creatorLiveDailyVolumeCap string
 	// payerHashSecret keys analytics payer hashing (see PayerHashSecret).
 	payerHashSecret string
-	http           *http.Client
-	log            *slog.Logger
-	notifier       notify.Writer
-	gate           notify.NotificationGate
-	audit          audit.Writer
-	sms            SMSSender
+	http            *http.Client
+	log             *slog.Logger
+	notifier        notify.Writer
+	dispatcher      notify.Dispatcher
+	gate            notify.NotificationGate
+	audit           audit.Writer
+	sms             SMSSender
 }
 
 // SMSSender is satisfied by sms.Service. Declared narrowly here (rather than
@@ -90,6 +92,13 @@ type SMSSender interface {
 // notification writes are silently skipped.
 func (s *Service) SetNotifier(w notify.Writer) {
 	s.notifier = w
+	if dispatcher, ok := w.(notify.Dispatcher); ok {
+		s.dispatcher = dispatcher
+	}
+}
+
+func (s *Service) SetNotificationDispatcher(dispatcher notify.Dispatcher) {
+	s.dispatcher = dispatcher
 }
 
 // SetSMSSender wires payment-success SMS delivery to app members. Optional
@@ -130,6 +139,77 @@ func (s *Service) notifyAllowed(ctx context.Context, eventType string) bool {
 	return allowed
 }
 
+func (s *Service) dispatchPaymentEvent(ctx context.Context, order PaymentOrder, nextStatus provider.Status, data map[string]any) {
+	if s.dispatcher == nil || order.AppID == "" || nextStatus == order.Status {
+		return
+	}
+	app, err := s.repo.GetPaymentAppByID(ctx, order.AppID)
+	if err != nil {
+		s.log.Error("load payment app for notification failed", "app_id", order.AppID, "error", err)
+		return
+	}
+	eventType := ""
+	switch nextStatus {
+	case provider.StatusPaid:
+		eventType = "payment.succeeded"
+		if kind, kindErr := s.repo.GetOrgAccountKind(ctx, app.OrgID); kindErr == nil && kind == "creator" {
+			eventType = "creator.contribution_received"
+		}
+	case provider.StatusFailed:
+		eventType = "payment.failed"
+	case provider.StatusExpired:
+		eventType = "payment.expired"
+	case provider.StatusReversed:
+		eventType = "payment.refunded"
+	}
+	if eventType == "" {
+		return
+	}
+	if data == nil {
+		data = map[string]any{}
+	}
+	data["amount"] = order.Amount
+	data["currency"] = order.Currency
+	data["provider"] = order.Provider
+	data["order_id"] = order.ID
+	referenceID := order.ID
+	if refundID, ok := data["refund_id"].(string); ok && refundID != "" {
+		referenceID = refundID
+	}
+	if err := s.dispatcher.Dispatch(ctx, notify.Event{EventType: eventType, OrgID: app.OrgID, ReferenceID: referenceID, DedupeKey: eventType + ":" + referenceID, LinkURL: "/payments/orders/" + order.ID, Data: data, Source: "system"}); err != nil {
+		s.log.Error("dispatch payment notification failed", "event_type", eventType, "payment_order_id", order.ID, "error", err)
+	}
+}
+
+func (s *Service) dispatchWithdrawalEvent(ctx context.Context, withdrawal PaymentWithdrawal, eventType, reason string) {
+	if s.dispatcher == nil {
+		return
+	}
+	app, err := s.repo.GetPaymentAppByID(ctx, withdrawal.AppID)
+	if err != nil {
+		s.log.Error("load withdrawal app for notification failed", "withdrawal_id", withdrawal.ID, "error", err)
+		return
+	}
+	data := map[string]any{"amount": withdrawal.Amount, "currency": withdrawal.Currency, "reason": reason, "withdrawal_id": withdrawal.ID}
+	if err := s.dispatcher.Dispatch(ctx, notify.Event{EventType: eventType, OrgID: app.OrgID, ReferenceID: withdrawal.ID, DedupeKey: eventType + ":" + withdrawal.ID, LinkURL: "/payments/withdrawals/" + withdrawal.ID, Data: data, Source: "system"}); err != nil {
+		s.log.Error("dispatch withdrawal notification failed", "event_type", eventType, "withdrawal_id", withdrawal.ID, "error", err)
+	}
+}
+
+func (s *Service) dispatchWebhookFailure(ctx context.Context, job PaymentWebhookDeliveryJob) {
+	if s.dispatcher == nil || job.AppID == "" {
+		return
+	}
+	app, err := s.repo.GetPaymentAppByID(ctx, job.AppID)
+	if err != nil {
+		s.log.Error("load webhook app for notification failed", "app_id", job.AppID, "error", err)
+		return
+	}
+	data := map[string]any{"endpoint_id": job.EndpointID, "delivery_id": job.ID, "attempts": job.AttemptCount}
+	_ = s.dispatcher.Dispatch(ctx, notify.Event{EventType: "webhook.delivery_failed", OrgID: app.OrgID, ReferenceID: job.ID, DedupeKey: "webhook.delivery_failed:" + job.ID, LinkURL: "/webhooks", Data: data, Source: "system"})
+	_ = s.dispatcher.Dispatch(ctx, notify.Event{EventType: "admin.webhook_alert", AllAdmins: true, ReferenceID: job.ID, DedupeKey: "admin.webhook_alert:" + job.ID, LinkURL: "/admin/analytics/webhooks", Data: data, Source: "system"})
+}
+
 type ServiceOptions struct {
 	DeliverySigningSecret    string
 	DeliveryTimeout          time.Duration
@@ -155,8 +235,8 @@ type ServiceOptions struct {
 	// per UTC day. Empty disables the check. Per-org overrides (admin-set
 	// on the organization) take precedence when present — see
 	// effectiveLiveCaps.
-	LiveMaxTxnAmount    string
-	LiveDailyVolumeCap  string
+	LiveMaxTxnAmount   string
+	LiveDailyVolumeCap string
 	// CreatorLiveMaxTxnAmount / CreatorLiveDailyVolumeCap are the
 	// stricter platform defaults for creator accounts (Part 5 risk
 	// posture): lower than the merchant defaults above. Resolution order
@@ -168,7 +248,7 @@ type ServiceOptions struct {
 	// set ANALYTICS_PAYER_SECRET distinctly. Empty entirely disables
 	// payer hashing (orders keep NULL payer_hash).
 	PayerHashSecret string
-	HTTPClient          *http.Client
+	HTTPClient      *http.Client
 }
 
 func NewService(repo Repository, registry map[string]provider.Constructor, cipher *azcrypto.Cipher, opts ServiceOptions, logger *slog.Logger) *Service {
@@ -515,10 +595,40 @@ func (s *Service) CreateAppAPIKey(ctx context.Context, appID, environment, label
 	}
 	for _, key := range keys {
 		if key.Prefix == apiKeyPrefix(rawKey) && key.Status == APIKeyStatusActive {
+			if s.dispatcher != nil {
+				if app, appErr := s.repo.GetPaymentAppByID(ctx, appID); appErr == nil {
+					_ = s.dispatcher.Dispatch(ctx, notify.Event{EventType: "security.api_key_rotated", OrgID: app.OrgID, ReferenceID: key.ID, DedupeKey: "security.api_key_rotated:" + key.ID, LinkURL: "/settings/api-keys", Data: map[string]any{"key_id": key.ID}, Source: "system"})
+				}
+			}
 			return CreateAPIKeyResult{Key: key, APIKey: rawKey}, nil
 		}
 	}
 	return CreateAPIKeyResult{APIKey: rawKey}, nil
+}
+
+func (s *Service) NotifyExpiringAPIKeys(ctx context.Context, horizon time.Duration) error {
+	if s.dispatcher == nil {
+		return nil
+	}
+	rotatingRepo, ok := s.repo.(interface {
+		ListRotatingAPIKeysExpiring(context.Context, time.Time) ([]APIKeyExpiryNotice, error)
+	})
+	if !ok {
+		return nil
+	}
+	if horizon <= 0 {
+		horizon = 24 * time.Hour
+	}
+	items, err := rotatingRepo.ListRotatingAPIKeysExpiring(ctx, time.Now().UTC().Add(horizon))
+	if err != nil {
+		return err
+	}
+	for _, item := range items {
+		if err := s.dispatcher.Dispatch(ctx, notify.Event{EventType: "security.api_key_grace_ending", OrgID: item.OrgID, ReferenceID: item.ID, DedupeKey: "security.api_key_grace_ending:" + item.ID, LinkURL: "/settings/api-keys", Data: map[string]any{"expires_at": item.ExpiresAt.UTC().Format(time.RFC3339)}, Source: "system"}); err != nil {
+			s.log.Error("dispatch api key expiry notification failed", "key_id", item.ID, "error", err)
+		}
+	}
+	return nil
 }
 
 // UpdateAPIKeyLabel renames a key's display label scoped to its app.
@@ -586,6 +696,11 @@ func (s *Service) UpdateAppFees(ctx context.Context, appID string, input UpdateA
 	}
 
 	app, err := s.repo.UpdateAppFees(ctx, appID, input)
+	if err == nil && s.dispatcher != nil {
+		if err := s.dispatcher.Dispatch(ctx, notify.Event{EventType: "org.fee_override_changed", OrgID: app.OrgID, ReferenceID: appID, DedupeKey: "org.fee_override_changed:" + appID, LinkURL: "/settings/limits", Data: map[string]any{"fee_type": app.FeeType, "fee_percent": app.FeePercent, "fee_fixed": app.FeeFixed}, Source: "system"}); err != nil {
+			s.log.Error("dispatch fee override notification failed", "app_id", appID, "error", err)
+		}
+	}
 	return app, nil, err
 }
 
@@ -746,6 +861,12 @@ func (s *Service) CreateWithdrawal(ctx context.Context, requestedBy string, inpu
 	}
 
 	withdrawal, err := s.repo.CreateWithdrawal(ctx, input)
+	if err == nil {
+		s.dispatchWithdrawalEvent(ctx, withdrawal, "withdrawal.requested", "")
+		if s.dispatcher != nil {
+			_ = s.dispatcher.Dispatch(ctx, notify.Event{EventType: "withdrawal.requires_approval", AllAdmins: true, ReferenceID: withdrawal.ID, DedupeKey: "withdrawal.requires_approval:" + withdrawal.ID, LinkURL: "/admin/payments/withdrawals", Data: map[string]any{"amount": withdrawal.Amount, "currency": withdrawal.Currency, "withdrawal_id": withdrawal.ID}, Source: "system"})
+		}
+	}
 	return withdrawal, nil, err
 }
 
@@ -841,10 +962,13 @@ func (s *Service) SaveCreatorPayoutDestination(ctx context.Context, orgID, verif
 
 	now := time.Now().UTC()
 	effectiveAt := now
+	destinationChanged := true
 	if existing, found, err := s.repo.GetCreatorPayoutDestination(ctx, orgID); err != nil {
 		return CreatorPayoutDestination{}, nil, err
 	} else if found && (existing.Phone != input.Phone || existing.Provider != input.Provider) {
 		effectiveAt = now.Add(PayoutDestinationCoolingPeriod)
+	} else if found && existing.Phone == input.Phone && existing.Provider == input.Provider && existing.AccountName == input.AccountName {
+		destinationChanged = false
 	}
 	nameMatch, nameDetail := s.destinationNameMatch(input.Provider, input.Phone)
 	dest, err := s.repo.UpsertCreatorPayoutDestination(ctx, orgID, CreatorPayoutDestination{
@@ -852,6 +976,11 @@ func (s *Service) SaveCreatorPayoutDestination(ctx context.Context, orgID, verif
 		NameMatch: nameMatch, NameMatchDetail: nameDetail,
 		OTPVerifiedAt: &now, EffectiveAt: effectiveAt,
 	})
+	if err == nil && s.dispatcher != nil {
+		if destinationChanged {
+			_ = s.dispatcher.Dispatch(ctx, notify.Event{EventType: "security.payout_destination_changed", OrgID: orgID, ReferenceID: dest.ID, DedupeKey: "security.payout_destination_changed:" + dest.ID + ":" + dest.UpdatedAt.UTC().Format(time.RFC3339Nano), LinkURL: "/settings/payout-destination", Data: map[string]any{"provider": input.Provider}, Source: "system"})
+		}
+	}
 	return dest, nil, err
 }
 
@@ -940,10 +1069,18 @@ func (s *Service) GetWithdrawal(ctx context.Context, id string) (PaymentWithdraw
 // approval already succeeded and is safely recoverable via retry or the
 // manual mark-paid/mark-failed fallback.
 func (s *Service) ApproveWithdrawal(ctx context.Context, id, approvedBy string) (PaymentWithdrawal, error) {
+	pending, lookupErr := s.repo.GetWithdrawalByID(ctx, id)
+	if lookupErr != nil && !errors.Is(lookupErr, ErrWithdrawalNotFound) {
+		return PaymentWithdrawal{}, lookupErr
+	}
+	if lookupErr == nil && strings.TrimSpace(pending.RequestedBy) != "" && strings.TrimSpace(pending.RequestedBy) == strings.TrimSpace(approvedBy) {
+		return PaymentWithdrawal{}, ErrWithdrawalFourEyes
+	}
 	withdrawal, err := s.repo.ApproveWithdrawal(ctx, id, approvedBy)
 	if err != nil {
 		return PaymentWithdrawal{}, err
 	}
+	s.dispatchWithdrawalEvent(ctx, withdrawal, "withdrawal.approved", "")
 	if !s.automatedPayoutsEnabled {
 		return withdrawal, nil
 	}
@@ -956,15 +1093,27 @@ func (s *Service) ApproveWithdrawal(ctx context.Context, id, approvedBy string) 
 }
 
 func (s *Service) RejectWithdrawal(ctx context.Context, id string) (PaymentWithdrawal, error) {
-	return s.repo.RejectWithdrawal(ctx, id)
+	withdrawal, err := s.repo.RejectWithdrawal(ctx, id)
+	if err == nil {
+		s.dispatchWithdrawalEvent(ctx, withdrawal, "withdrawal.rejected", withdrawal.FailureReason)
+	}
+	return withdrawal, err
 }
 
 func (s *Service) MarkWithdrawalPaid(ctx context.Context, id string) (PaymentWithdrawal, error) {
-	return s.repo.MarkWithdrawalPaid(ctx, id)
+	withdrawal, err := s.repo.MarkWithdrawalPaid(ctx, id)
+	if err == nil {
+		s.dispatchWithdrawalEvent(ctx, withdrawal, "withdrawal.completed", "")
+	}
+	return withdrawal, err
 }
 
 func (s *Service) MarkWithdrawalFailed(ctx context.Context, id, notes string) (PaymentWithdrawal, error) {
-	return s.repo.MarkWithdrawalFailed(ctx, id, notes)
+	withdrawal, err := s.repo.MarkWithdrawalFailed(ctx, id, notes)
+	if err == nil {
+		s.dispatchWithdrawalEvent(ctx, withdrawal, "withdrawal.failed", notes)
+	}
+	return withdrawal, err
 }
 
 // AttemptPayout resolves the withdrawal's payout provider (SonicPesa today)
@@ -1016,6 +1165,7 @@ func (s *Service) AttemptPayout(ctx context.Context, id string) (PaymentWithdraw
 	})
 	if disburseErr != nil {
 		if recorded, recErr := s.repo.RecordPayoutFailure(ctx, withdrawal.ID, s.payoutProvider, disburseErr.Error()); recErr == nil {
+			s.dispatchWithdrawalEvent(ctx, recorded, "withdrawal.failed", disburseErr.Error())
 			return recorded, disburseErr
 		}
 		return PaymentWithdrawal{}, disburseErr
@@ -1025,12 +1175,13 @@ func (s *Service) AttemptPayout(ctx context.Context, id string) (PaymentWithdraw
 	if err != nil {
 		return PaymentWithdrawal{}, err
 	}
+	s.dispatchWithdrawalEvent(ctx, dispatched, "withdrawal.dispatched", "")
 
 	switch result.Status {
 	case provider.StatusPaid:
-		return s.repo.MarkWithdrawalPaid(ctx, dispatched.ID)
+		return s.MarkWithdrawalPaid(ctx, dispatched.ID)
 	case provider.StatusFailed:
-		return s.repo.MarkWithdrawalFailed(ctx, dispatched.ID, "Payout failed at provider: "+result.ProviderStatus)
+		return s.MarkWithdrawalFailed(ctx, dispatched.ID, "Payout failed at provider: "+result.ProviderStatus)
 	default:
 		return dispatched, nil
 	}
@@ -1075,14 +1226,14 @@ func (s *Service) ReconcilePayouts(ctx context.Context, limit int) (ReconcilePay
 
 		switch status.Status {
 		case provider.StatusPaid:
-			if _, err := s.repo.MarkWithdrawalPaid(ctx, withdrawal.ID); err != nil {
+			if _, err := s.MarkWithdrawalPaid(ctx, withdrawal.ID); err != nil {
 				result.Failed++
 				result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", withdrawal.ID, err))
 				continue
 			}
 			result.Updated++
 		case provider.StatusFailed, provider.StatusReversed:
-			if _, err := s.repo.MarkWithdrawalFailed(ctx, withdrawal.ID, "Payout failed at provider: "+status.ProviderStatus); err != nil {
+			if _, err := s.MarkWithdrawalFailed(ctx, withdrawal.ID, "Payout failed at provider: "+status.ProviderStatus); err != nil {
 				result.Failed++
 				result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", withdrawal.ID, err))
 				continue
@@ -1094,6 +1245,10 @@ func (s *Service) ReconcilePayouts(ctx context.Context, limit int) (ReconcilePay
 	}
 
 	if result.Scanned > 0 {
+		if result.Failed > 0 && s.dispatcher != nil {
+			day := time.Now().UTC().Format("2006-01-02")
+			_ = s.dispatcher.Dispatch(ctx, notify.Event{EventType: "admin.reconciliation_alert", AllAdmins: true, ReferenceID: "payments:" + day, DedupeKey: "admin.reconciliation_alert:payments:" + day, LinkURL: "/admin/analytics/ops/unreconciled", Data: map[string]any{"failed": result.Failed, "scanned": result.Scanned}, Source: "system"})
+		}
 		s.log.Info(
 			"payout reconciliation completed",
 			"scanned", result.Scanned,
@@ -1296,6 +1451,7 @@ func (s *Service) emitRefundEvent(ctx context.Context, order PaymentOrder, refun
 		s.log.Error("create refund webhook deliveries failed", "event_id", event.ID, "error", err)
 		return
 	}
+	s.dispatchPaymentEvent(ctx, order, provider.StatusReversed, map[string]any{"amount": refund.Amount, "currency": refund.Currency, "refund_id": refund.ID})
 	go s.deliverDueNow()
 }
 
@@ -1572,6 +1728,10 @@ func (s *Service) ReconcilePayments(ctx context.Context, limit int) (ReconcilePa
 	}
 
 	if result.Scanned > 0 {
+		if result.Failed > 0 && s.dispatcher != nil {
+			day := time.Now().UTC().Format("2006-01-02")
+			_ = s.dispatcher.Dispatch(ctx, notify.Event{EventType: "admin.reconciliation_alert", AllAdmins: true, ReferenceID: "payouts:" + day, DedupeKey: "admin.reconciliation_alert:payouts:" + day, LinkURL: "/admin/analytics/withdrawals", Data: map[string]any{"failed": result.Failed, "scanned": result.Scanned}, Source: "system"})
+		}
 		s.log.Info(
 			"payment reconciliation completed",
 			"scanned", result.Scanned,
@@ -1598,6 +1758,7 @@ func (s *Service) ExpireOrders(ctx context.Context, limit int) (ExpireOrdersResu
 
 	result := ExpireOrdersResult{Expired: len(orders)}
 	for _, order := range orders {
+		s.dispatchPaymentEvent(ctx, order, provider.StatusExpired, map[string]any{"source": "expiry"})
 		raw, _ := json.Marshal(map[string]any{
 			"payment_order_id": order.ID,
 			"expired_at":       time.Now().UTC(),
@@ -2007,6 +2168,7 @@ func (s *Service) ProcessDueDeliveries(ctx context.Context, limit int) (ProcessD
 			result.Failed++
 			record.Failed = true
 			record.Error = deliveryErrorMessage(deliveryErr, responseStatus)
+			s.dispatchWebhookFailure(ctx, job)
 		default:
 			result.Retrying++
 			nextAttempt := time.Now().UTC().Add(deliveryBackoff(job.AttemptCount))
@@ -2209,6 +2371,7 @@ func (s *Service) HandleProviderWebhook(ctx context.Context, providerName string
 			fmt.Sprintf("%s %s via %s", order.Amount, order.Currency, name),
 			map[string]any{"payment_order_id": order.ID, "provider": name})
 	}
+	s.dispatchPaymentEvent(ctx, order, nextStatus, map[string]any{"provider_status": webhookEvent.ProviderStatus})
 
 	s.log.Info("payment webhook processed", "provider", name, "event_id", event.ID, "payment_order_id", order.ID, "from_status", order.Status, "to_status", nextStatus)
 	return WebhookResult{EventID: event.ID, Processed: true, OrderFound: true}, nil
@@ -2322,6 +2485,7 @@ func (s *Service) handleRefundWebhook(ctx context.Context, providerName string, 
 	} else {
 		go s.deliverDueNow()
 	}
+	s.dispatchPaymentEvent(ctx, order, provider.StatusReversed, map[string]any{"amount": claim.Amount, "currency": order.Currency, "refund_id": claim.ID})
 
 	s.log.Info("refund webhook processed", "provider", providerName, "event_id", event.ID, "payment_order_id", order.ID, "refund_id", claim.ID)
 	_ = updated
@@ -2440,11 +2604,11 @@ func (s *Service) handlePayoutWebhook(ctx context.Context, providerName, eventID
 
 	switch webhookEvent.NormalizedStatus {
 	case provider.StatusPaid:
-		if _, err := s.repo.MarkWithdrawalPaid(ctx, withdrawal.ID); err != nil && !errors.Is(err, ErrInvalidWithdrawalTransition) {
+		if _, err := s.MarkWithdrawalPaid(ctx, withdrawal.ID); err != nil && !errors.Is(err, ErrInvalidWithdrawalTransition) {
 			return WebhookResult{EventID: eventID, OrderFound: true}, fmt.Errorf("apply payout paid webhook: %w", err)
 		}
 	case provider.StatusFailed, provider.StatusReversed:
-		if _, err := s.repo.MarkWithdrawalFailed(ctx, withdrawal.ID, "Payout failed at provider: "+webhookEvent.ProviderStatus); err != nil && !errors.Is(err, ErrInvalidWithdrawalTransition) {
+		if _, err := s.MarkWithdrawalFailed(ctx, withdrawal.ID, "Payout failed at provider: "+webhookEvent.ProviderStatus); err != nil && !errors.Is(err, ErrInvalidWithdrawalTransition) {
 			return WebhookResult{EventID: eventID, OrderFound: true}, fmt.Errorf("apply payout failed webhook: %w", err)
 		}
 	default:
@@ -2547,6 +2711,7 @@ func (s *Service) applyProviderStatusUpdate(ctx context.Context, order PaymentOr
 	if applyInput.PostLedger {
 		s.sendPaymentSuccessSMS(ctx, order, paymentApp.Name)
 	}
+	s.dispatchPaymentEvent(ctx, updated, nextStatus, map[string]any{"provider_status": providerStatus.ProviderStatus, "source": source})
 
 	return updated, eventID, deliveriesCreated, nil
 }

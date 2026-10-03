@@ -362,6 +362,13 @@ type APIKey struct {
 	LastUsedAt  *time.Time `json:"last_used_at,omitempty"`
 }
 
+type APIKeyExpiryNotice struct {
+	ID        string
+	AppID     string
+	OrgID     string
+	ExpiresAt time.Time
+}
+
 // Key lifecycle states. Rotating keys stay valid until ExpiresAt (grace
 // period) so in-flight traffic survives rotation.
 const (

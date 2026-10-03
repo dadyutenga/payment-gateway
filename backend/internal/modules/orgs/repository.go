@@ -970,6 +970,38 @@ func (r *PostgresRepository) UpsertNotificationPrefs(ctx context.Context, prefs 
 	if err != nil {
 		return NotificationPrefs{}, fmt.Errorf("upsert notification prefs: %w", err)
 	}
+	// Keep the normalized multi-channel table in sync with the legacy
+	// compatibility endpoint. Critical in-app alerts remain enabled even if
+	// an old client attempts to mute them.
+	legacy := []struct {
+		event   string
+		enabled bool
+	}{
+		{"payment.succeeded", out.PaymentUpdated},
+		{"payment.failed", out.PaymentUpdated},
+		{"payment.refunded", out.PaymentRefunded},
+		{"payment.expired", out.PaymentExpired},
+		{"withdrawal.requested", out.WithdrawalUpdates},
+		{"withdrawal.requires_approval", out.WithdrawalUpdates},
+		{"withdrawal.approved", out.WithdrawalUpdates},
+		{"withdrawal.rejected", out.WithdrawalUpdates},
+		{"withdrawal.dispatched", out.WithdrawalUpdates},
+		{"withdrawal.completed", out.WithdrawalUpdates},
+		{"withdrawal.failed", out.WithdrawalUpdates},
+		{"kyc.verified", out.KYCDecisions},
+		{"kyc.rejected", out.KYCDecisions},
+	}
+	for _, item := range legacy {
+		for _, channel := range []string{"in_app", "email", "sms"} {
+			enabled := item.enabled
+			if channel == "in_app" && (item.event == "payment.failed" || item.event == "withdrawal.completed" || item.event == "kyc.verified") {
+				enabled = true
+			}
+			if _, syncErr := r.db.ExecEx(ctx, `INSERT INTO app.notification_preferences (scope_kind, scope_id, event_type, channel, enabled) VALUES ('org', $1::uuid, $2, $3, $4) ON CONFLICT (scope_kind, scope_id, event_type, channel) DO UPDATE SET enabled = EXCLUDED.enabled, updated_at = NOW()`, nil, out.OrgID, item.event, channel, enabled); syncErr != nil {
+				return NotificationPrefs{}, fmt.Errorf("sync notification prefs: %w", syncErr)
+			}
+		}
+	}
 	return out, nil
 }
 

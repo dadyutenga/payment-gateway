@@ -3,7 +3,7 @@ import { Outlet, useLocation } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
   Activity, BarChart3, Building2, ChevronsLeft, ChevronsRight, CreditCard, FileCheck, History,
-  LayoutDashboard, Wallet, XCircle,
+  LayoutDashboard, Wallet, XCircle, Bell,
 } from "lucide-react";
 import { signOut } from "@/lib/auth";
 import { getAdminMe } from "@/lib/adminApi";
@@ -47,7 +47,7 @@ const BASE_GROUPS: SidebarNavGroup[] = [
   },
   {
     id: "audit", label: "Audit", icon: History,
-    items: [{ to: "/admin/audit", label: "Audit log", icon: History }],
+    items: [{ to: "/admin/audit", label: "Audit log", icon: History }, { to: "/admin/notifications", label: "Notifications", icon: Bell }, { to: "/admin/notifications/send", label: "Send notification", icon: Bell }],
   },
 ];
 

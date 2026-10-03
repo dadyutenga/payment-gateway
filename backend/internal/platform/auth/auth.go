@@ -349,7 +349,7 @@ func (s *Service) RegisterKind(ctx context.Context, email, password, kind, displ
 	u.IsAdmin = false
 	// The inbox is best-effort: account creation must not fail if an older
 	// deployment has not applied the dashboard notification migration yet.
-	_, _ = s.db.ExecEx(ctx, `INSERT INTO app.dashboard_notifications (recipient_id, audience, title, description, emoji) VALUES ($1::uuid, 'customer', $2, $3, $4)`, nil, u.ID, "Welcome to LipaGO", "Your workspace is ready. Complete verification when you’re ready to enable live payments.", "👋")
+	_, _ = s.db.ExecEx(ctx, `INSERT INTO app.notifications (recipient_user_id, event_type, dedupe_key, title, body, icon, severity, source) VALUES ($1::uuid, 'account.welcome', 'account.welcome:' || $1::text, $2, $3, $4, 'info', 'system') ON CONFLICT DO NOTHING`, nil, u.ID, "Karibu LipaGO", "Workspace yako iko tayari. Kamilisha uthibitishaji ili kuwezesha malipo ya moja kwa moja.", "👋")
 	if kind == "creator" && s.creatorAccountProvisioner != nil {
 		if err := s.creatorAccountProvisioner(ctx, u.ID, displayName, handle, bio); err != nil {
 			_, _ = s.db.ExecEx(ctx, `DELETE FROM app.users WHERE id = $1::uuid`, nil, u.ID)
@@ -668,11 +668,15 @@ type DashboardNotification struct {
 }
 
 func (s *Service) listDashboardNotifications(ctx context.Context, recipientID, audience string) ([]DashboardNotification, error) {
+	identityColumn := "recipient_user_id"
+	if audience == AudienceAdmin {
+		identityColumn = "recipient_admin_id"
+	}
 	rows, err := s.db.QueryEx(ctx, `
-		SELECT id::text, title, description, emoji, link, read_at, created_at
-		FROM app.dashboard_notifications
-		WHERE recipient_id = $1::uuid AND audience = $2
-		ORDER BY created_at DESC LIMIT 50`, nil, recipientID, audience)
+		SELECT id::text, title, body, icon, link_url, read_at, created_at
+		FROM app.notifications
+		WHERE `+identityColumn+` = $1::uuid
+		ORDER BY created_at DESC LIMIT 50`, nil, recipientID)
 	if err != nil {
 		return nil, err
 	}
@@ -695,10 +699,14 @@ func (s *Service) listDashboardNotifications(ctx context.Context, recipientID, a
 }
 
 func (s *Service) markAllDashboardNotificationsRead(ctx context.Context, recipientID, audience string) (int64, error) {
+	identityColumn := "recipient_user_id"
+	if audience == AudienceAdmin {
+		identityColumn = "recipient_admin_id"
+	}
 	tag, err := s.db.ExecEx(ctx, `
-		UPDATE app.dashboard_notifications
+		UPDATE app.notifications
 		SET read_at = COALESCE(read_at, NOW())
-		WHERE recipient_id = $1::uuid AND audience = $2 AND read_at IS NULL`, nil, recipientID, audience)
+		WHERE `+identityColumn+` = $1::uuid AND read_at IS NULL`, nil, recipientID)
 	if err != nil {
 		return 0, err
 	}
