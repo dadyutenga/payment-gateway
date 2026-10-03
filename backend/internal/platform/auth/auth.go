@@ -160,6 +160,9 @@ func (v *Verifier) VerifyBearerToken(_ context.Context, token string) (Claims, e
 	return claims, nil
 }
 
+type CreatorAccountProvisioner func(ctx context.Context, userID, displayName, handle, bio string) error
+type AccountKindResolver func(ctx context.Context, userID string) (string, error)
+
 type Service struct {
 	db                  *pgx.ConnPool
 	verifier            *Verifier // customer verifier (back-compat)
@@ -172,13 +175,15 @@ type Service struct {
 	adminLoginLimiter   *rateLimiter
 	// TOTPVerify is the hook where TOTP 2FA plugs in later:
 	// func(secret, code string) bool. Nil means "no TOTP provider wired".
-	TOTPVerify func(secret, code string) bool
+	TOTPVerify                func(secret, code string) bool
+	creatorAccountProvisioner CreatorAccountProvisioner
+	accountKindResolver       AccountKindResolver
 }
 
 func NewService(db *pgx.ConnPool, verifier *Verifier) *Service {
 	return &Service{
 		db: db, verifier: verifier,
-		customerVerifier: verifier,
+		customerVerifier:  verifier,
 		loginLimiter:      newRateLimiter(20, time.Minute),
 		adminLoginLimiter: newRateLimiter(5, time.Minute),
 	}
@@ -280,6 +285,14 @@ type SMSSender interface {
 func (s *Service) SetMailer(mailer Mailer)       { s.mailer = mailer }
 func (s *Service) SetSMSSender(sender SMSSender) { s.sms = sender }
 
+func (s *Service) SetCreatorAccountProvisioner(p CreatorAccountProvisioner) {
+	s.creatorAccountProvisioner = p
+}
+
+func (s *Service) SetAccountKindResolver(r AccountKindResolver) {
+	s.accountKindResolver = r
+}
+
 // SetAllowPublicRegister opens POST /api/v1/auth/register to anyone.
 // Default closed: registration is allowed only for the very first account
 // (empty users table) so a fresh deployment can bootstrap its admin, then
@@ -307,6 +320,10 @@ func (s *Service) adminTokens() *Verifier {
 }
 
 func (s *Service) Register(ctx context.Context, email, password string) (User, string, error) {
+	return s.RegisterKind(ctx, email, password, "merchant", "", "", "")
+}
+
+func (s *Service) RegisterKind(ctx context.Context, email, password, kind, displayName, handle, bio string) (User, string, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 	if !strings.Contains(email, "@") || len(password) < 12 {
 		return User{}, "", errors.New("use a valid email and a password with at least 12 characters")
@@ -330,6 +347,12 @@ func (s *Service) Register(ctx context.Context, email, password string) (User, s
 		return User{}, "", fmt.Errorf("create user: %w", err)
 	}
 	u.IsAdmin = false
+	if kind == "creator" && s.creatorAccountProvisioner != nil {
+		if err := s.creatorAccountProvisioner(ctx, u.ID, displayName, handle, bio); err != nil {
+			_, _ = s.db.ExecEx(ctx, `DELETE FROM app.users WHERE id = $1::uuid`, nil, u.ID)
+			return User{}, "", fmt.Errorf("create creator account: %w", err)
+		}
+	}
 	token, err := s.customerTokens().IssueToken(u)
 	return u, token, err
 }
@@ -344,6 +367,25 @@ func (s *Service) Login(ctx context.Context, email, password string) (User, stri
 	u.IsAdmin = false
 	token, err := s.customerTokens().IssueToken(u)
 	return u, token, err
+}
+
+var ErrWrongAccountKind = errors.New("wrong account kind")
+
+func (s *Service) LoginKind(ctx context.Context, email, password, wanted string) (User, string, error) {
+	u, token, err := s.Login(ctx, email, password)
+	if err != nil {
+		return User{}, "", err
+	}
+	if s.accountKindResolver != nil {
+		actual, resolveErr := s.accountKindResolver(ctx, u.ID)
+		if resolveErr != nil {
+			return User{}, "", resolveErr
+		}
+		if actual != "" && actual != wanted {
+			return User{}, "", ErrWrongAccountKind
+		}
+	}
+	return u, token, nil
 }
 
 // isFirstUser reports whether no accounts exist yet (fresh deployment).
@@ -654,14 +696,14 @@ const (
 )
 
 var (
-	ErrOTPNotConfigured   = errors.New("verification sending is not configured")
-	ErrOTPRateLimited     = errors.New("too many codes requested — try again later")
-	ErrOTPNoActiveCode    = errors.New("no active code — request a fresh one")
-	ErrOTPExpired         = errors.New("code expired — request a fresh one")
-	ErrOTPLocked          = errors.New("too many wrong attempts — request a fresh code")
-	ErrOTPInvalid         = errors.New("invalid code")
-	ErrPhoneInvalid       = errors.New("phone must be a Tanzanian mobile number like +255712345678")
-	ErrOTPSendFailed      = errors.New("failed to send verification code")
+	ErrOTPNotConfigured = errors.New("verification sending is not configured")
+	ErrOTPRateLimited   = errors.New("too many codes requested — try again later")
+	ErrOTPNoActiveCode  = errors.New("no active code — request a fresh one")
+	ErrOTPExpired       = errors.New("code expired — request a fresh one")
+	ErrOTPLocked        = errors.New("too many wrong attempts — request a fresh code")
+	ErrOTPInvalid       = errors.New("invalid code")
+	ErrPhoneInvalid     = errors.New("phone must be a Tanzanian mobile number like +255712345678")
+	ErrOTPSendFailed    = errors.New("failed to send verification code")
 )
 
 // GenerateOTPCode returns a zero-padded 6-digit code from crypto/rand.
@@ -858,9 +900,11 @@ func (s *Service) VerifyOTP(ctx context.Context, userID, channel, purpose, code 
 }
 
 func (s *Service) HandleRegister(w http.ResponseWriter, r *http.Request) {
+	// Compatibility endpoint: legacy registrations remain merchant-track.
+	// New clients must use a track-specific endpoint.
 	// Customer-space rate limit: per IP + per email.
 	ip := clientIP(r)
-	if !s.loginLimiter.Allow("register:ip:"+ip) {
+	if !s.loginLimiter.Allow("register:ip:" + ip) {
 		httputil.Error(w, http.StatusTooManyRequests, "rate_limited", "Too many attempts — try again later.", nil)
 		return
 	}
@@ -868,9 +912,11 @@ func (s *Service) HandleRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) HandleLogin(w http.ResponseWriter, r *http.Request) {
+	// Compatibility endpoint: legacy logins remain accepted and the client
+	// resolves the already-stored account kind from the server.
 	// Customer-space rate limit: per IP and per account.
 	ip := clientIP(r)
-	if !s.loginLimiter.Allow("login:ip:"+ip) {
+	if !s.loginLimiter.Allow("login:ip:" + ip) {
 		httputil.Error(w, http.StatusTooManyRequests, "rate_limited", "Too many attempts — try again later.", nil)
 		return
 	}
@@ -881,7 +927,7 @@ func (s *Service) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	_ = json.Unmarshal(peekBody, &peek)
 	r.Body = io.NopCloser(bytes.NewReader(peekBody))
 	if email := strings.ToLower(strings.TrimSpace(peek.Email)); email != "" {
-		if !s.loginLimiter.Allow("login:acct:"+email) {
+		if !s.loginLimiter.Allow("login:acct:" + email) {
 			httputil.Error(w, http.StatusTooManyRequests, "rate_limited", "Too many attempts for this account — try again later.", nil)
 			return
 		}
@@ -889,12 +935,36 @@ func (s *Service) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	s.handleCredentials(w, r, s.Login)
 }
 
+func (s *Service) HandleMerchantRegister(w http.ResponseWriter, r *http.Request) {
+	s.handleTrackCredentials(w, r, func(ctx context.Context, email, password string, in trackAuthInput) (User, string, error) {
+		return s.RegisterKind(ctx, email, password, "merchant", "", "", "")
+	})
+}
+
+func (s *Service) HandleCreatorRegister(w http.ResponseWriter, r *http.Request) {
+	s.handleTrackCredentials(w, r, func(ctx context.Context, email, password string, in trackAuthInput) (User, string, error) {
+		return s.RegisterKind(ctx, email, password, "creator", in.DisplayName, in.Handle, in.Bio)
+	})
+}
+
+func (s *Service) HandleMerchantLogin(w http.ResponseWriter, r *http.Request) {
+	s.handleTrackCredentials(w, r, func(ctx context.Context, email, password string, _ trackAuthInput) (User, string, error) {
+		return s.LoginKind(ctx, email, password, "merchant")
+	})
+}
+
+func (s *Service) HandleCreatorLogin(w http.ResponseWriter, r *http.Request) {
+	s.handleTrackCredentials(w, r, func(ctx context.Context, email, password string, _ trackAuthInput) (User, string, error) {
+		return s.LoginKind(ctx, email, password, "creator")
+	})
+}
+
 // HandleAdminLogin authenticates operators (separate path, separate
 // audience, shorter TTL, stricter rate limit, audited). TOTP hook: when
 // wired, pass {"totp_code"} alongside email/password.
 func (s *Service) HandleAdminLogin(w http.ResponseWriter, r *http.Request) {
 	ip := clientIP(r)
-	if !s.adminLoginLimiter.Allow("admin:ip:"+ip) {
+	if !s.adminLoginLimiter.Allow("admin:ip:" + ip) {
 		httputil.Error(w, http.StatusTooManyRequests, "rate_limited", "Too many attempts — try again later.", nil)
 		return
 	}
@@ -909,7 +979,7 @@ func (s *Service) HandleAdminLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if email := strings.ToLower(strings.TrimSpace(in.Email)); email != "" {
-		if !s.adminLoginLimiter.Allow("admin:acct:"+email) {
+		if !s.adminLoginLimiter.Allow("admin:acct:" + email) {
 			httputil.Error(w, http.StatusTooManyRequests, "rate_limited", "Too many attempts for this account — try again later.", nil)
 			return
 		}
@@ -1205,6 +1275,42 @@ func (s *Service) HandleOTPVerify(w http.ResponseWriter, r *http.Request) {
 	}
 	httputil.JSON(w, http.StatusOK, map[string]any{"data": map[string]any{"verified": true}})
 }
+
+type trackAuthInput struct {
+	Email       string `json:"email"`
+	Password    string `json:"password"`
+	DisplayName string `json:"display_name"`
+	Handle      string `json:"handle"`
+	Bio         string `json:"bio"`
+}
+
+func (s *Service) handleTrackCredentials(w http.ResponseWriter, r *http.Request, action func(context.Context, string, string, trackAuthInput) (User, string, error)) {
+	var in trackAuthInput
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		httputil.Error(w, http.StatusBadRequest, "invalid_request", "Email and password are required.", nil)
+		return
+	}
+	u, token, err := action(r.Context(), in.Email, in.Password, in)
+	if err != nil {
+		if errors.Is(err, ErrWrongAccountKind) {
+			httputil.Error(w, http.StatusForbidden, "wrong_kind", "This account belongs to the other workspace.", nil)
+			return
+		}
+		if errors.Is(err, ErrPublicRegistrationDisabled) {
+			httputil.Error(w, http.StatusForbidden, "registration_disabled", "Public registration is disabled. Ask an administrator for access.", nil)
+			return
+		}
+		safe := err.Error()
+		if safe != "use a valid email and a password with at least 12 characters" && safe != "an account already exists for this email" && safe != "invalid email or password" {
+			safe = "Authentication failed. Please try again."
+		}
+		httputil.Error(w, http.StatusUnauthorized, "invalid_credentials", safe, nil)
+		return
+	}
+	httputil.JSON(w, http.StatusOK, map[string]any{"data": map[string]any{"access_token": token, "user": map[string]any{"id": u.ID, "email": u.Email, "is_admin": u.IsAdmin}}})
+}
+
 func (s *Service) handleCredentials(w http.ResponseWriter, r *http.Request, action func(context.Context, string, string) (User, string, error)) {
 	var in struct {
 		Email    string `json:"email"`

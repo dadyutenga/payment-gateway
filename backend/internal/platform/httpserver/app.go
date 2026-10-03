@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -123,6 +124,34 @@ func New(ctx context.Context) (*App, error) {
 
 	orgRepo := orgs.NewPostgresRepository(db)
 	orgService := orgs.NewService(orgRepo, logger)
+	authService.SetCreatorAccountProvisioner(func(ctx context.Context, userID, displayName, handle, bio string) error {
+		_, validationErrors, err := orgService.CreateCreatorOrganization(ctx, userID, displayName, orgs.CreatorOrgInput{
+			DisplayName: displayName,
+			Handle:      handle,
+			Bio:         bio,
+		})
+		if err != nil {
+			return err
+		}
+		if validationErrors.Any() {
+			return fmt.Errorf("invalid creator profile")
+		}
+		return nil
+	})
+	authService.SetAccountKindResolver(func(ctx context.Context, userID string) (string, error) {
+		var kind string
+		err := db.QueryRowEx(ctx, `
+			SELECT COALESCE(o.account_kind, '')
+			FROM app.organizations o
+			JOIN app.org_members m ON m.org_id = o.id
+			WHERE m.user_id = $1::uuid AND m.status = 'active'
+			ORDER BY o.created_at ASC LIMIT 1
+		`, nil, userID).Scan(&kind)
+		if err == pgx.ErrNoRows {
+			return "", nil
+		}
+		return kind, err
+	})
 	orgHandler := orgs.NewHandler(orgService, logger)
 	orgHandler.SetStorage(fileStore)
 	paymentHandler.SetOrgService(orgService)
@@ -144,6 +173,10 @@ func New(ctx context.Context) (*App, error) {
 	// ---- Customer space: public login paths ----
 	mux.HandleFunc("POST /api/v1/auth/register", authService.HandleRegister)
 	mux.HandleFunc("POST /api/v1/auth/login", authService.HandleLogin)
+	mux.HandleFunc("POST /api/v1/merchant/auth/register", authService.HandleMerchantRegister)
+	mux.HandleFunc("POST /api/v1/merchant/auth/login", authService.HandleMerchantLogin)
+	mux.HandleFunc("POST /api/v1/creator/auth/register", authService.HandleCreatorRegister)
+	mux.HandleFunc("POST /api/v1/creator/auth/login", authService.HandleCreatorLogin)
 	// ---- Admin space: separate login path, audience, lifetime ----
 	mux.HandleFunc("POST /api/v1/admin/auth/login", authService.HandleAdminLogin)
 	mux.Handle("POST /api/v1/admin/auth/invite", middleware.Chain(http.HandlerFunc(authService.HandleAdminInvite), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))

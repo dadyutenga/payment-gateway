@@ -182,7 +182,9 @@ const App = () => (
               </TrackRoute>
             }
           >
-            <Route index element={<CreateOrg lockedKind="creator" />} />
+            {/* Creator registration provisions its private account container
+                server-side; there is no creator organization setup step. */}
+            <Route index element={<CreatorOverview />} />
           </Route>
           {/* Track verification entries. */}
           <Route

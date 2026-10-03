@@ -11,8 +11,20 @@ export function signOutAdmin() { localStorage.removeItem(ADMIN_TOKEN_KEY); }
 export function signOut() { signOutCustomer(); signOutAdmin(); }
 
 export async function authenticate(mode: "login" | "register", email: string, password: string) {
-  const response = await fetch(`${API_BASE}/api/v1/auth/${mode}`, {
-    method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify({ email, password }),
+  return authenticateTrack(undefined, mode, email, password);
+}
+
+export async function authenticateTrack(
+  kind: "merchant" | "creator" | undefined,
+  mode: "login" | "register",
+  email: string,
+  password: string,
+  profile?: { display_name?: string; handle?: string; bio?: string },
+) {
+  const prefix = kind ? `/api/v1/${kind}/auth` : "/api/v1/auth";
+  const response = await fetch(`${API_BASE}${prefix}/${mode}`, {
+    method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({ email, password, ...(profile || {}) }),
   });
   const payload = await response.json().catch(() => null) as { data?: { access_token?: string }; error?: { message?: string } } | null;
   if (!response.ok || !payload?.data?.access_token) throw new Error(payload?.error?.message || "Unable to authenticate.");

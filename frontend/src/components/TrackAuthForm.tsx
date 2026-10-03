@@ -1,7 +1,6 @@
 import { FormEvent, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { authenticate } from "@/lib/auth";
-import { listMyOrgs } from "@/lib/orgApi";
+import { authenticateTrack } from "@/lib/auth";
 import {
   clearPendingNames,
   setPendingBusinessName,
@@ -37,6 +36,7 @@ export default function TrackAuthForm({ kind, mode }: { kind: AccountKind; mode:
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [extra, setExtra] = useState("");
+  const [handle, setHandle] = useState("");
   const [busy, setBusy] = useState(false);
 
   const copy = COPY[kind];
@@ -51,7 +51,9 @@ export default function TrackAuthForm({ kind, mode }: { kind: AccountKind; mode:
     event.preventDefault();
     setBusy(true);
     try {
-      await authenticate(mode, email, password);
+      await authenticateTrack(kind, mode, email, password, mode === "register" && isCreator
+        ? { display_name: extra.trim(), handle: handle.trim().toLowerCase() }
+        : undefined);
       setTrackIntent(kind);
       if (mode === "register") {
         if (isCreator) setPendingDisplayName(extra.trim());
@@ -62,32 +64,10 @@ export default function TrackAuthForm({ kind, mode }: { kind: AccountKind; mode:
           /* mailer may be unconfigured in dev — non-fatal */
         }
         clearPendingNamesCheck();
-        if (isCreator) setPendingDisplayName(extra.trim());
-        else setPendingBusinessName(extra.trim());
         navigate(next || setupPath, { replace: true });
         return;
       }
-      // Login: verify the account's actual kind post-auth and route accordingly.
-      // Auth tokens carry no kind, so the org record is the source of truth.
-      let actual: AccountKind | null = null;
-      try {
-        const orgs = await listMyOrgs();
-        const active = orgs.find((o) => o.status === "active") ?? orgs[0];
-        actual = (active?.account_kind as AccountKind | undefined) ?? null;
-      } catch {
-        actual = null;
-      }
-      if (actual && actual !== kind) {
-        const where = "/merchant/apps";
-        toast.message(
-          isCreator
-            ? "That account is a business account — taking you to the merchant workspace."
-            : "That account is a creator account — taking you to your creator workspace.",
-        );
-        navigate(next || where, { replace: true });
-        return;
-      }
-      navigate(next || "/merchant/apps", { replace: true });
+      navigate(next || (isCreator ? "/creator" : "/merchant"), { replace: true });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Unable to continue.");
     } finally {
@@ -108,11 +88,17 @@ export default function TrackAuthForm({ kind, mode }: { kind: AccountKind; mode:
           <form onSubmit={handleSubmit} className="mt-5 space-y-4">
             {mode === "register" &&
               (isCreator ? (
-                <div>
-                  <label className="text-sm font-medium text-slate-700">Display name</label>
-                  <Input value={extra} onChange={(e) => setExtra(e.target.value)} required maxLength={100} placeholder="Amina Creates" className="mt-1" />
-                  <p className="mt-1 text-xs text-slate-400">Public name on your support page. Handle chosen next.</p>
-                </div>
+                <>
+                  <div>
+                    <label className="text-sm font-medium text-slate-700">Display name</label>
+                    <Input value={extra} onChange={(e) => setExtra(e.target.value)} required maxLength={100} placeholder="Amina Creates" className="mt-1" />
+                  </div>
+                  <div>
+                    <label className="text-sm font-medium text-slate-700">Handle</label>
+                    <Input value={handle} onChange={(e) => setHandle(e.target.value.toLowerCase().replace(/[^a-z0-9._-]/g, ""))} required minLength={3} maxLength={30} placeholder="amina.creates" className="mt-1" />
+                    <p className="mt-1 text-xs text-slate-400">Your personal support link. No organization setup is required.</p>
+                  </div>
+                </>
               ) : (
                 <div>
                   <label className="text-sm font-medium text-slate-700">Business name</label>

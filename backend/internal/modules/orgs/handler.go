@@ -14,7 +14,6 @@ import (
 	"lipago/internal/platform/middleware"
 	"lipago/internal/platform/storage"
 	"lipago/internal/shared/httputil"
-	"lipago/internal/shared/validation"
 
 	"github.com/google/uuid"
 )
@@ -129,53 +128,17 @@ func (h *Handler) CreateOrganization(w http.ResponseWriter, r *http.Request) {
 		httputil.Error(w, http.StatusBadRequest, "invalid_request", "Unable to decode request body.", nil)
 		return
 	}
-	kind, err := ParseAccountKind(strings.ToLower(strings.TrimSpace(in.AccountKind)))
+	if strings.TrimSpace(in.AccountKind) != "" {
+		httputil.Error(w, http.StatusGone, "track_endpoint_required", "Use the merchant or creator account endpoint; account_kind is not client-selectable.", nil)
+		return
+	}
+	created, vErrs, err := h.service.CreateOrganization(r.Context(), userID, in.Name, in.BusinessName)
 	if err != nil {
-		httputil.Error(w, http.StatusUnprocessableEntity, "validation_failed", "account_kind must be merchant or creator.", nil)
-		return
-	}
-	var (
-		org   OrganizationWithRole
-		vErrs validation.Errors
-	)
-	if kind == AccountKindCreator {
-		created, cErrs, cErr := h.service.CreateCreatorOrganization(r.Context(), userID, in.Name, CreatorOrgInput{
-			DisplayName: in.DisplayName, Handle: in.Handle, Bio: in.Bio,
-		})
-		vErrs = cErrs
-		if cErr != nil {
-			if errors.Is(cErr, ErrSingleOrg) {
-				httputil.Error(w, http.StatusConflict, "single_org", "Each account belongs to a single organization.", nil)
-				return
-			}
-			if errors.Is(cErr, ErrHandleTaken) {
-				httputil.Error(w, http.StatusConflict, "handle_taken", "That handle is already taken — try another.", nil)
-				return
-			}
-			h.fail(w, http.StatusInternalServerError, "create_failed", "Unable to create organization.", cErr)
-			return
-		}
-		if vErrs.Any() {
-			httputil.Error(w, http.StatusUnprocessableEntity, "validation_failed", "Please check your organization input.", vErrs)
-			return
-		}
-		member, mErr := h.service.CheckOrgPermission(r.Context(), userID, created.ID, PermRead)
-		if mErr != nil {
-			h.fail(w, http.StatusInternalServerError, "create_failed", "Unable to create organization.", mErr)
-			return
-		}
-		org = OrganizationWithRole{Organization: created, Role: member.Role, Status: member.Status}
-		httputil.JSON(w, http.StatusCreated, map[string]any{"data": org})
-		return
-	}
-	created, mErrs, mErr := h.service.CreateOrganization(r.Context(), userID, in.Name, in.BusinessName)
-	vErrs = mErrs
-	if mErr != nil {
-		if errors.Is(mErr, ErrSingleOrg) {
+		if errors.Is(err, ErrSingleOrg) {
 			httputil.Error(w, http.StatusConflict, "single_org", "Each account belongs to a single organization.", nil)
 			return
 		}
-		h.fail(w, http.StatusInternalServerError, "create_failed", "Unable to create organization.", mErr)
+		h.fail(w, http.StatusInternalServerError, "create_failed", "Unable to create organization.", err)
 		return
 	}
 	if vErrs.Any() {
