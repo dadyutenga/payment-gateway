@@ -17,6 +17,8 @@ export default {
       fontFamily: {
         heading: ['"Plus Jakarta Sans"', 'system-ui', 'sans-serif'],
         body: ['"Inter"', 'system-ui', 'sans-serif'],
+        landingDisplay: ['"Archivo"', 'system-ui', 'sans-serif'],
+        landingBody: ['"IBM Plex Sans"', 'system-ui', 'sans-serif'],
       },
       colors: {
         border: "hsl(var(--border))",
