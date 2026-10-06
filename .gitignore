@@ -19,3 +19,8 @@ frontend/.vite/
 # OS / editor
 .DS_Store
 *.swp
+
+# local DB dumps / audit exports (contain real data - never commit)
+backend/audit-output/
+last-task.txt
+revise-task.txt

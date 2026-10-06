@@ -20,6 +20,7 @@ type Config struct {
 	Database DatabaseConfig
 	Auth     AuthConfig
 	Payments PaymentConfig
+	Support  SupportConfig
 	Storage  StorageConfig
 	CORS     CORSConfig
 	Security SecurityConfig
@@ -94,6 +95,10 @@ type StorageConfig struct {
 	R2Bucket        string
 	R2Endpoint      string
 	R2PublicBaseURL string
+}
+
+type SupportConfig struct {
+	SLAAge time.Duration
 }
 
 type PaymentConfig struct {
@@ -215,6 +220,7 @@ func Load() (Config, error) {
 			CreatorLiveDailyVolumeCap:      strings.TrimSpace(os.Getenv("PAYMENTS_CREATOR_LIVE_DAILY_VOLUME_CAP")),
 			PayerHashSecret:                strings.TrimSpace(os.Getenv("ANALYTICS_PAYER_SECRET")),
 		},
+		Support: SupportConfig{SLAAge: mustDuration("SUPPORT_TICKET_SLA", "24h")},
 	}
 	if cfg.Storage.R2Endpoint == "" && cfg.Storage.R2AccountID != "" {
 		cfg.Storage.R2Endpoint = "https://" + cfg.Storage.R2AccountID + ".r2.cloudflarestorage.com"

@@ -15,6 +15,7 @@ import (
 	"lipago/internal/modules/orgs"
 	"lipago/internal/modules/payments"
 	"lipago/internal/modules/payments/providers"
+	"lipago/internal/modules/support"
 	"lipago/internal/platform/auth"
 	"lipago/internal/platform/config"
 	azcrypto "lipago/internal/platform/crypto"
@@ -167,6 +168,11 @@ func New(ctx context.Context) (*App, error) {
 	paymentHandler.SetAuthService(authService)
 	paymentHandler.SetAuditWriter(pgAuditWriter{repo: orgRepo})
 
+	supportService := support.NewService(db, orgService, logger, cfg.Support.SLAAge)
+	supportService.SetNotificationDispatcher(notificationService)
+	supportService.SetStorage(fileStore)
+	supportHandler := support.NewHandler(supportService)
+
 	analyticsRepo := analytics.NewPostgresRepository(db)
 	analyticsService := analytics.NewService(analyticsRepo, logger)
 	analyticsHandler := analytics.NewHandler(analyticsService, logger)
@@ -215,6 +221,35 @@ func New(ctx context.Context) (*App, error) {
 	mux.Handle("POST /api/v1/admin/notifications/read-all", middleware.Chain(http.HandlerFunc(notificationHandler.MarkAllRead), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))
 	mux.Handle("POST /api/v1/admin/notifications/broadcast", middleware.Chain(http.HandlerFunc(notificationHandler.Broadcast), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))
 	mux.Handle("POST /api/v1/admin/orgs/{orgID}/notifications", middleware.Chain(http.HandlerFunc(notificationHandler.Targeted), middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)))
+
+	// ---- Internal help desk: customer tickets are org-scoped and admin
+	// tickets use the separate admin audience. This is intentionally distinct
+	// from the public /api/v1/c/{handle}/support tip-jar routes below. ----
+	customerSupportAuth := middleware.RequireCustomerAuth(customerVerifier, adminVerifier, authService, requireEmailVerified)
+	adminSupportAuth := middleware.RequireAdminAuth(adminVerifier, customerVerifier, authService)
+	for _, prefix := range []string{"/api/v1/merchant/orgs/{orgID}/support/tickets", "/api/v1/orgs/{orgID}/support/tickets"} {
+		mux.Handle("GET "+prefix, middleware.Chain(http.HandlerFunc(supportHandler.CustomerList), customerSupportAuth))
+		mux.Handle("POST "+prefix, middleware.Chain(http.HandlerFunc(supportHandler.CustomerCreate), customerSupportAuth))
+		mux.Handle("GET "+prefix+"/{ticketID}", middleware.Chain(http.HandlerFunc(supportHandler.CustomerGet), customerSupportAuth))
+		mux.Handle("POST "+prefix+"/{ticketID}/messages", middleware.Chain(http.HandlerFunc(supportHandler.CustomerReply), customerSupportAuth))
+		mux.Handle("POST "+prefix+"/{ticketID}/close", middleware.Chain(http.HandlerFunc(supportHandler.CustomerClose), customerSupportAuth))
+		mux.Handle("POST "+prefix+"/{ticketID}/attachments", middleware.Chain(http.HandlerFunc(supportHandler.CustomerUpload), customerSupportAuth))
+		mux.Handle("GET "+prefix+"/{ticketID}/messages/{messageID}/attachment", middleware.Chain(http.HandlerFunc(supportHandler.CustomerDownload), customerSupportAuth))
+	}
+	const individualSupportPrefix = "/api/v1/individual/account/support/tickets"
+	mux.Handle("GET "+individualSupportPrefix, middleware.Chain(http.HandlerFunc(supportHandler.CustomerList), customerSupportAuth))
+	mux.Handle("POST "+individualSupportPrefix, middleware.Chain(http.HandlerFunc(supportHandler.CustomerCreate), customerSupportAuth))
+	mux.Handle("GET "+individualSupportPrefix+"/{ticketID}", middleware.Chain(http.HandlerFunc(supportHandler.CustomerGet), customerSupportAuth))
+	mux.Handle("POST "+individualSupportPrefix+"/{ticketID}/messages", middleware.Chain(http.HandlerFunc(supportHandler.CustomerReply), customerSupportAuth))
+	mux.Handle("POST "+individualSupportPrefix+"/{ticketID}/close", middleware.Chain(http.HandlerFunc(supportHandler.CustomerClose), customerSupportAuth))
+	mux.Handle("POST "+individualSupportPrefix+"/{ticketID}/attachments", middleware.Chain(http.HandlerFunc(supportHandler.CustomerUpload), customerSupportAuth))
+	mux.Handle("GET "+individualSupportPrefix+"/{ticketID}/messages/{messageID}/attachment", middleware.Chain(http.HandlerFunc(supportHandler.CustomerDownload), customerSupportAuth))
+	mux.Handle("GET /api/v1/admin/support/tickets", middleware.Chain(http.HandlerFunc(supportHandler.AdminList), adminSupportAuth))
+	mux.Handle("GET /api/v1/admin/support/tickets/{ticketID}", middleware.Chain(http.HandlerFunc(supportHandler.AdminGet), adminSupportAuth))
+	mux.Handle("POST /api/v1/admin/support/tickets/{ticketID}/messages", middleware.Chain(http.HandlerFunc(supportHandler.AdminReply), adminSupportAuth))
+	mux.Handle("PATCH /api/v1/admin/support/tickets/{ticketID}", middleware.Chain(http.HandlerFunc(supportHandler.AdminUpdate), adminSupportAuth))
+	mux.Handle("POST /api/v1/admin/support/tickets/{ticketID}/attachments", middleware.Chain(http.HandlerFunc(supportHandler.AdminUpload), adminSupportAuth))
+	mux.Handle("GET /api/v1/admin/support/tickets/{ticketID}/messages/{messageID}/attachment", middleware.Chain(http.HandlerFunc(supportHandler.AdminDownload), adminSupportAuth))
 
 	mux.HandleFunc("GET /api/v1/health", func(w http.ResponseWriter, r *http.Request) {
 		dbStatus := "up"

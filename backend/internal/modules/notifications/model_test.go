@@ -8,7 +8,7 @@ func TestNotificationTemplatesCoverPersistedEventInventory(t *testing.T) {
 		"withdrawal.requested", "withdrawal.requires_approval", "withdrawal.approved", "withdrawal.rejected", "withdrawal.dispatched", "withdrawal.completed", "withdrawal.failed",
 		"kyc.submitted", "kyc.verified", "kyc.rejected", "webhook.delivery_failed", "org.suspended", "org.unsuspended",
 		"org.limits_changed", "org.fee_override_changed", "org.member_invited", "org.role_changed", "creator.contribution_received",
-		"security.payout_destination_changed", "security.api_key_rotated", "security.api_key_grace_ending", "admin.kyc_queue", "admin.webhook_alert", "admin.reconciliation_alert", "admin.payment_failed", "admin.broadcast",
+		"security.payout_destination_changed", "security.api_key_rotated", "security.api_key_grace_ending", "admin.kyc_queue", "admin.webhook_alert", "admin.reconciliation_alert", "admin.payment_failed", "admin.broadcast", "support.ticket_created", "support.customer_replied", "support.admin_replied", "support.status_changed", "support.ticket_resolved",
 	}
 	for _, eventType := range want {
 		template, ok := templates[eventType]

@@ -3,7 +3,7 @@ import { Outlet, useLocation } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
   Banknote, HeartHandshake,
-  LayoutDashboard, Receipt, Settings,
+  LayoutDashboard, Receipt, Settings, LifeBuoy,
 } from "lucide-react";
 import { signOut } from "@/lib/auth";
 import { getIndividualAccount } from "@/lib/orgApi";
@@ -39,6 +39,10 @@ const NAV_GROUPS: SidebarNavGroup[] = [
   {
     id: "settings", label: "Settings", icon: Settings,
     items: [{ to: "/individual/settings", label: "Settings", icon: Settings }],
+  },
+  {
+    id: "support", label: "Help", icon: LifeBuoy,
+    items: [{ to: "/individual/support", label: "Support", icon: LifeBuoy }],
   },
 ];
 

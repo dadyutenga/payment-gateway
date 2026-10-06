@@ -547,6 +547,9 @@ const NOTIF_FIELDS = [
   { key: "security.payout_destination_changed", label: "Payout destination", helper: "Changes to where payouts are sent." },
   { key: "security.api_key_rotated", label: "API key rotation", helper: "A new API key was created." },
   { key: "security.api_key_grace_ending", label: "API key grace period", helper: "An old API key is nearing expiry." },
+  { key: "support.admin_replied", label: "Support replies", helper: "Replies from LipaGO help-desk staff." },
+  { key: "support.status_changed", label: "Support status", helper: "Changes to your help-desk ticket status." },
+  { key: "support.ticket_resolved", label: "Resolved tickets", helper: "Help-desk tickets marked resolved." },
 ];
 const NOTIF_CHANNELS = [{ key: "in_app", label: "In-app" }, { key: "email", label: "Email" }, { key: "sms", label: "SMS" }] as const;
 const CRITICAL_EVENTS = new Set(["payment.failed", "withdrawal.requested", "withdrawal.requires_approval", "withdrawal.approved", "withdrawal.rejected", "withdrawal.dispatched", "withdrawal.completed", "withdrawal.failed", "kyc.verified", "kyc.rejected", "org.suspended", "security.payout_destination_changed", "security.api_key_rotated", "security.api_key_grace_ending"]);

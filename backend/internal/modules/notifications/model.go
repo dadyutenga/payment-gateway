@@ -67,4 +67,9 @@ var templates = map[string]Template{
 	"admin.reconciliation_alert":          {"Tahadhari ya upatanisho", "Tatizo la upatanisho wa malipo linahitaji ukaguzi.", "⚠", "warning"},
 	"admin.payment_failed":                {"Malipo hayakufanikiwa", "{body}", "!", "alert"},
 	"admin.broadcast":                     {"Ujumbe wa LipaGO", "{body}", "", "info"},
+	"support.ticket_created":              {"Tiketi mpya ya msaada", "Tiketi mpya imewasilishwa kwa timu ya LipaGO: {subject}.", "?", "info"},
+	"support.customer_replied":            {"Jibu jipya la tiketi", "Mteja ameongeza jibu kwenye tiketi: {subject}.", "↩", "info"},
+	"support.admin_replied":               {"Timu ya LipaGO imejibu", "Kuna jibu jipya kwenye tiketi yako: {subject}.", "↩", "info"},
+	"support.status_changed":              {"Hali ya tiketi imebadilika", "Tiketi yako {subject} sasa iko katika hali ya {status}.", "•", "info"},
+	"support.ticket_resolved":             {"Tiketi imetatuliwa", "Tiketi yako {subject} imetiwa alama kuwa imetatuliwa.", "✓", "success"},
 }

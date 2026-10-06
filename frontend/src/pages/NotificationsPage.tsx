@@ -41,7 +41,7 @@ const NotificationsPage = ({ space = "customer" }: { space?: DashboardSpace }) =
       <div className="flex flex-wrap items-center gap-3 rounded-xl border border-border bg-card p-3">
         <label className="flex items-center gap-2 text-sm text-foreground"><input type="checkbox" checked={unreadOnly} onChange={(event) => { setUnreadOnly(event.target.checked); setOffset(0); }} /> Unread only</label>
         <select value={eventType} onChange={(event) => { setEventType(event.target.value); setOffset(0); }} className="rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground" aria-label="Filter by notification type">
-          <option value="">All types</option><option value="payment.succeeded">Payments</option><option value="withdrawal.completed">Withdrawals</option><option value="kyc.verified">KYC</option><option value="security.payout_destination_changed">Security</option><option value="admin.broadcast">Announcements</option>
+          <option value="">All types</option><option value="payment.succeeded">Payments</option><option value="withdrawal.completed">Withdrawals</option><option value="kyc.verified">KYC</option><option value="security.payout_destination_changed">Security</option><option value="support.admin_replied">Support replies</option><option value="support.status_changed">Support status</option><option value="admin.broadcast">Announcements</option>
         </select>
         <span className="ml-auto text-xs text-muted-foreground">{page?.unread ?? 0} unread</span>
       </div>

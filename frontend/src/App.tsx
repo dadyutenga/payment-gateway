@@ -65,6 +65,8 @@ import OnboardingKYC from "@/pages/OnboardingKYC";
 import Welcome from "@/pages/Welcome";
 import NotificationsPage from "@/pages/NotificationsPage";
 import AdminNotifications from "@/pages/AdminNotifications";
+import AdminSupport from "@/pages/AdminSupport";
+import SupportTicketsPage from "@/pages/SupportTicketsPage";
 
 const queryClient = new QueryClient();
 
@@ -110,6 +112,8 @@ const App = () => (
             <Route index element={<AdminDashboard />} />
             <Route path="notifications" element={<NotificationsPage space="admin" />} />
             <Route path="notifications/send" element={<AdminNotifications />} />
+            <Route path="support" element={<AdminSupport />} />
+            <Route path="support/:ticketId" element={<AdminSupport />} />
             <Route path="orgs/:orgId" element={<AdminOrgDetail />} />
             <Route path="analytics" element={<AdminAnalyticsOverview />} />
             <Route path="analytics/providers" element={<AdminAnalyticsProviders />} />
@@ -136,6 +140,8 @@ const App = () => (
           >
             <Route index element={<MerchantDashboard />} />
             <Route path="notifications" element={<NotificationsPage />} />
+            <Route path="support" element={<SupportTicketsPage track="merchant" />} />
+            <Route path="support/:ticketId" element={<SupportTicketsPage track="merchant" />} />
             <Route path="apps" element={<MerchantApps />} />
             <Route path="apps/:id" element={<MerchantAppDetail />} />
             <Route path="payments" element={<MerchantPayments />} />
@@ -164,6 +170,8 @@ const App = () => (
           >
             <Route index element={<IndividualOverview />} />
             <Route path="notifications" element={<NotificationsPage />} />
+            <Route path="support" element={<SupportTicketsPage track="individual" />} />
+            <Route path="support/:ticketId" element={<SupportTicketsPage track="individual" />} />
             <Route path="page" element={<MyPage />} />
             <Route path="payments" element={<IndividualPayments />} />
             <Route path="payouts" element={<IndividualPayouts />} />
@@ -226,6 +234,7 @@ const App = () => (
             <Route path="analytics/customers" element={<MerchantAnalyticsCustomers />} />
             <Route path="analytics/failures" element={<MerchantAnalyticsFailures />} />
             <Route path="settlements" element={<MerchantSettlements />} />
+            <Route path="support" element={<SupportTicketsPage track="merchant" />} />
           </Route>
           <Route
             path="/org/:orgId/settings"

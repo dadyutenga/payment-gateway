@@ -4,7 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import {
   Banknote, BarChart3, Boxes, Clock,
   CreditCard, Globe, KeyRound, LayoutDashboard, PieChart, Receipt, ScrollText,
-  Settings, Terminal, Truck, Users, Wallet, XCircle,
+  Settings, Terminal, Truck, Users, Wallet, XCircle, LifeBuoy,
 } from "lucide-react";
 import { signOut } from "@/lib/auth";
 import { listMyOrgs } from "@/lib/orgApi";
@@ -70,6 +70,10 @@ const NAV_GROUPS: SidebarNavGroup[] = [
   {
     id: "settings", label: "Settings", icon: Settings,
     items: [{ to: "/merchant/settings", label: "Settings", icon: Settings, match: orgMatch("settings") }],
+  },
+  {
+    id: "support", label: "Help", icon: LifeBuoy,
+    items: [{ to: "/merchant/support", label: "Support", icon: LifeBuoy }],
   },
 ];
 
