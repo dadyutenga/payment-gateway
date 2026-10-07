@@ -58,7 +58,7 @@ type Message struct {
 }
 
 type Attachment struct {
-	Key         string `json:"key"`
+	Key         string `json:"-"`
 	Name        string `json:"name"`
 	ContentType string `json:"content_type"`
 	Size        int64  `json:"size"`

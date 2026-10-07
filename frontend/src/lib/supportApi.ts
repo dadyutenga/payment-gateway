@@ -9,7 +9,7 @@ export type SupportTicket = {
   resolved_at?: string; sla_breach: boolean; messages?: SupportMessage[]; linked_record?: LinkedRecord;
 };
 export type SupportMessage = { id: string; author_type: "merchant" | "admin"; author_id: string; author_email?: string; body: string; attachments?: SupportAttachment[]; internal_note?: boolean; created_at: string };
-export type SupportAttachment = { key: string; name: string; content_type: string; size: number };
+export type SupportAttachment = { name: string; content_type: string; size: number };
 export type LinkedRecord = { id: string; kind: "order" | "withdrawal"; status: string; amount?: string; currency?: string; created_at: string };
 export type SupportList = { items: SupportTicket[]; total: number };
 

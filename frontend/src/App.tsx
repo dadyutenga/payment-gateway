@@ -235,6 +235,7 @@ const App = () => (
             <Route path="analytics/failures" element={<MerchantAnalyticsFailures />} />
             <Route path="settlements" element={<MerchantSettlements />} />
             <Route path="support" element={<SupportTicketsPage track="merchant" />} />
+            <Route path="support/:ticketId" element={<SupportTicketsPage track="merchant" />} />
           </Route>
           <Route
             path="/org/:orgId/settings"

@@ -534,6 +534,19 @@ func (s *Service) StoreAttachment(ctx context.Context, ticketID, filename, conte
 	if err := storage.ValidateUpload(contentType, filename, size, 5<<20, allowed); err != nil {
 		return Attachment{}, invalid(err.Error())
 	}
+	contentType = strings.ToLower(strings.TrimSpace(strings.SplitN(contentType, ";", 2)[0]))
+	validType := map[string]map[string]bool{
+		".pdf":  {"application/pdf": true},
+		".png":  {"image/png": true},
+		".jpg":  {"image/jpeg": true},
+		".jpeg": {"image/jpeg": true},
+		".webp": {"image/webp": true},
+		".txt":  {"text/plain": true},
+		".csv":  {"text/plain": true, "text/csv": true, "application/vnd.ms-excel": true},
+	}
+	if !validType[ext][contentType] {
+		return Attachment{}, invalid("file content does not match its file type")
+	}
 	key, err := storage.BuildKey("private/support", ticketID, uuid.NewString()+ext, allowed)
 	if err != nil {
 		return Attachment{}, err

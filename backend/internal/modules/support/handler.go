@@ -258,7 +258,22 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, admin bool) {
 		return
 	}
 	defer file.Close()
-	attachment, err := h.service.StoreAttachment(r.Context(), ticketID, filepath.Base(header.Filename), header.Header.Get("Content-Type"), header.Size, file)
+	if header.Size < 0 || header.Size > 5<<20 {
+		h.fail(w, http.StatusRequestEntityTooLarge, "attachment_too_large", "Attachment exceeds the 5 MB limit.")
+		return
+	}
+	sample := make([]byte, 512)
+	n, readErr := file.Read(sample)
+	if readErr != nil && readErr != io.EOF {
+		h.fail(w, http.StatusBadRequest, "invalid_attachment", "Unable to read attachment.")
+		return
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		h.fail(w, http.StatusBadRequest, "invalid_attachment", "Unable to read attachment.")
+		return
+	}
+	contentType := http.DetectContentType(sample[:n])
+	attachment, err := h.service.StoreAttachment(r.Context(), ticketID, filepath.Base(header.Filename), contentType, header.Size, file)
 	if err != nil {
 		h.mapError(w, err)
 		return

@@ -61,6 +61,19 @@ This is an external terminology change only. The shared internal
 `creator` are intentionally unchanged so merchant and individual records
 continue to use the same data model.
 
+## Internal support help desk
+
+The authenticated help desk is separate from the public tip-jar page at
+`/api/v1/c/{handle}/support`. Customers use
+`/api/v1/merchant/orgs/{orgID}/support/tickets` or the session-resolved
+`/api/v1/individual/account/support/tickets` endpoints to create and manage
+tickets. Admin queue and ticket actions are under
+`/api/v1/admin/support/tickets`. Customer ticket and attachment access is
+checked against the authenticated account; internal notes are excluded by
+the customer message query. Attachments are private objects streamed through
+authenticated endpoints. `SUPPORT_TICKET_SLA` controls the admin queue SLA
+threshold and defaults to `24h`.
+
 ## Commands
 
 ```
@@ -168,10 +181,9 @@ was last updated 2026-07-31 and the Go example 2026-04-21.
 KYC objects are private under `private/kyc/` and are streamed only after the
 existing organization or admin authorization check. Access is written to the
 audit trail. Branding objects are separate under `public/branding/`; public
-creator pages receive a five-minute presigned GET URL. No support-ticket
-attachment module exists in this checkout yet, so there is no attachment call
-site to migrate; it should use the same storage interface and a
-`private/support/` namespace when added.
+creator pages receive a five-minute presigned GET URL. Help-desk attachments
+are private under `private/support/` and use authenticated ticket/message
+authorization before streaming.
 
 Existing local files can be copied and verified with:
 
